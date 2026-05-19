@@ -77,7 +77,6 @@ struct ClaudeSessionsView: View {
                 }
             }
         }
-        .frame(minWidth: 800, minHeight: 480)
         .onAppear {
             reload()
             let t = Timer(timeInterval: 5, repeats: true) { _ in

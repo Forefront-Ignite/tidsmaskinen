@@ -9,6 +9,8 @@ final class AppState: ObservableObject {
     @Published var startedAt: Date = Date()
     @Published var lastError: String?
     @Published var signedInPrincipal: String?
+    @Published var selectedSection: SidebarItem = .weeklyReport
+    @Published var showSignIn: Bool = false
 
     let database: AppDatabase
     let monitor: ActivityMonitor

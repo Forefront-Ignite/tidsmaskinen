@@ -1,6 +1,36 @@
 import Foundation
 import CoreAudio
 import AppKit
+import Darwin
+
+enum MicDebug {
+    private static let url: URL = {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Tidsmaskinen", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("mic-debug.log", isDirectory: false)
+    }()
+    private static let formatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let queue = DispatchQueue(label: "mic-debug")
+
+    static func log(_ message: String) {
+        let line = "[\(formatter.string(from: Date()))] \(message)\n"
+        queue.sync {
+            guard let data = line.data(using: .utf8) else { return }
+            if let handle = try? FileHandle(forWritingTo: url) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            } else {
+                try? data.write(to: url, options: .atomic)
+            }
+        }
+    }
+}
 
 /// Polls the default audio input device to detect when the microphone is
 /// being used by any app (the same signal that drives the orange dot in the
@@ -27,6 +57,13 @@ final class MicMonitor {
     private var currentSessionStart: Date?
     private var currentSessionRecorderBundles: Set<String> = []
 
+    /// When `isRunningInput` briefly goes false mid-call (camera toggle, BT
+    /// headset switch, app audio-pipeline restart) we don't close the session
+    /// immediately — we wait for this grace window to expire with no recorder.
+    /// Polls happen every 5 s, so 12 s covers typical 2-cycle dropouts.
+    private let graceDuration: TimeInterval = 12.0
+    private var gracePeriodEnds: Date?
+
     // SwiftUI can instantiate the `@StateObject AppState` autoclosure more than
     // once during process startup, which historically produced duplicate
     // MicSession rows (one per parallel monitor). Track the active instance
@@ -37,8 +74,14 @@ final class MicMonitor {
     private static let voipBundleIDs: [String: String] = [
         "com.microsoft.teams":              "Teams",
         "com.microsoft.teams2":             "Teams",
+        // Teams 2.x captures audio inside helper subprocesses with their own
+        // bundle IDs — keep them mapped in case the parent-walk falls back.
+        "com.microsoft.teams2.modulehost":  "Teams",
+        "com.microsoft.teams2.helper":      "Teams",
+        "com.microsoft.teams2.notificationcenter": "Teams",
         "us.zoom.xos":                      "Zoom",
         "com.tinyspeck.slackmacgap":        "Slack",
+        "com.tinyspeck.slackmacgap.helper": "Slack",
         "com.cisco.webexmeetingsapp":       "Webex",
         "cisco-systems.spark":              "Webex",
         "com.webex.meetingmanager":         "Webex",
@@ -67,6 +110,8 @@ final class MicMonitor {
         guard timer == nil else { return }
         if let other = Self.active, other !== self { return }
         Self.active = self
+
+        MicDebug.log("MicMonitor.start() pollInterval=\(pollInterval)s")
 
         // On startup, close any orphan sessions from a prior crash/force-quit.
         try? database.closeOrphanedMicSessions(currentlyRunningSessionID: nil)
@@ -104,29 +149,52 @@ final class MicMonitor {
     }
 
     private func poll() {
-        let nowRecording = micIsRunningSomewhere()
-        if nowRecording && !isRecording {
-            beginSession()
-        } else if !nowRecording && isRecording {
-            endSession()
-        } else if nowRecording && isRecording {
-            // Mid-session recorder accumulation: a Slack→Teams handoff inside
-            // one continuous mic-on window should surface both apps.
-            for r in currentInputRecorders() {
-                if let bid = r.bundleID { currentSessionRecorderBundles.insert(bid) }
+        // Process-level signal is more accurate than `IsRunningSomewhere` on
+        // the device, which stays true while an app is releasing the device.
+        let recorders = currentInputRecorders()
+        let activeBundles = Set(recorders.compactMap { $0.bundleID })
+        let now = Date()
+
+        if !activeBundles.isEmpty {
+            // Some app is currently recording.
+            gracePeriodEnds = nil
+            if isRecording {
+                // Mid-session. If the new recorder set shares no apps with
+                // what we've accumulated so far, it's a different call (e.g.
+                // Slack ended within grace and Teams started just after) —
+                // close the current session and start fresh.
+                if currentSessionRecorderBundles.intersection(activeBundles).isEmpty {
+                    endSession()
+                    beginSession(with: recorders)
+                } else {
+                    for b in activeBundles { currentSessionRecorderBundles.insert(b) }
+                }
+            } else {
+                beginSession(with: recorders)
+                isRecording = true
+            }
+        } else {
+            // Mic is currently off according to process-level signal.
+            guard isRecording else { return }
+            if let graceEnd = gracePeriodEnds {
+                if now >= graceEnd {
+                    endSession()
+                    isRecording = false
+                    gracePeriodEnds = nil
+                }
+                // else: still inside the grace window — leave session open.
+            } else {
+                gracePeriodEnds = now.addingTimeInterval(graceDuration)
             }
         }
-        isRecording = nowRecording
     }
 
-    private func beginSession() {
+    private func beginSession(with recorders: [Recorder] = []) {
         let db = database
         let start = Date()
-        // Ask CoreAudio which processes are actively reading from the mic
-        // right now. If the list is empty (race / startup transition), fall
-        // back to the old "VoIP apps currently running" heuristic so we still
-        // capture some signal.
-        let recorders = currentInputRecorders()
+        // The caller passes the recorder set that triggered the transition;
+        // if it's empty (defensive path) we fall back to "currently running
+        // VoIP apps" so we at least tag something.
         let initialBundles = recorders.compactMap { $0.bundleID }
         let apps = initialBundles.isEmpty ? runningVoipBundleIDs() : initialBundles
         currentSessionRecorderBundles = Set(apps)
@@ -140,7 +208,7 @@ final class MicMonitor {
                                createdAt: start, updatedAt: start)
             onSessionStart?(s)
         } catch {
-            NSLog("MicMonitor: failed to start session: \(error)")
+            MicDebug.log("MicMonitor: failed to start session: \(error)")
         }
     }
 
@@ -158,7 +226,7 @@ final class MicMonitor {
                                createdAt: start, updatedAt: end)
             onSessionEnd?(s)
         } catch {
-            NSLog("MicMonitor: failed to end session: \(error)")
+            MicDebug.log("MicMonitor: failed to end session: \(error)")
         }
         currentSessionID = nil
         currentSessionStart = nil
@@ -248,30 +316,125 @@ final class MicMonitor {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         var dataSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
+        let sizeStatus = AudioObjectGetPropertyDataSize(
             AudioObjectID(kAudioObjectSystemObject),
-            &listAddress, 0, nil, &dataSize) == noErr, dataSize > 0 else { return [] }
+            &listAddress, 0, nil, &dataSize)
+        guard sizeStatus == noErr, dataSize > 0 else {
+            MicDebug.log("MicMonitor: ProcessObjectList size status=\(sizeStatus) dataSize=\(dataSize)")
+            return []
+        }
         let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
         var processes = [AudioObjectID](repeating: 0, count: count)
-        guard AudioObjectGetPropertyData(
+        let getStatus = AudioObjectGetPropertyData(
             AudioObjectID(kAudioObjectSystemObject),
-            &listAddress, 0, nil, &dataSize, &processes) == noErr else { return [] }
-
-        return processes.compactMap { procObj -> Recorder? in
-            guard processIsRunningInput(procObj) else { return nil }
-            let pid = processPID(procObj)
-            guard pid > 0 else { return nil }
-            // NSRunningApplication doesn't see non-GUI processes (daemons,
-            // command-line tools), so we fall back to a generic descriptor in
-            // that case. For our purposes (Teams, Slack, Zoom, etc.) the GUI
-            // resolution path is always taken.
-            if let running = NSRunningApplication(processIdentifier: pid) {
-                return Recorder(pid: pid,
-                                bundleID: running.bundleIdentifier?.lowercased(),
-                                appName: running.localizedName)
-            }
-            return Recorder(pid: pid, bundleID: nil, appName: "PID \(pid)")
+            &listAddress, 0, nil, &dataSize, &processes)
+        guard getStatus == noErr else {
+            MicDebug.log("MicMonitor: ProcessObjectList get status=\(getStatus)")
+            return []
         }
+        MicDebug.log("currentInputRecorders: scanning \(processes.count) procs")
+        var recorders: [Recorder] = []
+        for procObj in processes {
+            let pid = processPID(procObj)
+            let runIn = processIsRunningInput(procObj)
+            let runAny = processIsRunning(procObj)
+            let inputDevs = processInputDeviceIDs(procObj)
+            let allDevs = processDeviceIDs(procObj)
+            if runAny || runIn || !inputDevs.isEmpty || !allDevs.isEmpty {
+                let bidPreview = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? "?"
+                MicDebug.log("  pid=\(pid) bid=\(bidPreview) isRunning=\(runAny) isRunningInput=\(runIn) inputDevs=\(inputDevs) allDevs=\(allDevs)")
+            }
+            // Only treat a process as recording when `IsRunningInput` is true.
+            // The looser `IsRunning + inputDevs` heuristic produced stale
+            // signal during device release (an app stops recording but takes
+            // a few seconds to free the device), which merged consecutive
+            // calls into one session.
+            guard runIn, pid > 0 else { continue }
+            // Many apps capture audio in a helper subprocess (Slack, Teams,
+            // Chrome, Zoom). NSRunningApplication only resolves GUI apps, so
+            // we walk up the parent chain to find the owning .app.
+            if let owner = Self.resolveOwningApp(forPID: pid) {
+                recorders.append(Recorder(pid: pid,
+                                          bundleID: owner.bundleIdentifier?.lowercased(),
+                                          appName: owner.localizedName))
+            } else {
+                recorders.append(Recorder(pid: pid, bundleID: nil, appName: "PID \(pid)"))
+            }
+        }
+        return recorders
+    }
+
+    /// Walks up the parent-PID chain looking for the user-facing owning
+    /// application. Audio capture often happens in a helper subprocess (Slack,
+    /// Teams modulehost, Chrome helpers, Zoom etc.). Each helper may register
+    /// as its own NSRunningApplication with `activationPolicy = .prohibited`
+    /// and a sub-identifier bundle ID (e.g. `com.microsoft.teams2.modulehost`),
+    /// so we don't want to stop at the first match — we want the regular
+    /// (dock-visible) parent app.
+    ///
+    /// Strategy: walk up to maxDepth ancestors, remember the first resolvable
+    /// `NSRunningApplication` we see, and prefer one whose activationPolicy is
+    /// `.regular` (foreground app) or `.accessory` (menubar agent). Fall back
+    /// to the first resolved one if no regular ancestor is found.
+    static func resolveOwningApp(forPID pid: pid_t, maxDepth: Int = 8) -> NSRunningApplication? {
+        var current = pid
+        var firstResolved: NSRunningApplication?
+        for _ in 0..<maxDepth {
+            if let app = NSRunningApplication(processIdentifier: current) {
+                if firstResolved == nil { firstResolved = app }
+                if app.activationPolicy != .prohibited { return app }
+            }
+            let parent = parentPID(of: current)
+            if parent <= 1 || parent == current { break }
+            current = parent
+        }
+        return firstResolved
+    }
+
+    private static func parentPID(of pid: pid_t) -> pid_t {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        let status = mib.withUnsafeMutableBufferPointer { mibPtr -> Int32 in
+            sysctl(mibPtr.baseAddress, UInt32(mibPtr.count), &info, &size, nil, 0)
+        }
+        guard status == 0 else { return 0 }
+        return info.kp_eproc.e_ppid
+    }
+
+    private func processIsRunning(_ procObj: AudioObjectID) -> Bool {
+        var value: UInt32 = 0
+        var size: UInt32 = UInt32(MemoryLayout<UInt32>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyIsRunning,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(procObj, &address, 0, nil, &size, &value) == noErr else { return false }
+        return value != 0
+    }
+
+    /// IDs of input-capable devices that this process currently has open.
+    private func processInputDeviceIDs(_ procObj: AudioObjectID) -> [AudioDeviceID] {
+        return processDevicesForScope(procObj, scope: kAudioObjectPropertyScopeInput)
+    }
+
+    /// IDs of every device this process has open across all scopes (input/output/global).
+    private func processDeviceIDs(_ procObj: AudioObjectID) -> [AudioDeviceID] {
+        return processDevicesForScope(procObj, scope: kAudioObjectPropertyScopeGlobal)
+    }
+
+    private func processDevicesForScope(_ procObj: AudioObjectID, scope: AudioObjectPropertyScope) -> [AudioDeviceID] {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyDevices,
+            mScope: scope,
+            mElement: kAudioObjectPropertyElementMain)
+        var dataSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(procObj, &address, 0, nil, &dataSize) == noErr,
+              dataSize > 0 else { return [] }
+        let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
+        var devices = [AudioDeviceID](repeating: 0, count: count)
+        guard AudioObjectGetPropertyData(procObj, &address, 0, nil, &dataSize, &devices) == noErr else { return [] }
+        return devices
     }
 
     private func processIsRunningInput(_ procObj: AudioObjectID) -> Bool {

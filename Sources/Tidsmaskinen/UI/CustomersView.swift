@@ -16,7 +16,6 @@ struct CustomersView: View {
             customerDetail
         }
         .navigationTitle("Customers & Rules")
-        .frame(minWidth: 760, minHeight: 480)
         .onAppear { reload() }
         .alert("Database error", isPresented: errorBinding) {
             Button("OK") { loadError = nil }

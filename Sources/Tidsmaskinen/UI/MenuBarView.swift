@@ -186,8 +186,8 @@ struct MenuBarView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     Button("Sign in") {
-                        openWindow(id: WindowID.signIn)
-                        NSApp.activate(ignoringOtherApps: true)
+                        state.showSignIn = true
+                        openMain()
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
@@ -196,8 +196,7 @@ struct MenuBarView: View {
             if state.isSignedIn {
                 HStack(spacing: 6) {
                     Button {
-                        openWindow(id: WindowID.calendar)
-                        NSApp.activate(ignoringOtherApps: true)
+                        open(.calendar)
                     } label: {
                         Label("Calendar", systemImage: "calendar")
                     }
@@ -305,16 +304,16 @@ struct MenuBarView: View {
             spacing: 6
         ) {
             actionTile("Weekly Report", systemImage: "chart.bar.doc.horizontal.fill", tint: .blue) {
-                open(WindowID.weeklyReport)
+                open(.weeklyReport)
             }
             actionTile("Customers", systemImage: "person.2.fill", tint: .purple) {
-                open(WindowID.customers)
+                open(.customers)
             }
             actionTile("Timeline", systemImage: "calendar.day.timeline.left", tint: .orange) {
-                open(WindowID.timeline)
+                open(.timeline)
             }
             actionTile("Claude Sessions", systemImage: "sparkles", tint: .pink) {
-                open(WindowID.claudeSessions)
+                open(.claudeSessions)
             }
         }
     }
@@ -349,9 +348,9 @@ struct MenuBarView: View {
 
     private var footer: some View {
         HStack(spacing: 2) {
-            footerIcon("Raw samples", systemImage: "list.bullet.rectangle") { open(WindowID.samples) }
-            footerIcon("Diagnostics", systemImage: "stethoscope") { open(WindowID.diagnostics) }
-            footerIcon("Settings", systemImage: "gearshape.fill") { open(WindowID.settings) }
+            footerIcon("Raw samples", systemImage: "list.bullet.rectangle") { open(.samples) }
+            footerIcon("Diagnostics", systemImage: "stethoscope") { open(.diagnostics) }
+            footerIcon("Settings", systemImage: "gearshape.fill") { open(.settings) }
             Spacer()
             Button {
                 NSApp.terminate(nil)
@@ -394,8 +393,13 @@ struct MenuBarView: View {
             .fill(.quaternary.opacity(0.6))
     }
 
-    private func open(_ id: String) {
-        openWindow(id: id)
+    private func open(_ section: SidebarItem) {
+        state.selectedSection = section
+        openMain()
+    }
+
+    private func openMain() {
+        openWindow(id: WindowID.main)
         NSApp.activate(ignoringOtherApps: true)
     }
 

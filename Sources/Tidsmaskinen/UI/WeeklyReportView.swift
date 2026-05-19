@@ -30,7 +30,6 @@ struct WeeklyReportView: View {
                 Spacer()
             }
         }
-        .frame(minWidth: 820, minHeight: 460)
         .onAppear { reload() }
         .onChange(of: weekStart) { _, _ in reload() }
         .onChange(of: state.sampleCount) { _, _ in reload() }

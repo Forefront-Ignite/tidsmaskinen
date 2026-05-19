@@ -40,6 +40,5 @@ struct CustomersWindowView: View {
                 .tabItem { Label(Tab.manage.label, systemImage: Tab.manage.systemImage) }
                 .tag(Tab.manage)
         }
-        .frame(minWidth: 760, minHeight: 520)
     }
 }

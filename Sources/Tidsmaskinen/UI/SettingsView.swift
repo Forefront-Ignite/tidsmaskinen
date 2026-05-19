@@ -115,7 +115,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 600, height: 640)
+        .frame(minWidth: 600, minHeight: 640)
         .padding(.horizontal, 4)
     }
 

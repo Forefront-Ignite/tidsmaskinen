@@ -99,7 +99,6 @@ struct TimelineView: View {
                 }
             }
         }
-        .frame(minWidth: 1000, minHeight: 540)
         .onAppear {
             reload()
             let t = Timer(timeInterval: 8, repeats: true) { _ in

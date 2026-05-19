@@ -111,7 +111,6 @@ struct CalendarView: View {
                 }
             }
         }
-        .frame(minWidth: 820, minHeight: 480)
         .onAppear {
             reload()
             let t = Timer(timeInterval: 5, repeats: true) { _ in
