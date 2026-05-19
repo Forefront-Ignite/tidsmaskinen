@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:tidsmaskinen}",
+            "name": "Debug Tidsmaskinen",
+            "target": "Tidsmaskinen",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug Tidsmaskinen"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:tidsmaskinen}",
+            "name": "Release Tidsmaskinen",
+            "target": "Tidsmaskinen",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release Tidsmaskinen"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:tidsmaskinen}",
+            "name": "Debug tm-hook",
+            "target": "tm-hook",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug tm-hook"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:tidsmaskinen}",
+            "name": "Release tm-hook",
+            "target": "tm-hook",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release tm-hook"
+        }
+    ]
+}

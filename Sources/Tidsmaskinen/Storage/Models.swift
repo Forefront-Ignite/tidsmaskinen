@@ -1,0 +1,221 @@
+import Foundation
+import GRDB
+
+struct Customer: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
+    var id: String
+    var name: String
+    var color: String?
+    var createdAt: Date
+
+    static let databaseTableName = "customers"
+
+    enum Columns {
+        static let id = Column(CodingKeys.id)
+        static let name = Column(CodingKeys.name)
+        static let color = Column(CodingKeys.color)
+        static let createdAt = Column(CodingKeys.createdAt)
+    }
+}
+
+struct Project: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
+    var id: String
+    var customerID: String
+    var name: String
+    var color: String?
+    var createdAt: Date
+
+    static let databaseTableName = "projects"
+
+    enum Columns {
+        static let id = Column(CodingKeys.id)
+        static let customerID = Column(CodingKeys.customerID)
+        static let name = Column(CodingKeys.name)
+        static let color = Column(CodingKeys.color)
+    }
+}
+
+struct Rule: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
+    var id: String
+    var customerID: String
+    var projectID: String?
+    var kind: Kind
+    var pattern: String
+    var priority: Int
+    var createdAt: Date
+
+    enum Kind: String, Codable, CaseIterable, Identifiable, Hashable {
+        case gitRemoteHost
+        case gitRepoSlug
+        case urlHost
+        case urlPath
+        case windowTitle
+        case appBundleID
+        case emailDomain
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .gitRemoteHost: return "Git remote host"
+            case .gitRepoSlug:   return "Git repo (owner/name)"
+            case .urlHost:       return "Browser URL host"
+            case .urlPath:       return "Browser URL path"
+            case .windowTitle:   return "Window title contains"
+            case .appBundleID:   return "App bundle ID"
+            case .emailDomain:   return "Email domain (meetings)"
+            }
+        }
+
+        var placeholder: String {
+            switch self {
+            case .gitRemoteHost: return "github.com"
+            case .gitRepoSlug:   return "forefront/*"
+            case .urlHost:       return "*.acme.com"
+            case .urlPath:       return "github.com/forefront/*"
+            case .windowTitle:   return "Acme staging"
+            case .appBundleID:   return "com.acme.app"
+            case .emailDomain:   return "acme.com"
+            }
+        }
+
+        var supportsGlob: Bool {
+            switch self {
+            case .windowTitle, .emailDomain: return false
+            default: return true
+            }
+        }
+    }
+
+    static let databaseTableName = "rules"
+
+    enum Columns {
+        static let id = Column(CodingKeys.id)
+        static let customerID = Column(CodingKeys.customerID)
+        static let projectID = Column(CodingKeys.projectID)
+        static let kind = Column(CodingKeys.kind)
+        static let pattern = Column(CodingKeys.pattern)
+        static let priority = Column(CodingKeys.priority)
+    }
+}
+
+struct ClaudeSession: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
+    var id: String              // session_id from the hook payload
+    var cwd: String?
+    var transcriptPath: String?
+    var gitRepoPath: String?
+    var gitRemoteURL: String?
+    var startedAt: Date
+    var endedAt: Date?
+    var lastActivityAt: Date?
+    var activeSeconds: Double   // accumulated active time, idle gaps clamped
+    var promptCount: Int
+    var customerID: String?     // optional manual override
+    var projectID: String?
+    var createdAt: Date
+    var updatedAt: Date
+
+    static let databaseTableName = "claude_sessions"
+
+    enum Columns {
+        static let id = Column(CodingKeys.id)
+        static let startedAt = Column(CodingKeys.startedAt)
+        static let endedAt = Column(CodingKeys.endedAt)
+        static let lastActivityAt = Column(CodingKeys.lastActivityAt)
+        static let activeSeconds = Column(CodingKeys.activeSeconds)
+        static let cwd = Column(CodingKeys.cwd)
+        static let gitRepoPath = Column(CodingKeys.gitRepoPath)
+        static let gitRemoteURL = Column(CodingKeys.gitRemoteURL)
+        static let customerID = Column(CodingKeys.customerID)
+        static let projectID = Column(CodingKeys.projectID)
+    }
+
+    /// Wall-clock duration between SessionStart and SessionEnd. Informational; not used for billing.
+    var lifetimeSeconds: TimeInterval {
+        max(0, (endedAt ?? Date()).timeIntervalSince(startedAt))
+    }
+
+    /// Active duration counting current session if still active, with idle gap clamped at threshold.
+    func amortizedActiveSeconds(now: Date = Date(), idleThresholdSeconds: TimeInterval) -> Double {
+        guard endedAt == nil, let last = lastActivityAt else { return activeSeconds }
+        let trailing = min(max(0, now.timeIntervalSince(last)), idleThresholdSeconds)
+        return activeSeconds + trailing
+    }
+
+    func isActive(now: Date = Date(), idleThresholdSeconds: TimeInterval) -> Bool {
+        guard endedAt == nil, let last = lastActivityAt else { return false }
+        return now.timeIntervalSince(last) < idleThresholdSeconds
+    }
+}
+
+struct CalendarEvent: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
+    var id: String                  // Microsoft Graph event id
+    var iCalUID: String?
+    var subject: String
+    var bodyPreview: String?
+    var startAt: Date
+    var endAt: Date
+    var isAllDay: Bool
+    var organizerEmail: String?
+    var organizerName: String?
+    var rsvpStatus: String          // accepted | tentativelyAccepted | declined | notResponded | none | organizer
+    var isOnlineMeeting: Bool
+    var onlineMeetingProvider: String?
+    var attendeeDomainsCSV: String?  // distinct non-self domains, comma-separated
+    var location: String?
+    var verifiedAttended: Bool
+    var customerID: String?         // optional manual override
+    var projectID: String?
+    var createdAt: Date
+    var updatedAt: Date
+
+    static let databaseTableName = "calendar_events"
+
+    enum Columns {
+        static let id = Column(CodingKeys.id)
+        static let startAt = Column(CodingKeys.startAt)
+        static let endAt = Column(CodingKeys.endAt)
+        static let rsvpStatus = Column(CodingKeys.rsvpStatus)
+        static let attendeeDomainsCSV = Column(CodingKeys.attendeeDomainsCSV)
+        static let customerID = Column(CodingKeys.customerID)
+        static let projectID = Column(CodingKeys.projectID)
+    }
+
+    var attendeeDomains: [String] {
+        attendeeDomainsCSV?.split(separator: ",").map(String.init) ?? []
+    }
+
+    var durationMinutes: Int {
+        max(0, Int(endAt.timeIntervalSince(startAt) / 60))
+    }
+}
+
+struct ActivitySample: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable {
+    var id: Int64?
+    var capturedAt: Date
+    var appBundleID: String?
+    var appName: String?
+    var windowTitle: String?
+    var chromeURL: String?
+    var chromeHost: String?
+    var gitRepoPath: String?
+    var gitRemoteURL: String?
+    var isIdle: Bool
+    var customerID: String?      // manual override from timeline view
+    var projectID: String?
+
+    static let databaseTableName = "activity_samples"
+
+    enum Columns {
+        static let id = Column(CodingKeys.id)
+        static let capturedAt = Column(CodingKeys.capturedAt)
+        static let appBundleID = Column(CodingKeys.appBundleID)
+        static let appName = Column(CodingKeys.appName)
+        static let isIdle = Column(CodingKeys.isIdle)
+        static let customerID = Column(CodingKeys.customerID)
+        static let projectID = Column(CodingKeys.projectID)
+    }
+
+    mutating func didInsert(_ inserted: InsertionSuccess) {
+        id = inserted.rowID
+    }
+}
