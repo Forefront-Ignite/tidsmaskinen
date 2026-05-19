@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "Tidsmaskinen",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("26.0")],
     products: [
         .executable(name: "Tidsmaskinen", targets: ["Tidsmaskinen"]),
         .executable(name: "tm-hook", targets: ["tm-hook"])

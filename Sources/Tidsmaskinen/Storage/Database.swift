@@ -135,6 +135,20 @@ struct AppDatabase {
                 t.add(column: "projectID", .text)
             }
         }
+        migrator.registerMigration("v8_mic_sessions") { db in
+            try db.create(table: "mic_sessions") { t in
+                t.primaryKey("id", .text)
+                t.column("startedAt", .datetime).notNull()
+                t.column("endedAt", .datetime)
+                t.column("voipAppsCSV", .text)
+                t.column("participant", .text)
+                t.column("customerID", .text)
+                t.column("projectID", .text)
+                t.column("createdAt", .datetime).notNull()
+                t.column("updatedAt", .datetime).notNull()
+            }
+            try db.create(index: "idx_mic_sessions_startedAt", on: "mic_sessions", columns: ["startedAt"])
+        }
         try migrator.migrate(dbQueue)
     }
 
@@ -191,6 +205,103 @@ struct AppDatabase {
                 .updateAll(db,
                            ClaudeSession.Columns.customerID.set(to: customerID),
                            ClaudeSession.Columns.projectID.set(to: projectID))
+        }
+    }
+
+    // MARK: - Mic sessions
+
+    /// Inserts a new open mic session (endedAt = nil). Returns the new id.
+    @discardableResult
+    func startMicSession(at startedAt: Date, voipApps: [String]) throws -> String {
+        let id = UUID().uuidString
+        let csv = voipApps.isEmpty ? nil : voipApps.joined(separator: ",")
+        let now = Date()
+        var session = MicSession(
+            id: id,
+            startedAt: startedAt,
+            endedAt: nil,
+            voipAppsCSV: csv,
+            participant: nil,
+            customerID: nil,
+            projectID: nil,
+            createdAt: now,
+            updatedAt: now
+        )
+        try dbQueue.write { db in
+            try session.insert(db)
+        }
+        return id
+    }
+
+    func endMicSession(id: String, endedAt: Date, participant: String?, voipApps: [String]?) throws {
+        _ = try dbQueue.write { db in
+            if let voipApps {
+                let csv = voipApps.isEmpty ? nil : voipApps.joined(separator: ",")
+                try MicSession
+                    .filter(MicSession.Columns.id == id)
+                    .updateAll(db,
+                               MicSession.Columns.endedAt.set(to: endedAt),
+                               MicSession.Columns.participant.set(to: participant),
+                               MicSession.Columns.voipAppsCSV.set(to: csv),
+                               MicSession.Columns.updatedAt.set(to: Date()))
+            } else {
+                try MicSession
+                    .filter(MicSession.Columns.id == id)
+                    .updateAll(db,
+                               MicSession.Columns.endedAt.set(to: endedAt),
+                               MicSession.Columns.participant.set(to: participant),
+                               MicSession.Columns.updatedAt.set(to: Date()))
+            }
+        }
+    }
+
+    /// Closes any sessions left open from a previous run (app crash, force-quit).
+    /// Sets their endedAt to startedAt + 1s so they don't show as ongoing forever.
+    func closeOrphanedMicSessions(currentlyRunningSessionID: String?) throws {
+        try dbQueue.write { db in
+            let openSessions = try MicSession
+                .filter(MicSession.Columns.endedAt == nil)
+                .fetchAll(db)
+            for var s in openSessions {
+                if let current = currentlyRunningSessionID, s.id == current { continue }
+                s.endedAt = s.startedAt.addingTimeInterval(1)
+                s.updatedAt = Date()
+                try s.update(db)
+            }
+        }
+    }
+
+    func micSessions(in interval: DateInterval, minDurationSeconds: Double = 60) throws -> [MicSession] {
+        try dbQueue.read { db in
+            try MicSession
+                .filter(MicSession.Columns.startedAt >= interval.start
+                        && MicSession.Columns.startedAt < interval.end)
+                .order(MicSession.Columns.startedAt.desc)
+                .fetchAll(db)
+                .filter { ($0.durationSeconds ?? 0) >= minDurationSeconds || $0.endedAt == nil }
+        }
+    }
+
+    func setMicSessionAttribution(id: String, customerID: String?, projectID: String?) throws {
+        _ = try dbQueue.write { db in
+            try MicSession
+                .filter(MicSession.Columns.id == id)
+                .updateAll(db,
+                           MicSession.Columns.customerID.set(to: customerID),
+                           MicSession.Columns.projectID.set(to: projectID),
+                           MicSession.Columns.updatedAt.set(to: Date()))
+        }
+    }
+
+    /// Find frontmost-app + window-title samples that overlap a time window —
+    /// used to enrich a mic session with a participant guess from Teams titles.
+    func samplesOverlapping(start: Date, end: Date) throws -> [ActivitySample] {
+        try dbQueue.read { db in
+            try ActivitySample
+                .filter(ActivitySample.Columns.capturedAt >= start
+                        && ActivitySample.Columns.capturedAt <= end)
+                .order(ActivitySample.Columns.capturedAt.asc)
+                .fetchAll(db)
         }
     }
 

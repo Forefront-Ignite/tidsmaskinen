@@ -79,12 +79,13 @@ struct DiscoverView: View {
                     }
                 }
                 .disabled(isSuggesting || unassignedSignals.isEmpty)
-                Picker("Range", selection: $rangeDays) {
+                Picker("", selection: $rangeDays) {
                     Text("7 days").tag(7)
                     Text("14 days").tag(14)
                     Text("30 days").tag(30)
                 }
                 .pickerStyle(.segmented)
+                .labelsHidden()
                 .frame(width: 240)
             }
             if let err = suggestionError {

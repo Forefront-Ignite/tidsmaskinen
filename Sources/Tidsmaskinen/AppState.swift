@@ -16,6 +16,7 @@ final class AppState: ObservableObject {
     let calendarSync: CalendarSync
     let hookIngester: HookIngester
     let claudeAPI: ClaudeAPI
+    let micMonitor: MicMonitor
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -30,6 +31,7 @@ final class AppState: ObservableObject {
         self.calendarSync = CalendarSync(database: database, client: graph)
         self.hookIngester = HookIngester(database: database)
         self.claudeAPI = ClaudeAPI()
+        self.micMonitor = MicMonitor(database: database)
 
         // Forward nested ObservableObject changes so views observing AppState
         // (e.g. MenuBarView, CalendarView) repaint when sync state changes.
@@ -50,6 +52,13 @@ final class AppState: ObservableObject {
         }
         self.monitor.start()
         self.hookIngester.start()
+        self.micMonitor.onSessionStart = { [weak self] _ in
+            Task { @MainActor in self?.objectWillChange.send() }
+        }
+        self.micMonitor.onSessionEnd = { [weak self] _ in
+            Task { @MainActor in self?.objectWillChange.send() }
+        }
+        self.micMonitor.start()
 
         // Restore signed-in identity (best-effort, non-blocking).
         Task { @MainActor in

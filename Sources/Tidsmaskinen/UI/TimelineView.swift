@@ -21,8 +21,10 @@ struct TimelineView: View {
 
     private let labelColumnWidth: CGFloat = 124
     private let rulerHeight: CGFloat = 26
-    private let rowHeight: CGFloat = 60
+    private let baseRowHeight: CGFloat = 60
     private let activeBlockHeight: CGFloat = 48
+    private let compactLaneHeight: CGFloat = 32
+    private let lanePadding: CGFloat = 4
     private let idleBarHeight: CGFloat = 8
     private let rowSpacing: CGFloat = 8
 
@@ -63,26 +65,25 @@ struct TimelineView: View {
 
                 HStack(alignment: .top, spacing: 0) {
                     labelColumn
-                        .frame(width: labelColumnWidth)
-                        .padding(.leading, 12)
-                        .padding(.top, 8)
+                        .frame(width: labelColumnWidth + 12, alignment: .leading)
 
-                    ScrollView([.horizontal, .vertical]) {
+                    ScrollView(.horizontal) {
                         VStack(alignment: .leading, spacing: rowSpacing) {
                             timeRuler(width: contentWidth)
-                                .frame(height: rulerHeight)
+                                .frame(width: contentWidth, height: rulerHeight)
                             ForEach(allTracks, id: \.self) { track in
                                 trackRow(track, blocks: blocks(for: track), width: contentWidth)
-                                    .frame(height: rowHeight)
+                                    .frame(width: contentWidth, height: rowHeight(for: track))
                             }
                         }
-                        .padding(.horizontal, 12)
                         .padding(.top, 8)
+                        .padding(.trailing, 12)
                         .padding(.bottom, 12)
                     }
+                    .scrollIndicators(.hidden)
                     .background(
                         TimelineScrollZoom { deltaY in
-                            let factor = pow(1.0015, deltaY)
+                            let factor = pow(1.01, deltaY)
                             zoom = max(minZoom, min(maxZoom, zoom * factor))
                         }
                     )
@@ -197,15 +198,69 @@ struct TimelineView: View {
             // Align with time ruler height.
             Color.clear.frame(height: rulerHeight)
             ForEach(allTracks, id: \.self) { track in
-                trackLabel(track).frame(height: rowHeight)
+                trackLabel(track)
+                    .frame(height: rowHeight(for: track), alignment: .top)
             }
         }
+        .padding(.leading, 12)
+        .padding(.top, 8)
+    }
+
+    // MARK: - Lane assignment (vertical stacking for overlapping blocks)
+
+    /// A block paired with the lane index it should render in.
+    private struct LanedBlock: Identifiable {
+        let block: TimelineBlock
+        let lane: Int
+        var id: String { block.id }
+    }
+
+    /// Greedy lane assignment: each block goes into the lowest-numbered lane
+    /// whose previous block has already ended.
+    private func assignLanes(_ blocks: [TimelineBlock]) -> [LanedBlock] {
+        let sorted = blocks.sorted { $0.startedAt < $1.startedAt }
+        var laneEnds: [Date] = []
+        var result: [LanedBlock] = []
+        for block in sorted {
+            var assigned: Int?
+            for i in 0..<laneEnds.count where laneEnds[i] <= block.startedAt {
+                assigned = i
+                laneEnds[i] = block.endedAt
+                break
+            }
+            if let lane = assigned {
+                result.append(LanedBlock(block: block, lane: lane))
+            } else {
+                result.append(LanedBlock(block: block, lane: laneEnds.count))
+                laneEnds.append(block.endedAt)
+            }
+        }
+        return result
+    }
+
+    private func laneCount(for track: TimelineBlock.Track) -> Int {
+        let active = blocks(for: track).filter { !$0.isIdle }
+        return (assignLanes(active).map(\.lane).max() ?? -1) + 1
+    }
+
+    /// Per-track row height. Single-lane tracks keep the original 60pt row;
+    /// tracks with overlapping blocks grow vertically to fit each lane.
+    private func rowHeight(for track: TimelineBlock.Track) -> CGFloat {
+        let lanes = laneCount(for: track)
+        if lanes <= 1 { return baseRowHeight }
+        let stackedHeight = lanePadding
+            + CGFloat(lanes) * compactLaneHeight
+            + CGFloat(max(0, lanes - 1)) * lanePadding
+            + lanePadding
+            + idleBarHeight
+        return max(baseRowHeight, stackedHeight)
     }
 
     @ViewBuilder
     private func trackLabel(_ track: TimelineBlock.Track) -> some View {
         let blocks = blocks(for: track)
         let total = totalActiveDuration(blocks)
+        let activeCount = blocks.filter { !$0.isIdle }.count
         HStack(spacing: 8) {
             ZStack {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
@@ -222,6 +277,9 @@ struct TimelineView: View {
                     Text(durationLabel(total))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
+                    Text("\(activeCount) block\(activeCount == 1 ? "" : "s")")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
                 } else {
                     Text("no activity")
                         .font(.caption2)
@@ -339,24 +397,37 @@ struct TimelineView: View {
         let totalSeconds = end.timeIntervalSince(start)
         let active = blocks.filter { !$0.isIdle }
         let idle = blocks.filter { $0.isIdle }
+        let laned = assignLanes(active)
+        let lanes = (laned.map(\.lane).max() ?? -1) + 1
+        let rowH = rowHeight(for: track)
+        let stacked = lanes > 1
+        let blockH: CGFloat = stacked ? compactLaneHeight : activeBlockHeight
 
         ZStack(alignment: .topLeading) {
             // Row background + vertical hour grid lines.
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(.quaternary.opacity(0.5))
-                hourGridLines(width: width, height: rowHeight)
+                hourGridLines(width: width, height: rowH)
             }
-            .frame(width: width, height: rowHeight)
+            .frame(width: width, height: rowH)
 
             // Idle: thin bar pinned to the bottom of the row.
             ForEach(idle) { block in
-                idleBar(block, contentWidth: width, totalSeconds: totalSeconds, start: start)
+                idleBar(block, contentWidth: width, totalSeconds: totalSeconds, start: start, rowH: rowH)
             }
 
-            // Active blocks centered vertically.
-            ForEach(active) { block in
-                blockRect(block, contentWidth: width, totalSeconds: totalSeconds, start: start)
+            // Active blocks — vertically centered if a single lane, otherwise stacked.
+            ForEach(laned) { laned in
+                let y: CGFloat = stacked
+                    ? lanePadding + CGFloat(laned.lane) * (compactLaneHeight + lanePadding)
+                    : (rowH - activeBlockHeight) / 2
+                blockRect(laned.block,
+                          contentWidth: width,
+                          totalSeconds: totalSeconds,
+                          start: start,
+                          yPos: y,
+                          height: blockH)
             }
 
             // Now indicator (only on today, only inside visible range).
@@ -364,7 +435,7 @@ struct TimelineView: View {
                 let x = xPosition(for: now, width: width, start: start, totalSeconds: totalSeconds)
                 Rectangle()
                     .fill(Color.red.opacity(0.85))
-                    .frame(width: 1.5, height: rowHeight)
+                    .frame(width: 1.5, height: rowH)
                     .offset(x: x)
                 Circle()
                     .fill(Color.red)
@@ -372,7 +443,7 @@ struct TimelineView: View {
                     .offset(x: x - 3, y: -3)
             }
         }
-        .frame(width: width, height: rowHeight)
+        .frame(width: width, height: rowH)
     }
 
     @ViewBuilder
@@ -407,14 +478,15 @@ struct TimelineView: View {
     private func idleBar(_ block: TimelineBlock,
                          contentWidth: CGFloat,
                          totalSeconds: TimeInterval,
-                         start: Date) -> some View {
+                         start: Date,
+                         rowH: CGFloat) -> some View {
         let x = xPosition(for: block.startedAt, width: contentWidth, start: start, totalSeconds: totalSeconds)
         let endX = xPosition(for: block.endedAt, width: contentWidth, start: start, totalSeconds: totalSeconds)
         let w = max(2, endX - x)
         RoundedRectangle(cornerRadius: 3, style: .continuous)
             .fill(Color.secondary.opacity(0.35))
             .frame(width: w, height: idleBarHeight)
-            .offset(x: x, y: rowHeight - idleBarHeight - 4)
+            .offset(x: x, y: rowH - idleBarHeight - 4)
             .help(idleTooltip(for: block))
     }
 
@@ -422,35 +494,33 @@ struct TimelineView: View {
     private func blockRect(_ block: TimelineBlock,
                            contentWidth: CGFloat,
                            totalSeconds: TimeInterval,
-                           start: Date) -> some View {
+                           start: Date,
+                           yPos: CGFloat,
+                           height: CGFloat) -> some View {
         let x = xPosition(for: block.startedAt, width: contentWidth, start: start, totalSeconds: totalSeconds)
         let endX = xPosition(for: block.endedAt, width: contentWidth, start: start, totalSeconds: totalSeconds)
         let w = max(3, endX - x)
         let tint = color(for: block)
-        let yOffset = (rowHeight - activeBlockHeight) / 2
 
-        Button {
-            selectedBlock = block
-        } label: {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(LinearGradient(
+                    colors: [tint.opacity(0.95), tint.opacity(0.75)],
+                    startPoint: .top, endPoint: .bottom))
             blockContent(block, width: w, tint: tint)
-                .frame(width: w, height: activeBlockHeight, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(LinearGradient(
-                            colors: [tint.opacity(0.95), tint.opacity(0.75)],
-                            startPoint: .top, endPoint: .bottom))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .strokeBorder(
-                            block.hasManualOverride ? Color.white.opacity(0.85) : tint.opacity(0.55),
-                            lineWidth: block.hasManualOverride ? 1.5 : 0.5)
-                )
-                .shadow(color: tint.opacity(0.18), radius: 1.5, x: 0, y: 0.5)
         }
-        .buttonStyle(.plain)
+        .frame(width: w, height: height)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(
+                    block.hasManualOverride ? Color.white.opacity(0.85) : tint.opacity(0.55),
+                    lineWidth: block.hasManualOverride ? 1.5 : 0.5)
+        )
+        .shadow(color: tint.opacity(0.18), radius: 1.5, x: 0, y: 0.5)
+        .contentShape(Rectangle())
+        .onTapGesture { selectedBlock = block }
         .help(tooltip(for: block))
-        .offset(x: x, y: yOffset)
+        .offset(x: x, y: yPos)
         .popover(isPresented: bindingForPopover(block)) {
             ReattributePopover(block: block,
                                customers: customers,

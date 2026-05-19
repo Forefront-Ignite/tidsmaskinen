@@ -219,3 +219,37 @@ struct ActivitySample: Codable, FetchableRecord, MutablePersistableRecord, Ident
         id = inserted.rowID
     }
 }
+
+struct MicSession: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
+    var id: String
+    var startedAt: Date
+    var endedAt: Date?
+    var voipAppsCSV: String?
+    var participant: String?
+    var customerID: String?
+    var projectID: String?
+    var createdAt: Date
+    var updatedAt: Date
+
+    static let databaseTableName = "mic_sessions"
+
+    enum Columns {
+        static let id = Column(CodingKeys.id)
+        static let startedAt = Column(CodingKeys.startedAt)
+        static let endedAt = Column(CodingKeys.endedAt)
+        static let voipAppsCSV = Column(CodingKeys.voipAppsCSV)
+        static let participant = Column(CodingKeys.participant)
+        static let customerID = Column(CodingKeys.customerID)
+        static let projectID = Column(CodingKeys.projectID)
+        static let updatedAt = Column(CodingKeys.updatedAt)
+    }
+
+    var voipApps: [String] {
+        voipAppsCSV?.split(separator: ",").map(String.init) ?? []
+    }
+
+    var durationSeconds: Double? {
+        guard let endedAt else { return nil }
+        return max(0, endedAt.timeIntervalSince(startedAt))
+    }
+}
