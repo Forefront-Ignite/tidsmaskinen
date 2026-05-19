@@ -15,6 +15,8 @@ struct TimelineView: View {
     @State private var loadError: String?
     @State private var zoom: CGFloat = 1.0
     @State private var zoomAtPinchStart: CGFloat?
+    @State private var showHidden: Bool = false
+    @State private var hasHiddenSignals: Bool = false
 
     private let minZoom: CGFloat = 1.0
     private let maxZoom: CGFloat = 8.0
@@ -118,6 +120,7 @@ struct TimelineView: View {
             nowTimer?.invalidate(); nowTimer = nil
         }
         .onChange(of: day) { _, _ in reload() }
+        .onChange(of: showHidden) { _, _ in reload() }
         .onChange(of: state.sampleCount) { _, _ in reload() }
         .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload() }
     }
@@ -146,10 +149,23 @@ struct TimelineView: View {
             if let err = loadError {
                 Text(err).font(.caption).foregroundStyle(.red).lineLimit(1)
             }
+            showHiddenToggle
             zoomControls
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+    }
+
+    @ViewBuilder
+    private var showHiddenToggle: some View {
+        Button {
+            showHidden.toggle()
+        } label: {
+            Image(systemName: showHidden ? "eye" : "eye.slash")
+                .foregroundStyle(showHidden ? Color.accentColor : .secondary)
+        }
+        .help(showHidden ? "Hide hidden apps/hosts again" : "Show hidden apps/hosts")
+        .disabled(!hasHiddenSignals)
     }
 
     @ViewBuilder
@@ -659,13 +675,27 @@ struct TimelineView: View {
 
     private func reload() {
         do {
-            let samples = try state.database.samples(in: dayInterval)
+            let allSamples = try state.database.samples(in: dayInterval)
             let events = try state.database.calendarEvents(in: dayInterval)
             let sessions = try state.database.sessions(in: dayInterval)
             customers = try state.database.allCustomers()
             projects = try state.database.allProjects()
             let rules = try state.database.allRules()
             let matcher = RuleMatcher.make(customers: customers, projects: projects, rules: rules)
+            let hidden = try state.database.allHiddenSignals()
+            hasHiddenSignals = !hidden.isEmpty
+            let samples: [ActivitySample]
+            if showHidden || hidden.isEmpty {
+                samples = allSamples
+            } else {
+                let hiddenApps = Set(hidden.filter { $0.kind == .appBundleID }.map { $0.value })
+                let hiddenHosts = Set(hidden.filter { $0.kind == .urlHost }.map { $0.value })
+                samples = allSamples.filter { sample in
+                    if let bid = sample.appBundleID, hiddenApps.contains(bid) { return false }
+                    if let host = sample.chromeHost, hiddenHosts.contains(host) { return false }
+                    return true
+                }
+            }
             bundle = TimelineBuilder.build(
                 day: dayInterval,
                 samples: samples,

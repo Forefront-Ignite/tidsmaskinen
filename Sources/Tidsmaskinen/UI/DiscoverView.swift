@@ -2,7 +2,7 @@ import SwiftUI
 
 struct DiscoverView: View {
     @EnvironmentObject private var state: AppState
-    @State private var rangeDays: Int = 7
+    @State private var scope: DateScope = .lastDays(7)
     @State private var aggregates: [AppDatabase.SignalAggregate] = []
     @State private var matcher: RuleMatcher = .make(customers: [], projects: [], rules: [])
     @State private var customers: [Customer] = []
@@ -14,6 +14,8 @@ struct DiscoverView: View {
     @State private var suggestionError: String?
     @State private var expandedHosts: Set<String> = []
     @State private var hostPathDetails: [String: [AppDatabase.SignalAggregate]] = [:]
+    @State private var hidden: [HiddenSignal] = []
+    @State private var hiddenExpanded: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -28,13 +30,14 @@ struct DiscoverView: View {
                         section(title: "Meeting domains", kind: .meetingDomain)
                         section(title: "Browser hosts", kind: .urlHost)
                         section(title: "Apps", kind: .appBundleID)
+                        hiddenSection
                     }
                     .padding(16)
                 }
             }
         }
         .onAppear { reload() }
-        .onChange(of: rangeDays) { _, _ in
+        .onChange(of: scope) { _, _ in
             hostPathDetails.removeAll()
             reload()
         }
@@ -79,14 +82,10 @@ struct DiscoverView: View {
                     }
                 }
                 .disabled(isSuggesting || unassignedSignals.isEmpty)
-                Picker("", selection: $rangeDays) {
-                    Text("7 days").tag(7)
-                    Text("14 days").tag(14)
-                    Text("30 days").tag(30)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 240)
+                rangePicker
+            }
+            if scope.isDay {
+                dayControls
             }
             if let err = suggestionError {
                 Text(err)
@@ -99,9 +98,146 @@ struct DiscoverView: View {
         .padding(.vertical, 10)
     }
 
+    @ViewBuilder
+    private var rangePicker: some View {
+        Picker("", selection: rangeModeBinding) {
+            Text("7 days").tag(7)
+            Text("14 days").tag(14)
+            Text("30 days").tag(30)
+            Text("Day").tag(-1)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(width: 280)
+    }
+
+    @ViewBuilder
+    private var dayControls: some View {
+        HStack(spacing: 8) {
+            Button {
+                if case .day(let d) = scope,
+                   let prev = Calendar.current.date(byAdding: .day, value: -1, to: d) {
+                    scope = .day(prev)
+                }
+            } label: { Image(systemName: "chevron.left") }
+
+            Text(dayLabel)
+                .font(.body.bold())
+                .frame(minWidth: 180, alignment: .leading)
+
+            Button {
+                if case .day(let d) = scope,
+                   let next = Calendar.current.date(byAdding: .day, value: 1, to: d) {
+                    scope = .day(next)
+                }
+            } label: { Image(systemName: "chevron.right") }
+            .disabled(isCurrentDayToday)
+
+            Button("Today") {
+                scope = .day(Calendar.current.startOfDay(for: Date()))
+            }
+            .disabled(isCurrentDayToday)
+            Spacer()
+        }
+    }
+
+    private var rangeModeBinding: Binding<Int> {
+        Binding(
+            get: {
+                switch scope {
+                case .lastDays(let n): return n
+                case .day: return -1
+                }
+            },
+            set: { newValue in
+                if newValue == -1 {
+                    if case .day = scope { return }
+                    scope = .day(Calendar.current.startOfDay(for: Date()))
+                } else {
+                    scope = .lastDays(newValue)
+                }
+            }
+        )
+    }
+
+    private var dayLabel: String {
+        guard case .day(let d) = scope else { return "" }
+        let cal = Calendar.current
+        if cal.isDateInToday(d) { return "Today" }
+        if cal.isDateInYesterday(d) { return "Yesterday" }
+        let f = DateFormatter()
+        f.dateFormat = "EEE d MMM"
+        return f.string(from: d)
+    }
+
+    private var isCurrentDayToday: Bool {
+        guard case .day(let d) = scope else { return false }
+        return Calendar.current.isDateInToday(d)
+    }
+
     private var unassignedSignals: [AppDatabase.SignalAggregate] {
-        aggregates.filter {
+        visibleAggregates.filter {
             matcher.attribute(kind: ruleKind($0.kind), value: $0.value).customer == nil
+        }
+    }
+
+    private var hiddenApps: Set<String> {
+        Set(hidden.filter { $0.kind == .appBundleID }.map { $0.value })
+    }
+
+    private var hiddenHosts: Set<String> {
+        Set(hidden.filter { $0.kind == .urlHost }.map { $0.value })
+    }
+
+    private func isHidden(_ item: AppDatabase.SignalAggregate) -> Bool {
+        switch item.kind {
+        case .appBundleID: return hiddenApps.contains(item.value)
+        case .urlHost:     return hiddenHosts.contains(item.value)
+        default:           return false
+        }
+    }
+
+    private var visibleAggregates: [AppDatabase.SignalAggregate] {
+        aggregates.filter { !isHidden($0) }
+    }
+
+    private var hiddenAggregates: [AppDatabase.SignalAggregate] {
+        aggregates.filter { isHidden($0) }
+    }
+
+    private func canHide(_ item: AppDatabase.SignalAggregate) -> Bool {
+        item.kind == .appBundleID || item.kind == .urlHost
+    }
+
+    private func hiddenSignalKind(for item: AppDatabase.SignalAggregate) -> HiddenSignal.Kind? {
+        switch item.kind {
+        case .appBundleID: return .appBundleID
+        case .urlHost:     return .urlHost
+        default:           return nil
+        }
+    }
+
+    private func hide(_ item: AppDatabase.SignalAggregate) {
+        guard let kind = hiddenSignalKind(for: item) else { return }
+        do {
+            try state.database.hideSignal(kind: kind, value: item.value)
+            suggestions.removeValue(forKey: item.id)
+            expandedHosts.remove(item.value)
+            reload()
+        } catch {
+            loadError = error.localizedDescription
+        }
+    }
+
+    private func unhide(_ item: AppDatabase.SignalAggregate) {
+        guard let kind = hiddenSignalKind(for: item) else { return }
+        if let record = hidden.first(where: { $0.kind == kind && $0.value == item.value }) {
+            do {
+                try state.database.unhide(id: record.id)
+                reload()
+            } catch {
+                loadError = error.localizedDescription
+            }
         }
     }
 
@@ -121,7 +257,7 @@ struct DiscoverView: View {
 
     @ViewBuilder
     private func section(title: String, kind: AppDatabase.SignalAggregate.Kind) -> some View {
-        let items = aggregates.filter { $0.kind == kind }
+        let items = visibleAggregates.filter { $0.kind == kind }
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 Text(title)
@@ -129,6 +265,36 @@ struct DiscoverView: View {
                 ForEach(items) { item in
                     hostRow(for: item)
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var hiddenSection: some View {
+        let items = hiddenAggregates
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                DisclosureGroup(isExpanded: $hiddenExpanded) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(items) { item in
+                            row(for: item, isExpandable: false, isHiddenRow: true)
+                        }
+                    }
+                    .padding(.top, 4)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "eye.slash")
+                            .foregroundStyle(.secondary)
+                        Text("Hidden")
+                            .font(.headline)
+                        Text("(\(items.count))")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text("Hidden apps and browser hosts are excluded from AI suggestions and from the Timeline (unless you enable “Show hidden”).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -173,7 +339,8 @@ struct DiscoverView: View {
     @ViewBuilder
     private func row(for item: AppDatabase.SignalAggregate,
                      isExpandable: Bool,
-                     indented: Bool = false) -> some View {
+                     indented: Bool = false,
+                     isHiddenRow: Bool = false) -> some View {
         let attribution = matcher.attribute(kind: ruleKind(item.kind), value: item.value)
         HStack(spacing: 12) {
             if isExpandable {
@@ -206,7 +373,7 @@ struct DiscoverView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                } else if !indented || item.kind == .urlPath {
+                } else if !isHiddenRow, !indented || item.kind == .urlPath {
                     Text("Unassigned")
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -217,14 +384,34 @@ struct DiscoverView: View {
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 70, alignment: .trailing)
-            if let suggestion = suggestions[item.id] {
+            if !isHiddenRow, let suggestion = suggestions[item.id] {
                 suggestionBadge(suggestion, for: item)
             }
-            Button(attribution.customer == nil ? "Assign…" : "Change…") {
-                assignTarget = item
+            if isHiddenRow {
+                Button {
+                    unhide(item)
+                } label: {
+                    Label("Unhide", systemImage: "eye")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            } else {
+                if canHide(item) {
+                    Button {
+                        hide(item)
+                    } label: {
+                        Image(systemName: "eye.slash")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help("Hide this \(item.kind == .appBundleID ? "app" : "host") from Discover and Timeline")
+                }
+                Button(attribution.customer == nil ? "Assign…" : "Change…") {
+                    assignTarget = item
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
         .padding(.vertical, indented ? 4 : 6)
         .padding(.horizontal, 10)
@@ -251,12 +438,9 @@ struct DiscoverView: View {
 
     private func loadPathDetails(forHost host: String) {
         do {
-            let cal = Calendar.current
-            let end = Date()
-            guard let start = cal.date(byAdding: .day, value: -rangeDays, to: end) else { return }
             let details = try state.database.urlPathAggregates(
                 forHost: host,
-                in: DateInterval(start: start, end: end),
+                in: scope.interval,
                 sampleIntervalSeconds: AppSettings.sampleIntervalSeconds
             )
             hostPathDetails[host] = details
@@ -408,10 +592,7 @@ struct DiscoverView: View {
 
     private func reload() {
         do {
-            let cal = Calendar.current
-            let end = Date()
-            guard let start = cal.date(byAdding: .day, value: -rangeDays, to: end) else { return }
-            let interval = DateInterval(start: start, end: end)
+            let interval = scope.interval
             var baseAggs = try state.database.signalAggregates(
                 in: interval,
                 sampleIntervalSeconds: AppSettings.sampleIntervalSeconds
@@ -447,6 +628,7 @@ struct DiscoverView: View {
             self.projects = try state.database.allProjects()
             let rules = try state.database.allRules()
             self.matcher = RuleMatcher.make(customers: customers, projects: projects, rules: rules)
+            self.hidden = try state.database.allHiddenSignals()
         } catch {
             loadError = error.localizedDescription
         }

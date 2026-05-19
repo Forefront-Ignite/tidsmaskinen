@@ -220,6 +220,27 @@ struct ActivitySample: Codable, FetchableRecord, MutablePersistableRecord, Ident
     }
 }
 
+struct HiddenSignal: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
+    enum Kind: String, Codable, Hashable {
+        case appBundleID
+        case urlHost
+    }
+
+    var id: String
+    var kind: Kind
+    var value: String
+    var hiddenAt: Date
+
+    static let databaseTableName = "hidden_signals"
+
+    enum Columns {
+        static let id = Column(CodingKeys.id)
+        static let kind = Column(CodingKeys.kind)
+        static let value = Column(CodingKeys.value)
+        static let hiddenAt = Column(CodingKeys.hiddenAt)
+    }
+}
+
 struct MicSession: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
     var id: String
     var startedAt: Date

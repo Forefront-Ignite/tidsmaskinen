@@ -8,7 +8,7 @@ import SwiftUI
 /// underlying foreground samples were doing other work in parallel.
 struct TeamsCallsView: View {
     @EnvironmentObject private var state: AppState
-    @State private var rangeDays: Int = 7
+    @State private var scope: DateScope = .lastDays(7)
     @State private var sessions: [MicSession] = []
     @State private var customers: [Customer] = []
     @State private var projects: [Project] = []
@@ -37,7 +37,7 @@ struct TeamsCallsView: View {
             }
         }
         .onAppear { reload() }
-        .onChange(of: rangeDays) { _, _ in reload() }
+        .onChange(of: scope) { _, _ in reload() }
         .onChange(of: state.sampleCount) { _, _ in reload() }
         .sheet(item: $attributing) { session in
             CallDetailSheet(
@@ -64,25 +64,95 @@ struct TeamsCallsView: View {
 
     @ViewBuilder
     private var header: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Calls").font(.title3.bold())
-                Text("Microphone-active sessions, regardless of which app was frontmost. Tagged with whichever VoIP apps were running at the time.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Calls").font(.title3.bold())
+                    Text("Microphone-active sessions, regardless of which app was frontmost. Tagged with whichever VoIP apps were running at the time.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Picker("", selection: rangeModeBinding) {
+                    Text("7 days").tag(7)
+                    Text("14 days").tag(14)
+                    Text("30 days").tag(30)
+                    Text("Day").tag(-1)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 280)
             }
-            Spacer()
-            Picker("", selection: $rangeDays) {
-                Text("7 days").tag(7)
-                Text("14 days").tag(14)
-                Text("30 days").tag(30)
+            if scope.isDay {
+                dayControls
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 240)
         }
         .padding(.horizontal)
         .padding(.vertical, 10)
+    }
+
+    @ViewBuilder
+    private var dayControls: some View {
+        HStack(spacing: 8) {
+            Button {
+                if case .day(let d) = scope,
+                   let prev = Calendar.current.date(byAdding: .day, value: -1, to: d) {
+                    scope = .day(prev)
+                }
+            } label: { Image(systemName: "chevron.left") }
+
+            Text(dayLabel)
+                .font(.body.bold())
+                .frame(minWidth: 180, alignment: .leading)
+
+            Button {
+                if case .day(let d) = scope,
+                   let next = Calendar.current.date(byAdding: .day, value: 1, to: d) {
+                    scope = .day(next)
+                }
+            } label: { Image(systemName: "chevron.right") }
+            .disabled(isCurrentDayToday)
+
+            Button("Today") {
+                scope = .day(Calendar.current.startOfDay(for: Date()))
+            }
+            .disabled(isCurrentDayToday)
+            Spacer()
+        }
+    }
+
+    private var rangeModeBinding: Binding<Int> {
+        Binding(
+            get: {
+                switch scope {
+                case .lastDays(let n): return n
+                case .day: return -1
+                }
+            },
+            set: { newValue in
+                if newValue == -1 {
+                    if case .day = scope { return }
+                    scope = .day(Calendar.current.startOfDay(for: Date()))
+                } else {
+                    scope = .lastDays(newValue)
+                }
+            }
+        )
+    }
+
+    private var dayLabel: String {
+        guard case .day(let d) = scope else { return "" }
+        let cal = Calendar.current
+        if cal.isDateInToday(d) { return "Today" }
+        if cal.isDateInYesterday(d) { return "Yesterday" }
+        let f = DateFormatter()
+        f.dateFormat = "EEE d MMM"
+        return f.string(from: d)
+    }
+
+    private var isCurrentDayToday: Bool {
+        guard case .day(let d) = scope else { return false }
+        return Calendar.current.isDateInToday(d)
     }
 
     @ViewBuilder
@@ -245,10 +315,7 @@ struct TeamsCallsView: View {
 
     private func reload() {
         do {
-            let cal = Calendar.current
-            let end = Date()
-            guard let start = cal.date(byAdding: .day, value: -rangeDays, to: end) else { return }
-            sessions = try state.database.micSessions(in: DateInterval(start: start, end: end))
+            sessions = try state.database.micSessions(in: scope.interval)
             customers = try state.database.allCustomers()
             projects = try state.database.allProjects()
         } catch {

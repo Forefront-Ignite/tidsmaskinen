@@ -149,6 +149,16 @@ struct AppDatabase {
             }
             try db.create(index: "idx_mic_sessions_startedAt", on: "mic_sessions", columns: ["startedAt"])
         }
+        migrator.registerMigration("v9_hidden_signals") { db in
+            try db.create(table: "hidden_signals") { t in
+                t.primaryKey("id", .text)
+                t.column("kind", .text).notNull()
+                t.column("value", .text).notNull()
+                t.column("hiddenAt", .datetime).notNull()
+                t.uniqueKey(["kind", "value"])
+            }
+            try db.create(index: "idx_hidden_signals_kind", on: "hidden_signals", columns: ["kind"])
+        }
         try migrator.migrate(dbQueue)
     }
 
@@ -393,6 +403,40 @@ struct AppDatabase {
     func deleteProject(id: String) throws {
         _ = try dbQueue.write { db in
             try Project.deleteOne(db, key: id)
+        }
+    }
+
+    // MARK: - Hidden signals
+
+    func allHiddenSignals() throws -> [HiddenSignal] {
+        try dbQueue.read { db in
+            try HiddenSignal.order(HiddenSignal.Columns.hiddenAt.desc).fetchAll(db)
+        }
+    }
+
+    /// Hide an app bundle ID or browser host. No-op if already hidden.
+    func hideSignal(kind: HiddenSignal.Kind, value: String) throws {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        try dbQueue.write { db in
+            let existing = try HiddenSignal
+                .filter(HiddenSignal.Columns.kind == kind.rawValue
+                        && HiddenSignal.Columns.value == trimmed)
+                .fetchOne(db)
+            if existing != nil { return }
+            var record = HiddenSignal(
+                id: UUID().uuidString,
+                kind: kind,
+                value: trimmed,
+                hiddenAt: Date()
+            )
+            try record.insert(db)
+        }
+    }
+
+    func unhide(id: String) throws {
+        _ = try dbQueue.write { db in
+            try HiddenSignal.deleteOne(db, key: id)
         }
     }
 
