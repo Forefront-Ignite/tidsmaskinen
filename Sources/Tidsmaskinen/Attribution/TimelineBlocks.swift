@@ -86,7 +86,16 @@ enum TimelineBuilder {
 
         // ---- Claude Code sessions ----
         let claudeBlocks: [TimelineBlock] = sessions.compactMap { session -> TimelineBlock? in
-            let sessionEnd = session.endedAt ?? max(session.startedAt, session.lastActivityAt ?? Date())
+            // For open sessions, cap the rendered end at lastActivityAt + idleThreshold so
+            // a session that idled overnight (no SessionEnd received before sleep) doesn't
+            // visually paint the whole sleep window as work.
+            let inferredEnd: Date = {
+                if let last = session.lastActivityAt {
+                    return max(session.startedAt, last.addingTimeInterval(claudeIdleThresholdSeconds))
+                }
+                return session.startedAt
+            }()
+            let sessionEnd = session.endedAt ?? inferredEnd
             let clippedStart = max(session.startedAt, day.start)
             let clippedEnd = min(sessionEnd, day.end)
             guard clippedEnd > clippedStart else { return nil }

@@ -159,6 +159,18 @@ struct AppDatabase {
             }
             try db.create(index: "idx_hidden_signals_kind", on: "hidden_signals", columns: ["kind"])
         }
+        migrator.registerMigration("v10_claude_active_deltas") { db in
+            try db.create(table: "claude_active_deltas") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("sessionID", .text).notNull()
+                t.column("occurredAt", .datetime).notNull()
+                t.column("gainedSeconds", .double).notNull()
+            }
+            try db.create(index: "idx_claude_active_deltas_occurredAt",
+                          on: "claude_active_deltas", columns: ["occurredAt"])
+            try db.create(index: "idx_claude_active_deltas_sessionID",
+                          on: "claude_active_deltas", columns: ["sessionID"])
+        }
         try migrator.migrate(dbQueue)
     }
 
@@ -514,6 +526,40 @@ struct AppDatabase {
                             || ClaudeSession.Columns.endedAt > interval.start))
                 .order(ClaudeSession.Columns.startedAt.asc)
                 .fetchAll(db)
+        }
+    }
+
+    func openSessions() throws -> [ClaudeSession] {
+        try dbQueue.read { db in
+            try ClaudeSession
+                .filter(ClaudeSession.Columns.endedAt == nil)
+                .fetchAll(db)
+        }
+    }
+
+    struct ClaudeActiveDelta: Codable, FetchableRecord {
+        var sessionID: String
+        var occurredAt: Date
+        var gainedSeconds: Double
+    }
+
+    func insertClaudeActiveDelta(sessionID: String, occurredAt: Date, gainedSeconds: Double) throws {
+        try dbQueue.write { db in
+            try db.execute(sql: """
+                INSERT INTO claude_active_deltas (sessionID, occurredAt, gainedSeconds)
+                VALUES (?, ?, ?)
+                """, arguments: [sessionID, occurredAt, gainedSeconds])
+        }
+    }
+
+    func claudeActiveDeltas(in interval: DateInterval) throws -> [ClaudeActiveDelta] {
+        try dbQueue.read { db in
+            try ClaudeActiveDelta.fetchAll(db, sql: """
+                SELECT sessionID, occurredAt, gainedSeconds
+                FROM claude_active_deltas
+                WHERE occurredAt >= ? AND occurredAt < ?
+                ORDER BY occurredAt
+                """, arguments: [interval.start, interval.end])
         }
     }
 

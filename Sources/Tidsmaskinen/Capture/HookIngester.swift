@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 @MainActor
 final class HookIngester {
@@ -11,6 +12,7 @@ final class HookIngester {
     private var fileHandle: FileHandle?
     private var watcherFD: Int32 = -1
     private var pollTimer: Timer?
+    private var sleepObserver: NSObjectProtocol?
 
     var onSessionChanged: ((ClaudeSession) -> Void)?
 
@@ -43,6 +45,17 @@ final class HookIngester {
             }
             RunLoop.main.add(t, forMode: .common)
             pollTimer = t
+
+            // Finalize any open sessions at sleep time so yesterday's work doesn't
+            // bleed into today's buckets when Claude Code finally emits SessionEnd
+            // hours later (after wake).
+            sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.willSleepNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.finalizeOpenSessionsOnSleep() }
+            }
         } catch {
             // Non-fatal; logging not wired here, but we'll just retry later.
         }
@@ -56,6 +69,10 @@ final class HookIngester {
         fileHandle = nil
         pollTimer?.invalidate()
         pollTimer = nil
+        if let sleepObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(sleepObserver)
+            self.sleepObserver = nil
+        }
     }
 
     private func attachWatcher() {
@@ -139,6 +156,14 @@ final class HookIngester {
 
         do {
             let existing = try database.session(id: sessionID)
+            // Sessions are closed either by an explicit SessionEnd or by sleep-finalization.
+            // Late events for a closed session (e.g. Claude Code emitting SessionEnd after wake)
+            // would otherwise add a second 5-min ghost gap on top of what sleep-finalize already
+            // recorded. Drop them — Claude Code generates a fresh session_id per CLI invocation,
+            // so a closed ID never legitimately resurrects.
+            if let existing, existing.endedAt != nil {
+                return
+            }
             var session = existing ?? ClaudeSession(
                 id: sessionID,
                 cwd: envelope.payload?.cwd,
@@ -177,10 +202,12 @@ final class HookIngester {
             default:
                 isActivityEvent = false
             }
+            var gainedSeconds: Double = 0
             if isActivityEvent {
                 if let last = session.lastActivityAt {
                     let gap = max(0, ts.timeIntervalSince(last))
-                    session.activeSeconds += min(gap, idleThreshold)
+                    gainedSeconds = min(gap, idleThreshold)
+                    session.activeSeconds += gainedSeconds
                 }
                 session.lastActivityAt = ts
             }
@@ -198,9 +225,49 @@ final class HookIngester {
             }
             session.updatedAt = Date()
             try database.upsertSession(session)
+            if gainedSeconds > 0 {
+                try database.insertClaudeActiveDelta(
+                    sessionID: sessionID,
+                    occurredAt: ts,
+                    gainedSeconds: gainedSeconds)
+            }
             onSessionChanged?(session)
         } catch {
             // ignore; next event for this session may recover
+        }
+    }
+
+    private func finalizeOpenSessionsOnSleep() {
+        let sleepAt = Date()
+        let idleThreshold = TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60)
+        guard let open = try? database.openSessions() else { return }
+        for var session in open {
+            let trailing: TimeInterval
+            let closeAt: Date
+            if let last = session.lastActivityAt {
+                let gap = max(0, sleepAt.timeIntervalSince(last))
+                trailing = min(gap, idleThreshold)
+                closeAt = last.addingTimeInterval(trailing)
+            } else {
+                trailing = 0
+                closeAt = session.startedAt
+            }
+            session.activeSeconds += trailing
+            session.endedAt = closeAt
+            session.updatedAt = Date()
+            do {
+                try database.upsertSession(session)
+                if trailing > 0 {
+                    try database.insertClaudeActiveDelta(
+                        sessionID: session.id,
+                        occurredAt: closeAt,
+                        gainedSeconds: trailing
+                    )
+                }
+                onSessionChanged?(session)
+            } catch {
+                // ignore; next sleep cycle will retry
+            }
         }
     }
 
