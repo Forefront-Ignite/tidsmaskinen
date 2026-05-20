@@ -7,6 +7,15 @@ struct WeeklyReportView: View {
     @State private var report: WeeklyReport?
     @State private var loadError: String?
     @State private var copied: Bool = false
+    @State private var expandedRowID: String?
+
+    // Raw inputs cached from reload() so row drill-down can recompute breakdowns
+    // without re-querying the database.
+    @State private var cachedSamples: [ActivitySample] = []
+    @State private var cachedEvents: [CalendarEvent] = []
+    @State private var cachedSessions: [ClaudeSession] = []
+    @State private var cachedClaudeDeltas: [AppDatabase.ClaudeActiveDelta] = []
+    @State private var cachedMatcher: RuleMatcher?
 
     private let calendar = Calendar.weekStartingMonday()
 
@@ -113,12 +122,23 @@ struct WeeklyReportView: View {
 
                 ForEach(report.rows) { row in
                     GridRow {
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(Color(hex: row.color) ?? .blue)
-                                .frame(width: 10, height: 10)
-                            Text(row.label)
+                        Button {
+                            toggleExpansion(row.id)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: expandedRowID == row.id ? "chevron.down" : "chevron.right")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 10)
+                                Circle()
+                                    .fill(Color(hex: row.color) ?? .blue)
+                                    .frame(width: 10, height: 10)
+                                Text(row.label)
+                                Spacer(minLength: 0)
+                            }
+                            .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
                         ForEach(0..<7, id: \.self) { i in
                             Text(WeeklyReport.formatHours(row.perDayHours[i]))
                                 .monospacedDigit()
@@ -129,6 +149,16 @@ struct WeeklyReportView: View {
                             .monospacedDigit()
                             .bold()
                             .frame(minWidth: 60, alignment: .trailing)
+                    }
+                    if expandedRowID == row.id, let breakdown = breakdown(for: row) {
+                        GridRow {
+                            WeeklyReportRowDetailView(
+                                breakdown: breakdown,
+                                weekDays: days,
+                                rowColor: Color(hex: row.color) ?? .blue
+                            )
+                            .gridCellColumns(9)
+                        }
                     }
                 }
 
@@ -164,6 +194,11 @@ struct WeeklyReportView: View {
             let sessions = try state.database.sessions(in: week)
             let claudeDeltas = try state.database.claudeActiveDeltas(in: week)
             let matcher = try RuleMatcher.load(from: state.database)
+            self.cachedSamples = samples
+            self.cachedEvents = events
+            self.cachedSessions = sessions
+            self.cachedClaudeDeltas = claudeDeltas
+            self.cachedMatcher = matcher
             self.report = WeeklyReport.compute(
                 week: week,
                 samples: samples,
@@ -176,6 +211,27 @@ struct WeeklyReportView: View {
             )
         } catch {
             loadError = error.localizedDescription
+        }
+    }
+
+    private func breakdown(for row: WeeklyReport.Row) -> WeeklyReport.Breakdown? {
+        guard let matcher = cachedMatcher else { return nil }
+        return WeeklyReport.breakdown(
+            forRowID: row.id,
+            week: week,
+            samples: cachedSamples,
+            events: cachedEvents,
+            sessions: cachedSessions,
+            claudeDeltas: cachedClaudeDeltas,
+            matcher: matcher,
+            sampleIntervalSeconds: AppSettings.sampleIntervalSeconds,
+            idleThresholdSeconds: TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60)
+        )
+    }
+
+    private func toggleExpansion(_ rowID: String) {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            expandedRowID = expandedRowID == rowID ? nil : rowID
         }
     }
 

@@ -303,18 +303,18 @@ struct MenuBarView: View {
             columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)],
             spacing: 6
         ) {
-            actionTile("Weekly Report", systemImage: "chart.bar.doc.horizontal.fill", tint: .blue) {
-                open(.weeklyReport)
-            }
-            actionTile("Customers", systemImage: "person.2.fill", tint: .purple) {
-                open(.customers)
-            }
-            actionTile("Timeline", systemImage: "calendar.day.timeline.left", tint: .orange) {
-                open(.timeline)
-            }
-            actionTile("Claude Sessions", systemImage: "sparkles", tint: .pink) {
-                open(.claudeSessions)
-            }
+            tile(for: .weeklyReport)
+            tile(for: .timeline)
+            tile(for: .discover)
+            tile(for: .calls)
+            tile(for: .customers)
+            tile(for: .claudeSessions)
+        }
+    }
+
+    private func tile(for item: SidebarItem) -> some View {
+        actionTile(item.title, systemImage: item.systemImage, tint: item.tint) {
+            open(item)
         }
     }
 

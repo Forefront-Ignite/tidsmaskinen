@@ -4,6 +4,8 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
     case weeklyReport
     case timeline
     case calendar
+    case discover
+    case calls
     case customers
     case claudeSessions
     case settings
@@ -17,6 +19,8 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
         case .weeklyReport:   return "Weekly Report"
         case .timeline:       return "Timeline"
         case .calendar:       return "Calendar"
+        case .discover:       return "Discover"
+        case .calls:          return "Calls"
         case .customers:      return "Customers"
         case .claudeSessions: return "Claude Sessions"
         case .settings:       return "Settings"
@@ -30,8 +34,10 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
         case .weeklyReport:   return "chart.bar.doc.horizontal.fill"
         case .timeline:       return "calendar.day.timeline.left"
         case .calendar:       return "calendar"
+        case .discover:       return "sparkles"
+        case .calls:          return "phone.fill"
         case .customers:      return "person.2.fill"
-        case .claudeSessions: return "sparkles"
+        case .claudeSessions: return "wand.and.stars"
         case .settings:       return "gearshape.fill"
         case .diagnostics:    return "stethoscope"
         case .samples:        return "list.bullet.rectangle"
@@ -43,6 +49,8 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
         case .weeklyReport:   return .blue
         case .timeline:       return .orange
         case .calendar:       return .teal
+        case .discover:       return .yellow
+        case .calls:          return .green
         case .customers:      return .purple
         case .claudeSessions: return .pink
         case .settings:       return .gray
@@ -64,7 +72,7 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
         var items: [SidebarItem] {
             switch self {
             case .reports: return [.weeklyReport, .timeline, .calendar]
-            case .sources: return [.customers, .claudeSessions]
+            case .sources: return [.discover, .calls, .customers, .claudeSessions]
             case .system:  return [.settings, .diagnostics, .samples]
             }
         }
@@ -111,7 +119,9 @@ struct MainWindowView: View {
         case .weeklyReport:   WeeklyReportView()
         case .timeline:       TimelineView()
         case .calendar:       CalendarView()
-        case .customers:      CustomersWindowView()
+        case .discover:       DiscoverView()
+        case .calls:          TeamsCallsView()
+        case .customers:      CustomersView()
         case .claudeSessions: ClaudeSessionsView()
         case .settings:       SettingsView()
         case .diagnostics:    DiagnosticsView()

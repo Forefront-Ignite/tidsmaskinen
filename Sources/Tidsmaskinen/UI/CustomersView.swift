@@ -10,13 +10,15 @@ struct CustomersView: View {
     @State private var loadError: String?
 
     var body: some View {
-        NavigationSplitView {
+        HSplitView {
             customerSidebar
-        } detail: {
+                .frame(minWidth: 200, idealWidth: 240, maxWidth: 320)
             customerDetail
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationTitle("Customers & Rules")
         .onAppear { reload() }
+        .onChange(of: selectedCustomerID) { _, _ in reload() }
         .alert("Database error", isPresented: errorBinding) {
             Button("OK") { loadError = nil }
         } message: {
@@ -60,7 +62,6 @@ struct CustomersView: View {
             }
             .padding(10)
         }
-        .navigationSplitViewColumnWidth(min: 200, ideal: 240)
     }
 
     @ViewBuilder
