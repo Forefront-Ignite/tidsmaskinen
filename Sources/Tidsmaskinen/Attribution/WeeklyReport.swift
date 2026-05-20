@@ -10,9 +10,11 @@ struct WeeklyReport {
     }
 
     let week: DateInterval
-    let rows: [Row]
-    let dayTotals: [Double]      // 7 entries
+    let rows: [Row]                    // attributed customer/project rows only
+    let dayTotals: [Double]            // 7 entries, attributed only
+    let unattributedPerDay: [Double]   // 7 entries — informational, not summed into totals
     var grandTotal: Double { dayTotals.reduce(0, +) }
+    var unattributedTotal: Double { unattributedPerDay.reduce(0, +) }
 
     static let unattributedID = "__unattributed__"
     static let unattributedLabel = "Unattributed"
@@ -21,6 +23,7 @@ struct WeeklyReport {
                         samples: [ActivitySample],
                         events: [CalendarEvent] = [],
                         sessions: [ClaudeSession] = [],
+                        claudeDeltas: [AppDatabase.ClaudeActiveDelta] = [],
                         idleThresholdSeconds: TimeInterval = 300,
                         matcher: RuleMatcher,
                         sampleIntervalSeconds: Int) -> WeeklyReport {
@@ -74,10 +77,20 @@ struct WeeklyReport {
             }
         }
 
-        // Claude sessions — attribute activeSeconds to the session's start day.
-        // (v1 limitation: multi-day sessions all bucket on start day. Per-event
-        // timestamps would let us split properly; deferred to Phase 6.)
-        for session in sessions {
+        // Claude sessions: prefer per-event deltas (v10+) so multi-day sessions
+        // split correctly. Sessions predating v10 have no deltas and fall back
+        // to start-day attribution using the rolled-up activeSeconds.
+        let sessionByID = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0) })
+        var creditedSessionIDs = Set<String>()
+        for delta in claudeDeltas {
+            guard let session = sessionByID[delta.sessionID] else { continue }
+            guard let dayIdx = dayIndex(of: delta.occurredAt, weekStart: week.start, calendar: calendar) else { continue }
+            let attribution = matcher.attribute(session: session)
+            bucket(customer: attribution.customer, project: attribution.project,
+                   dayIdx: dayIdx, seconds: delta.gainedSeconds)
+            creditedSessionIDs.insert(session.id)
+        }
+        for session in sessions where !creditedSessionIDs.contains(session.id) {
             guard let dayIdx = dayIndex(of: session.startedAt, weekStart: week.start, calendar: calendar) else { continue }
             let active = session.amortizedActiveSeconds(idleThresholdSeconds: idleThresholdSeconds)
             guard active > 0 else { continue }
@@ -85,7 +98,11 @@ struct WeeklyReport {
             bucket(customer: attribution.customer, project: attribution.project, dayIdx: dayIdx, seconds: active)
         }
 
+        let unattributedSeconds = perRow[unattributedID] ?? Array(repeating: 0.0, count: 7)
+        let attributedDayTotals = zip(dayTotals, unattributedSeconds).map { $0 - $1 }
+
         let rows: [Row] = perRow
+            .filter { $0.key != unattributedID }
             .map { (id, secsPerDay) in
                 Row(id: id,
                     label: labels[id] ?? id,
@@ -93,8 +110,6 @@ struct WeeklyReport {
                     perDayHours: secsPerDay.map { $0 / 3600.0 })
             }
             .sorted { lhs, rhs in
-                if lhs.id == unattributedID { return false }
-                if rhs.id == unattributedID { return true }
                 if lhs.label != rhs.label, lhs.totalHours == rhs.totalHours {
                     return lhs.label < rhs.label
                 }
@@ -104,7 +119,8 @@ struct WeeklyReport {
         return WeeklyReport(
             week: week,
             rows: rows,
-            dayTotals: dayTotals.map { $0 / 3600.0 }
+            dayTotals: attributedDayTotals.map { $0 / 3600.0 },
+            unattributedPerDay: unattributedSeconds.map { $0 / 3600.0 }
         )
     }
 

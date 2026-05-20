@@ -527,9 +527,8 @@ struct TimelineView: View {
         .frame(width: w, height: height)
         .overlay(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .strokeBorder(
-                    block.hasManualOverride ? Color.white.opacity(0.85) : tint.opacity(0.55),
-                    lineWidth: block.hasManualOverride ? 1.5 : 0.5)
+                .strokeBorder(borderColor(for: block, tint: tint),
+                              style: borderStrokeStyle(for: block))
         )
         .shadow(color: tint.opacity(0.18), radius: 1.5, x: 0, y: 0.5)
         .contentShape(Rectangle())
@@ -643,13 +642,45 @@ struct TimelineView: View {
         let f = DateFormatter()
         f.dateFormat = "HH:mm"
         let range = "\(f.string(from: block.startedAt))–\(f.string(from: block.endedAt))"
-        let attr = block.attribution.customer.map { c -> String in
-            block.attribution.project.map { "\(c.name) · \($0.name)" } ?? c.name
-        } ?? "Unattributed"
+        let attr: String
+        if let c = block.attribution.customer {
+            let base = block.attribution.project.map { "\(c.name) · \($0.name)" } ?? c.name
+            if block.track == .claudeCode {
+                attr = block.hasManualOverride ? "\(base) (override)" : "\(base) (via repo rule)"
+            } else {
+                attr = block.hasManualOverride ? "\(base) (override)" : base
+            }
+        } else {
+            attr = block.track == .claudeCode
+                ? "Not matched by any rule — click to assign or add a rule in Discover"
+                : "Unattributed"
+        }
         let mins = Int((block.durationSeconds / 60).rounded())
         var parts = ["\(range)  (\(mins)m)  \(attr)", block.title]
         if let sub = block.subtitle { parts.append(sub) }
         return parts.joined(separator: "\n")
+    }
+
+    /// True for Claude session blocks that no rule attributed — visually flagged
+    /// with a dashed orange border so the user can spot them.
+    private func isUnmatchedClaudeBlock(_ block: TimelineBlock) -> Bool {
+        block.track == .claudeCode && block.attribution.customer == nil
+    }
+
+    private func borderColor(for block: TimelineBlock, tint: Color) -> Color {
+        if block.hasManualOverride { return Color.white.opacity(0.85) }
+        if isUnmatchedClaudeBlock(block) { return Color.orange.opacity(0.7) }
+        return tint.opacity(0.55)
+    }
+
+    private func borderStrokeStyle(for block: TimelineBlock) -> StrokeStyle {
+        if block.hasManualOverride {
+            return StrokeStyle(lineWidth: 1.5)
+        }
+        if isUnmatchedClaudeBlock(block) {
+            return StrokeStyle(lineWidth: 1.0, dash: [3, 3])
+        }
+        return StrokeStyle(lineWidth: 0.5)
     }
 
     private func idleTooltip(for block: TimelineBlock) -> String {
@@ -732,12 +763,16 @@ private struct ReattributePopover: View {
             }
             Text(timeRange).font(.caption.monospaced()).foregroundStyle(.secondary)
 
+            if block.track == .claudeCode {
+                sessionAttributionBanner
+            }
+
             Divider()
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Customer").font(.caption.bold())
                 Picker("", selection: $selectedCustomerID) {
-                    Text("Unassigned").tag("")
+                    Text(emptyPickerLabel).tag("")
                     ForEach(customers) { Text($0.name).tag($0.id) }
                 }
                 .pickerStyle(.menu)
@@ -790,6 +825,67 @@ private struct ReattributePopover: View {
         f.dateFormat = "HH:mm"
         let mins = Int((block.durationSeconds / 60).rounded())
         return "\(f.string(from: block.startedAt))–\(f.string(from: block.endedAt))  ·  \(mins) min"
+    }
+
+    /// For Claude blocks, picker's empty option means "fall back to the rule"
+    /// rather than "this block has no assignment". Other tracks keep "Unassigned".
+    private var emptyPickerLabel: String {
+        if block.track == .claudeCode, !block.hasManualOverride {
+            return "(use rule)"
+        }
+        return "Unassigned"
+    }
+
+    /// Status banner shown above the customer picker for Claude session blocks.
+    /// Explains rule-based attribution so users don't feel they must assign
+    /// every session manually.
+    @ViewBuilder
+    private var sessionAttributionBanner: some View {
+        let repoName = block.title
+        if block.hasManualOverride, let customer = block.attribution.customer {
+            attributionBanner(
+                systemImage: "pin.fill",
+                tint: .blue,
+                primary: "Manual override active.",
+                secondary: "This single session is set to \(displayName(customer: customer, project: block.attribution.project)). Use Clear override to fall back to your repo rule."
+            )
+        } else if let customer = block.attribution.customer {
+            attributionBanner(
+                systemImage: "checkmark.seal.fill",
+                tint: .green,
+                primary: "Attributed via your \(repoName) rule.",
+                secondary: "Already counted as \(displayName(customer: customer, project: block.attribution.project)) in the weekly report. Only pick a customer here if this specific session should go somewhere different."
+            )
+        } else {
+            attributionBanner(
+                systemImage: "exclamationmark.triangle.fill",
+                tint: .orange,
+                primary: "Not matched by any rule.",
+                secondary: "Either assign \(repoName) in Discover (covers every session in this repo) or pick a customer below to attribute just this session."
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func attributionBanner(systemImage: String, tint: Color, primary: String, secondary: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: systemImage)
+                .foregroundStyle(tint)
+                .font(.caption)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(primary).font(.caption.bold())
+                Text(secondary).font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(8)
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
+    private func displayName(customer: Customer, project: Project?) -> String {
+        if let project { return "\(customer.name) · \(project.name)" }
+        return customer.name
     }
 
     private func apply(customerID: String?, projectID: String?) {

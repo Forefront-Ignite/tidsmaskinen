@@ -18,9 +18,23 @@ struct SettingsView: View {
     @State private var apiKeyStatus: String = ""
     @State private var didLoadApiKey: Bool = false
     @State private var detectedClaudePath: String? = nil
+    @State private var launchAtLogin: Bool = LoginItemManager.isEnabled
+    @State private var loginItemError: String?
 
     var body: some View {
         Form {
+            Section("Startup") {
+                Toggle("Open at login", isOn: launchAtLoginBinding)
+                Text(LoginItemManager.statusDescription)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let err = loginItemError {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+
             Section("Sampling") {
                 Stepper(value: $sampleInterval, in: 5...300, step: 5) {
                     LabeledContent("Sample interval") {
@@ -121,6 +135,21 @@ struct SettingsView: View {
 
     @State private var hookState: HookInstaller.InstallState = HookInstaller.currentState()
     @State private var hookActionError: String?
+
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { launchAtLogin },
+            set: { newValue in
+                do {
+                    try LoginItemManager.setEnabled(newValue)
+                    loginItemError = nil
+                } catch {
+                    loginItemError = error.localizedDescription
+                }
+                launchAtLogin = LoginItemManager.isEnabled
+            }
+        )
+    }
 
     @ViewBuilder
     private var aiSection: some View {

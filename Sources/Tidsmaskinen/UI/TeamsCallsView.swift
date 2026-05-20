@@ -234,7 +234,6 @@ struct TeamsCallsView: View {
             .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.controlBackgroundColor)))
         }
         .buttonStyle(.plain)
-        .disabled(s.endedAt == nil)
     }
 
     private func icon(for s: MicSession) -> String {
@@ -540,9 +539,11 @@ private struct CallDetailSheet: View {
     }
 
     private func loadBreakdowns() {
-        guard let endedAt = session.endedAt else { return }
+        // Use "now" as the end bound for ongoing sessions so users can still
+        // see what was in the foreground during a call in progress.
+        let endBound = session.endedAt ?? Date()
         do {
-            let samples = try database.samplesOverlapping(start: session.startedAt, end: endedAt)
+            let samples = try database.samplesOverlapping(start: session.startedAt, end: endBound)
             let sampleInterval = Double(AppSettings.sampleIntervalSeconds)
 
             var appCounts: [String: (name: String, count: Int)] = [:]

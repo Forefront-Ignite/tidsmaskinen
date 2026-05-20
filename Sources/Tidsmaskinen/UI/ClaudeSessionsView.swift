@@ -5,26 +5,18 @@ struct ClaudeSessionsView: View {
     @State private var sessions: [ClaudeSession] = []
     @State private var totalCount: Int = 0
     @State private var refreshTimer: Timer?
+    @State private var scope: DateScope = .lastDays(7)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Claude Code sessions").font(.title3.bold())
-                Spacer()
-                Text("Total: \(totalCount)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button("Refresh") { reload() }
-            }
-            .padding(.horizontal)
-            .padding(.vertical, 10)
+            header
 
             Divider()
 
             if sessions.isEmpty {
-                ContentUnavailableView("No sessions yet",
+                ContentUnavailableView("No sessions in this range",
                                        systemImage: "terminal",
-                                       description: Text("Install the hooks in Settings → Claude Code, then start a Claude Code session in any project."))
+                                       description: Text("Install the hooks in Settings → Claude Code, then start a Claude Code session in any project. Use the range picker to look further back."))
             } else {
                 Table(sessions) {
                     TableColumn("Started") { s in
@@ -89,14 +81,114 @@ struct ClaudeSessionsView: View {
             refreshTimer?.invalidate()
             refreshTimer = nil
         }
+        .onChange(of: scope) { _, _ in reload() }
+    }
+
+    @ViewBuilder
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Claude Code sessions").font(.title3.bold())
+                Spacer()
+                Text("Total: \(totalCount)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Refresh") { reload() }
+                rangePicker
+            }
+            if scope.isDay {
+                dayControls
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 10)
+    }
+
+    @ViewBuilder
+    private var rangePicker: some View {
+        Picker("", selection: rangeModeBinding) {
+            Text("7 days").tag(7)
+            Text("14 days").tag(14)
+            Text("30 days").tag(30)
+            Text("Day").tag(-1)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(width: 280)
+    }
+
+    @ViewBuilder
+    private var dayControls: some View {
+        HStack(spacing: 8) {
+            Button {
+                if case .day(let d) = scope,
+                   let prev = Calendar.current.date(byAdding: .day, value: -1, to: d) {
+                    scope = .day(prev)
+                }
+            } label: { Image(systemName: "chevron.left") }
+
+            Text(dayLabel)
+                .font(.body.bold())
+                .frame(minWidth: 180, alignment: .leading)
+
+            Button {
+                if case .day(let d) = scope,
+                   let next = Calendar.current.date(byAdding: .day, value: 1, to: d) {
+                    scope = .day(next)
+                }
+            } label: { Image(systemName: "chevron.right") }
+            .disabled(isCurrentDayToday)
+
+            Button("Today") {
+                scope = .day(Calendar.current.startOfDay(for: Date()))
+            }
+            .disabled(isCurrentDayToday)
+            Spacer()
+        }
+    }
+
+    private var rangeModeBinding: Binding<Int> {
+        Binding(
+            get: {
+                switch scope {
+                case .lastDays(let n): return n
+                case .day: return -1
+                }
+            },
+            set: { newValue in
+                if newValue == -1 {
+                    if case .day = scope { return }
+                    scope = .day(Calendar.current.startOfDay(for: Date()))
+                } else {
+                    scope = .lastDays(newValue)
+                }
+            }
+        )
+    }
+
+    private var dayLabel: String {
+        guard case .day(let d) = scope else { return "" }
+        let cal = Calendar.current
+        if cal.isDateInToday(d) { return "Today" }
+        if cal.isDateInYesterday(d) { return "Yesterday" }
+        let f = DateFormatter()
+        f.dateFormat = "EEE d MMM"
+        return f.string(from: d)
+    }
+
+    private var isCurrentDayToday: Bool {
+        guard case .day(let d) = scope else { return false }
+        return Calendar.current.isDateInToday(d)
     }
 
     private func reload() {
         do {
-            sessions = try state.database.recentSessions(limit: 200)
-            totalCount = try state.database.sessionCount()
+            let fetched = try state.database.sessions(in: scope.interval)
+            sessions = fetched.sorted { $0.startedAt > $1.startedAt }
+            totalCount = sessions.count
         } catch {
             sessions = []
+            totalCount = 0
         }
     }
 

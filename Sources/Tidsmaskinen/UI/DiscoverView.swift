@@ -16,6 +16,8 @@ struct DiscoverView: View {
     @State private var hostPathDetails: [String: [AppDatabase.SignalAggregate]] = [:]
     @State private var hidden: [HiddenSignal] = []
     @State private var hiddenExpanded: Bool = false
+    @State private var unassignedOnly: Bool = false
+    @State private var customerFilterID: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -87,6 +89,7 @@ struct DiscoverView: View {
             if scope.isDay {
                 dayControls
             }
+            filterBar
             if let err = suggestionError {
                 Text(err)
                     .font(.caption)
@@ -175,10 +178,76 @@ struct DiscoverView: View {
         return Calendar.current.isDateInToday(d)
     }
 
+    @ViewBuilder
+    private var filterBar: some View {
+        HStack(spacing: 12) {
+            Toggle(isOn: $unassignedOnly) {
+                Text("Unassigned only").font(.caption)
+            }
+            .toggleStyle(.checkbox)
+
+            Picker("", selection: Binding(
+                get: { customerFilterID ?? "" },
+                set: { customerFilterID = $0.isEmpty ? nil : $0 }
+            )) {
+                Text("All customers").tag("")
+                Divider()
+                ForEach(customers) { c in
+                    Text(c.name).tag(c.id)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .frame(maxWidth: 200)
+
+            if unassignedOnly || customerFilterID != nil {
+                Button {
+                    unassignedOnly = false
+                    customerFilterID = nil
+                } label: {
+                    Label("Clear filters", systemImage: "xmark.circle")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+            }
+            Spacer()
+        }
+    }
+
     private var unassignedSignals: [AppDatabase.SignalAggregate] {
         visibleAggregates.filter {
             matcher.attribute(kind: ruleKind($0.kind), value: $0.value).customer == nil
         }
+    }
+
+    /// Customer IDs attributed to *any* loaded child path under each urlHost.
+    private var hostChildCustomerIDs: [String: Set<String>] {
+        var map: [String: Set<String>] = [:]
+        for (host, details) in hostPathDetails {
+            var set = Set<String>()
+            for detail in details {
+                if let cid = matcher.attribute(kind: .urlPath, value: detail.value).customer?.id {
+                    set.insert(cid)
+                }
+            }
+            map[host] = set
+        }
+        return map
+    }
+
+    /// urlHosts whose own attribution is empty AND every loaded child path is attributed.
+    /// Used to hide the "Unassigned" tag and to skip the host under the "Unassigned only" filter.
+    private var fullyCoveredHosts: Set<String> {
+        var set = Set<String>()
+        for agg in aggregates where agg.kind == .urlHost {
+            guard matcher.attribute(kind: .urlHost, value: agg.value).customer == nil else { continue }
+            guard let details = hostPathDetails[agg.value], !details.isEmpty else { continue }
+            let allAssigned = details.allSatisfy {
+                matcher.attribute(kind: .urlPath, value: $0.value).customer != nil
+            }
+            if allAssigned { set.insert(agg.value) }
+        }
+        return set
     }
 
     private var hiddenApps: Set<String> {
@@ -198,7 +267,46 @@ struct DiscoverView: View {
     }
 
     private var visibleAggregates: [AppDatabase.SignalAggregate] {
-        aggregates.filter { !isHidden($0) }
+        let covered = fullyCoveredHosts
+        let childIDs = hostChildCustomerIDs
+        return aggregates.filter { agg in
+            if isHidden(agg) { return false }
+            let attr = matcher.attribute(kind: ruleKind(agg.kind), value: agg.value)
+
+            if unassignedOnly {
+                if agg.kind == .urlHost {
+                    if attr.customer != nil { return false }       // host is assigned
+                    if covered.contains(agg.value) { return false } // all children assigned
+                } else {
+                    if attr.customer != nil { return false }
+                }
+            }
+
+            if let cid = customerFilterID {
+                if attr.customer?.id == cid { return true }
+                if agg.kind == .urlHost,
+                   let children = childIDs[agg.value], children.contains(cid) {
+                    return true
+                }
+                return false
+            }
+            return true
+        }
+    }
+
+    /// True when path-detail rows should be limited to children matching the active filters.
+    private var filtersAffectChildren: Bool {
+        unassignedOnly || customerFilterID != nil
+    }
+
+    private func filteredPathDetails(_ details: [AppDatabase.SignalAggregate]) -> [AppDatabase.SignalAggregate] {
+        guard filtersAffectChildren else { return details }
+        return details.filter { detail in
+            let attr = matcher.attribute(kind: .urlPath, value: detail.value)
+            if unassignedOnly, attr.customer != nil { return false }
+            if let cid = customerFilterID, attr.customer?.id != cid { return false }
+            return true
+        }
     }
 
     private var hiddenAggregates: [AppDatabase.SignalAggregate] {
@@ -303,25 +411,32 @@ struct DiscoverView: View {
     private func hostRow(for item: AppDatabase.SignalAggregate) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             row(for: item, isExpandable: item.kind == .urlHost)
-            if item.kind == .urlHost, expandedHosts.contains(item.value) {
+            if item.kind == .urlHost, isHostExpanded(item.value) {
                 pathDetailRows(forHost: item.value)
                     .padding(.leading, 28)
             }
         }
     }
 
+    /// Hosts are forced open when a filter is active so the matching child paths are visible without manual expansion.
+    private func isHostExpanded(_ host: String) -> Bool {
+        if filtersAffectChildren { return true }
+        return expandedHosts.contains(host)
+    }
+
     @ViewBuilder
     private func pathDetailRows(forHost host: String) -> some View {
         if let details = hostPathDetails[host] {
-            if details.isEmpty {
-                Text("No path detail available.")
+            let shown = filteredPathDetails(details)
+            if shown.isEmpty {
+                Text(filtersAffectChildren ? "No paths match the active filter." : "No path detail available.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
             } else {
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(details) { detail in
+                    ForEach(shown) { detail in
                         row(for: detail, isExpandable: false, indented: true)
                     }
                 }
@@ -373,7 +488,9 @@ struct DiscoverView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                } else if !isHiddenRow, !indented || item.kind == .urlPath {
+                } else if !isHiddenRow,
+                          !indented || item.kind == .urlPath,
+                          !(item.kind == .urlHost && fullyCoveredHosts.contains(item.value)) {
                     Text("Unassigned")
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -629,6 +746,15 @@ struct DiscoverView: View {
             let rules = try state.database.allRules()
             self.matcher = RuleMatcher.make(customers: customers, projects: projects, rules: rules)
             self.hidden = try state.database.allHiddenSignals()
+            // Eager-load path detail for urlHosts whose own attribution is empty so we can:
+            //   - hide the parent "Unassigned" tag when every child is assigned
+            //   - honor customer/unassigned filters that look at child rows
+            for agg in baseAggs where agg.kind == .urlHost {
+                if hostPathDetails[agg.value] != nil { continue }
+                if matcher.attribute(kind: .urlHost, value: agg.value).customer != nil { continue }
+                if isHidden(agg) { continue }
+                loadPathDetails(forHost: agg.value)
+            }
         } catch {
             loadError = error.localizedDescription
         }

@@ -57,8 +57,15 @@ struct WeeklyReportView: View {
             }
             Spacer()
             if let report {
-                Text("Total: \(WeeklyReport.formatHours(report.grandTotal).ifEmpty("0.00")) h")
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("Total: \(WeeklyReport.formatHours(report.grandTotal).ifEmpty("0.00")) h")
+                        .foregroundStyle(.secondary)
+                    if report.unattributedTotal > 0 {
+                        Text("+ \(WeeklyReport.formatHours(report.unattributedTotal)) h unattributed")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
                 Button {
                     copyTSV(report)
                 } label: {
@@ -108,7 +115,7 @@ struct WeeklyReportView: View {
                     GridRow {
                         HStack(spacing: 8) {
                             Circle()
-                                .fill(Color(hex: row.color) ?? (row.id == WeeklyReport.unattributedID ? .gray : .blue))
+                                .fill(Color(hex: row.color) ?? .blue)
                                 .frame(width: 10, height: 10)
                             Text(row.label)
                         }
@@ -155,12 +162,14 @@ struct WeeklyReportView: View {
             let samples = try state.database.samples(in: week)
             let events = try state.database.calendarEvents(in: week)
             let sessions = try state.database.sessions(in: week)
+            let claudeDeltas = try state.database.claudeActiveDeltas(in: week)
             let matcher = try RuleMatcher.load(from: state.database)
             self.report = WeeklyReport.compute(
                 week: week,
                 samples: samples,
                 events: events,
                 sessions: sessions,
+                claudeDeltas: claudeDeltas,
                 idleThresholdSeconds: TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60),
                 matcher: matcher,
                 sampleIntervalSeconds: AppSettings.sampleIntervalSeconds
