@@ -123,19 +123,26 @@ struct WeeklyReportRowDetailView: View {
                                 .frame(minWidth: 50, alignment: .trailing)
                         }
                     }
-                    if hiddenCount > 0 || (showAllContributors && visible.count > collapsedLimit) {
+                    if visible.count > collapsedLimit {
                         Button {
                             withAnimation(.easeInOut(duration: 0.18)) {
                                 showAllContributors.toggle()
                             }
                         } label: {
-                            Text(showAllContributors
-                                 ? "Show less"
-                                 : "Show \(hiddenCount) more")
-                                .font(.caption)
+                            HStack(spacing: 4) {
+                                Image(systemName: showAllContributors ? "chevron.up" : "chevron.down")
+                                    .font(.caption2.weight(.semibold))
+                                Text(showAllContributors
+                                     ? "Show less"
+                                     : "Show \(hiddenCount) more")
+                                    .font(.caption.weight(.medium))
+                            }
+                            .foregroundStyle(Color.accentColor)
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 6)
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
                         .padding(.top, 2)
                     }
                 }

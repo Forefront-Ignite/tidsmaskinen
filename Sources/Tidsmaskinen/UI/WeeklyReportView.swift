@@ -93,125 +93,138 @@ struct WeeklyReportView: View {
         return "\(f.string(from: weekStart)) – \(f.string(from: endDate)) \(yearF.string(from: weekStart))"
     }
 
-    // Grid spacing is collapsed into per-cell padding so the visual gap
-    // between cells is absorbed into each cell's tap target — the 18pt
-    // horizontal gap and 8pt vertical gap were dead zones that swallowed
-    // taps and made rows feel unresponsive.
+    // Hand-rolled column layout. Conditional `GridRow`s inside `ForEach`
+    // inside `Grid` caused hit-test indexing to drift — tapping visual row 2
+    // could fire the gesture attached to row 3, and the "Show more" button
+    // inside the conditional detail row swallowed clicks. HStacks with fixed
+    // column widths give predictable hit testing and a single tap target per
+    // row.
+    private static let dateColumnWidth: CGFloat = 72
+    private static let totalColumnWidth: CGFloat = 76
     private static let cellHPadding: CGFloat = 9
     private static let cellVPadding: CGFloat = 4
 
     @ViewBuilder
     private func gridTable(report: WeeklyReport) -> some View {
-        ScrollView([.horizontal, .vertical]) {
-            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
-                GridRow {
-                    headerCell { Text("Customer") }
-                    ForEach(Array(days.enumerated()), id: \.offset) { _, day in
-                        headerCell(minWidth: 56, trailing: true) { Text(dayHeader(day)) }
-                    }
-                    headerCell(minWidth: 60, trailing: true) { Text("Total") }
-                }
-                Divider().gridCellColumns(9).padding(.vertical, 4)
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 0) {
+                headerRow
+                Divider().padding(.vertical, 4)
 
                 if report.rows.isEmpty {
-                    GridRow {
-                        Text("No activity this week.")
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, Self.cellHPadding)
-                            .padding(.vertical, Self.cellVPadding)
-                    }
+                    Text("No activity this week.")
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, Self.cellHPadding)
+                        .padding(.vertical, Self.cellVPadding)
                 }
 
                 ForEach(report.rows) { row in
-                    GridRow {
-                        rowCell(rowID: row.id) {
-                            HStack(spacing: 6) {
-                                Image(systemName: expandedRowID == row.id ? "chevron.down" : "chevron.right")
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 10)
-                                Circle()
-                                    .fill(Color(hex: row.color) ?? .blue)
-                                    .frame(width: 10, height: 10)
-                                Text(row.label)
-                                Spacer(minLength: 0)
-                            }
-                        }
-                        ForEach(0..<7, id: \.self) { i in
-                            rowCell(rowID: row.id, minWidth: 56, trailing: true) {
-                                Text(WeeklyReport.formatHours(row.perDayHours[i]))
-                                    .monospacedDigit()
-                                    .foregroundStyle(row.perDayHours[i] == 0 ? Color.secondary : Color.primary)
-                            }
-                        }
-                        rowCell(rowID: row.id, minWidth: 60, trailing: true) {
-                            Text(WeeklyReport.formatHours(row.totalHours))
-                                .monospacedDigit()
-                                .bold()
-                        }
-                    }
+                    dataRow(row)
                     if expandedRowID == row.id, let breakdown = report.breakdownsByRowID[row.id] {
-                        GridRow {
-                            WeeklyReportRowDetailView(
-                                breakdown: breakdown,
-                                weekDays: days,
-                                rowColor: Color(hex: row.color) ?? .blue
-                            )
-                            .gridCellColumns(9)
-                        }
+                        WeeklyReportRowDetailView(
+                            breakdown: breakdown,
+                            weekDays: days,
+                            rowColor: Color(hex: row.color) ?? .blue
+                        )
+                        .padding(.bottom, 6)
                     }
                 }
 
-                Divider().gridCellColumns(9).padding(.vertical, 4)
-                GridRow {
-                    headerCell { Text("Total").bold().foregroundStyle(.primary) }
-                    ForEach(0..<7, id: \.self) { i in
-                        headerCell(minWidth: 56, trailing: true) {
-                            Text(WeeklyReport.formatHours(report.dayTotals[i]))
-                                .monospacedDigit()
-                                .bold()
-                                .foregroundStyle(.primary)
-                        }
-                    }
-                    headerCell(minWidth: 60, trailing: true) {
-                        Text(WeeklyReport.formatHours(report.grandTotal))
-                            .monospacedDigit()
-                            .bold()
-                            .foregroundStyle(.primary)
-                    }
-                }
+                Divider().padding(.vertical, 4)
+                totalRow(report: report)
             }
             .padding()
         }
     }
 
     @ViewBuilder
-    private func headerCell<Content: View>(
-        minWidth: CGFloat? = nil,
-        trailing: Bool = false,
-        @ViewBuilder _ content: () -> Content
-    ) -> some View {
-        content()
-            .font(.caption.bold())
-            .foregroundStyle(.secondary)
-            .frame(minWidth: minWidth, alignment: trailing ? .trailing : .leading)
-            .padding(.horizontal, Self.cellHPadding)
-            .padding(.vertical, Self.cellVPadding)
+    private var headerRow: some View {
+        HStack(spacing: 0) {
+            Text("Customer")
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, Self.cellHPadding)
+                .padding(.vertical, Self.cellVPadding)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(Array(days.enumerated()), id: \.offset) { _, day in
+                Text(dayHeader(day))
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, Self.cellHPadding)
+                    .padding(.vertical, Self.cellVPadding)
+                    .frame(width: Self.dateColumnWidth, alignment: .trailing)
+            }
+            Text("Total")
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, Self.cellHPadding)
+                .padding(.vertical, Self.cellVPadding)
+                .frame(width: Self.totalColumnWidth, alignment: .trailing)
+        }
     }
 
     @ViewBuilder
-    private func rowCell<Content: View>(
-        rowID: String,
-        minWidth: CGFloat? = nil,
-        trailing: Bool = false,
-        @ViewBuilder _ content: () -> Content
-    ) -> some View {
-        content()
-            .frame(minWidth: minWidth, maxWidth: .infinity, alignment: trailing ? .trailing : .leading)
+    private func dataRow(_ row: WeeklyReport.Row) -> some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: expandedRowID == row.id ? "chevron.down" : "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 10)
+                Circle()
+                    .fill(Color(hex: row.color) ?? .blue)
+                    .frame(width: 10, height: 10)
+                Text(row.label)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
             .padding(.horizontal, Self.cellHPadding)
             .padding(.vertical, Self.cellVPadding)
-            .contentShape(Rectangle())
-            .onTapGesture { toggleExpansion(rowID) }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            ForEach(0..<7, id: \.self) { i in
+                Text(WeeklyReport.formatHours(row.perDayHours[i]))
+                    .monospacedDigit()
+                    .foregroundStyle(row.perDayHours[i] == 0 ? Color.secondary : Color.primary)
+                    .padding(.horizontal, Self.cellHPadding)
+                    .padding(.vertical, Self.cellVPadding)
+                    .frame(width: Self.dateColumnWidth, alignment: .trailing)
+            }
+            Text(WeeklyReport.formatHours(row.totalHours))
+                .monospacedDigit()
+                .bold()
+                .padding(.horizontal, Self.cellHPadding)
+                .padding(.vertical, Self.cellVPadding)
+                .frame(width: Self.totalColumnWidth, alignment: .trailing)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { toggleExpansion(row.id) }
+    }
+
+    @ViewBuilder
+    private func totalRow(report: WeeklyReport) -> some View {
+        HStack(spacing: 0) {
+            Text("Total")
+                .bold()
+                .padding(.horizontal, Self.cellHPadding)
+                .padding(.vertical, Self.cellVPadding)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(0..<7, id: \.self) { i in
+                Text(WeeklyReport.formatHours(report.dayTotals[i]))
+                    .monospacedDigit()
+                    .bold()
+                    .padding(.horizontal, Self.cellHPadding)
+                    .padding(.vertical, Self.cellVPadding)
+                    .frame(width: Self.dateColumnWidth, alignment: .trailing)
+            }
+            Text(WeeklyReport.formatHours(report.grandTotal))
+                .monospacedDigit()
+                .bold()
+                .padding(.horizontal, Self.cellHPadding)
+                .padding(.vertical, Self.cellVPadding)
+                .frame(width: Self.totalColumnWidth, alignment: .trailing)
+        }
     }
 
     private func dayHeader(_ date: Date) -> String {
