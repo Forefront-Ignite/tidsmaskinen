@@ -7,18 +7,21 @@ The full design lives in **`plans/master-plan.md`**. Read it before making non-t
 ## Build & run
 
 For development iteration:
+
 ```sh
 swift build
 swift run Tidsmaskinen
 ```
 
 For real use (required for TCC permissions to stick):
+
 ```sh
 ./bin/make-app.sh release
 open Tidsmaskinen.app
 ```
 
 `swift run` produces a bare executable with **no CFBundleIdentifier** — macOS's TCC system silently refuses to issue Automation prompts and Accessibility grants reset across rebuilds. `bin/make-app.sh` wraps the binary in `Tidsmaskinen.app` with:
+
 - stable bundle ID `se.forefront.tidsmaskinen`
 - `LSUIElement` (menu-bar agent, no dock)
 - `NSAppleEventsUsageDescription` (the prompt copy users see)
@@ -59,6 +62,10 @@ Sources/Tidsmaskinen/
     WeeklyReportView.swift  # weekly grid + Copy as TSV
 plans/master-plan.md        # full design doc
 ```
+
+## Commit & PR Style
+
+Never add `Co-Authored-By` trailers or AI-attribution footers (e.g. "🤖 Generated with Claude Code") to commit messages or PR bodies. Commits and PRs should read as if the human authored them.
 
 ## Conventions
 
