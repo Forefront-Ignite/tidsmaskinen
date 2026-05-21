@@ -50,7 +50,7 @@ Sources/Tidsmaskinen/
     Database.swift          # GRDB DatabaseQueue, migrations v1..v3, all CRUD + signal aggregations
     Models.swift            # ActivitySample, Customer, Project, Rule (+ Rule.Kind enum)
   Attribution/
-    RuleMatcher.swift       # match precedence: gitRepoSlug → gitRemoteHost → urlHost → windowTitle → appBundleID
+    RuleMatcher.swift       # match precedence: gitRepoSlug → gitRemoteHost → urlPath → urlHost → windowTitle → appBundleID
     WeeklyReport.swift      # bucketed (customer, project?) → per-day hours + TSV export
   UI/
     MenuBarView.swift       # menu-bar dropdown (status, permissions, links to other windows)

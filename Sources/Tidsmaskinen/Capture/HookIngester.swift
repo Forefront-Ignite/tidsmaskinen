@@ -28,10 +28,22 @@ final class HookIngester {
                 appropriateFor: nil,
                 create: true)
             let dir = appSupport.appendingPathComponent("Tidsmaskinen", isDirectory: true)
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: dir,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
             let url = dir.appendingPathComponent(Self.eventLogFilename)
             if !FileManager.default.fileExists(atPath: url.path) {
-                FileManager.default.createFile(atPath: url.path, contents: nil)
+                FileManager.default.createFile(
+                    atPath: url.path,
+                    contents: nil,
+                    attributes: [.posixPermissions: 0o600])
+            } else {
+                // Tighten perms in case an earlier build created the file with
+                // the default umask.
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: url.path)
             }
             self.fileURL = url
 
@@ -98,20 +110,30 @@ final class HookIngester {
 
     private func readPending() {
         guard let url = fileURL else { return }
-        let lastOffset: UInt64 = UInt64(UserDefaults.standard.integer(forKey: Self.lastOffsetKey))
         guard let handle = try? FileHandle(forReadingFrom: url) else { return }
         defer { try? handle.close() }
         do {
+            // Use the actual seek base (0 after truncation, else the saved offset)
+            // when persisting the new offset — reusing the pre-truncation value
+            // would store base+consumed instead of consumed, causing endless
+            // reprocessing on subsequent reads.
+            let savedOffset: UInt64 = UInt64(UserDefaults.standard.integer(forKey: Self.lastOffsetKey))
             let endOffset = try handle.seekToEnd()
-            if endOffset < lastOffset {
-                // File was truncated; restart from the beginning.
+            let seekBase: UInt64
+            if endOffset < savedOffset {
                 try handle.seek(toOffset: 0)
-                UserDefaults.standard.set(0, forKey: Self.lastOffsetKey)
+                seekBase = 0
             } else {
-                try handle.seek(toOffset: lastOffset)
+                try handle.seek(toOffset: savedOffset)
+                seekBase = savedOffset
             }
             let data = handle.availableData
-            if data.isEmpty { return }
+            if data.isEmpty {
+                if seekBase != savedOffset {
+                    UserDefaults.standard.set(Int(seekBase), forKey: Self.lastOffsetKey)
+                }
+                return
+            }
             guard var text = String(data: data, encoding: .utf8) else { return }
 
             // Process complete lines only; if last byte isn't a newline, leave it for next read.
@@ -126,7 +148,7 @@ final class HookIngester {
             for line in lines where !line.trimmingCharacters(in: .whitespaces).isEmpty {
                 handleLine(line)
             }
-            UserDefaults.standard.set(Int(lastOffset) + consumedBytes, forKey: Self.lastOffsetKey)
+            UserDefaults.standard.set(Int(seekBase) + consumedBytes, forKey: Self.lastOffsetKey)
         } catch {
             // ignore; next tick will try again
         }

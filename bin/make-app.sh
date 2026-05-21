@@ -85,11 +85,13 @@ CONF
         return 1
     fi
 
+    # -T /usr/bin/codesign grants the private key to codesign without a prompt.
+    # Avoid -A (which authorises ALL applications to use the key); that's
+    # broader than we need and a credential-stealing app could sign with it.
     if ! security import "$tmp/cert.p12" \
             -k "$HOME/Library/Keychains/login.keychain-db" \
             -P "$p12_pass" \
-            -T /usr/bin/codesign \
-            -A >/dev/null 2>&1; then
+            -T /usr/bin/codesign >/dev/null 2>&1; then
         echo "    ✗ security import failed" >&2
         return 1
     fi
@@ -199,6 +201,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>Tidsmaskinen reads the active Chrome tab URL to attribute browsing time to customers.</string>
     <key>NSAppleScriptEnabled</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Tidsmaskinen detects when the microphone is in use (without recording audio) to identify VoIP calls for time attribution.</string>
 $ICON_PLIST_ENTRY
 </dict>
 </plist>

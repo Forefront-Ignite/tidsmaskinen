@@ -43,7 +43,7 @@ struct WeeklyReport {
         }
 
         var rows: [Row] = []
-        var dayTotalSeconds = Array(repeating: 0.0, count: 7)
+        var dayTotals = Array(repeating: 0.0, count: 7)
         var unattributedSeconds = Array(repeating: 0.0, count: 7)
 
         for (bucketID, bySource) in engine.perBucketPerSource {
@@ -56,13 +56,19 @@ struct WeeklyReport {
                 continue
             }
             let (label, color) = labelAndColor(forBucketID: bucketID, matcher: matcher)
+            // Round each cell to nearest 0.25h at construction time so the
+            // displayed grid and TSV stay self-consistent — row total is the
+            // sum of its cells, column total is the sum of its cells, grand
+            // total is the sum of everything. Avoids the classic "0.10h × 7
+            // shows blank but the row total reads 0.75".
+            let roundedDay = seconds.map { roundedQuarter($0 / 3600.0) }
             rows.append(Row(
                 id: bucketID,
                 label: label,
                 color: color,
-                perDayHours: seconds.map { $0 / 3600.0 }
+                perDayHours: roundedDay
             ))
-            for d in 0..<7 { dayTotalSeconds[d] += seconds[d] }
+            for d in 0..<7 { dayTotals[d] += roundedDay[d] }
         }
 
         rows.sort { lhs, rhs in
@@ -73,8 +79,8 @@ struct WeeklyReport {
         return WeeklyReport(
             week: week,
             rows: rows,
-            dayTotals: dayTotalSeconds.map { $0 / 3600.0 },
-            unattributedPerDay: unattributedSeconds.map { $0 / 3600.0 }
+            dayTotals: dayTotals,
+            unattributedPerDay: unattributedSeconds.map { roundedQuarter($0 / 3600.0) }
         )
     }
 
@@ -85,7 +91,7 @@ struct WeeklyReport {
         let header = ["Customer"] + weekDays.map { formatter.string(from: $0) } + ["Total"]
         lines.append(header.joined(separator: "\t"))
         for row in rows {
-            let cells = [row.label]
+            let cells = [Self.tsvSanitize(row.label)]
                 + row.perDayHours.map { Self.formatHours($0) }
                 + [Self.formatHours(row.totalHours)]
             lines.append(cells.joined(separator: "\t"))
@@ -97,10 +103,30 @@ struct WeeklyReport {
         return lines.joined(separator: "\n")
     }
 
+    /// Replace tab/newline/CR in customer or project names so they can't break
+    /// the TSV layout. Anything weird is collapsed to a single space.
+    private static func tsvSanitize(_ s: String) -> String {
+        var out = ""
+        out.reserveCapacity(s.count)
+        for ch in s {
+            switch ch {
+            case "\t", "\n", "\r": out.append(" ")
+            default: out.append(ch)
+            }
+        }
+        return out
+    }
+
+    /// Values that reach this function are already quarter-rounded at report
+    /// construction time, so we just format them.
     static func formatHours(_ hours: Double) -> String {
-        let rounded = (hours * 4).rounded() / 4   // nearest 0.25h
+        let rounded = roundedQuarter(hours)
         if rounded == 0 { return "" }
         return String(format: "%.2f", rounded)
+    }
+
+    static func roundedQuarter(_ hours: Double) -> Double {
+        (hours * 4).rounded() / 4
     }
 
     // MARK: - Row drill-down

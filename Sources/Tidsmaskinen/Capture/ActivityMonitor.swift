@@ -82,7 +82,11 @@ final class ActivityMonitor {
 
         var chromeURL: String?
         var chromeHost: String?
-        if !isIdle, let id = bundleID, Probes.chromiumBrowserBundleIDs.contains(id) {
+        // Only probe Chrome's URL when Chrome is actually frontmost — the
+        // AppleScript targets "Google Chrome" specifically, so running it for
+        // Brave/Arc/etc. would (a) trigger Chrome's Automation prompt and
+        // (b) return a URL from a backgrounded Chrome window.
+        if !isIdle, bundleID == Probes.chromeBundleID {
             chromeURL = Probes.chromeActiveTabURL()
             chromeHost = chromeURL.flatMap(Probes.host(for:))
         }

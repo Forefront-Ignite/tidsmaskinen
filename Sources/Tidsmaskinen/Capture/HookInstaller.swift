@@ -109,17 +109,28 @@ enum HookInstaller {
         return .notInstalled
     }
 
+    /// True if `cmd` looks like an invocation of *our* tm-hook binary, not an
+    /// unrelated user script that happens to contain "tm-hook" in its name
+    /// (e.g. `~/scripts/my-tm-hook-test.sh`). We require the substring to be
+    /// either the whole first token or end at a path-segment boundary so a
+    /// script named `tm-hook-other` doesn't match.
+    private static func isTmHookCommand(_ cmd: String) -> Bool {
+        let firstToken = cmd.split(separator: " ", maxSplits: 1).first.map(String.init) ?? cmd
+        let basename = (firstToken as NSString).lastPathComponent
+        return basename == "tm-hook"
+    }
+
     /// Extracts our tm-hook command from an entry in either the correct
     /// wrapped shape `{ matcher, hooks: [{ command }] }` or the legacy flat
     /// shape `{ command }` that earlier builds wrote.
     private static func tmHookCommand(in entry: [String: Any]) -> String? {
         if let inner = entry["hooks"] as? [[String: Any]] {
             for h in inner {
-                if let cmd = h["command"] as? String, cmd.contains("tm-hook") { return cmd }
+                if let cmd = h["command"] as? String, isTmHookCommand(cmd) { return cmd }
             }
             return nil
         }
-        if let cmd = entry["command"] as? String, cmd.contains("tm-hook") { return cmd }
+        if let cmd = entry["command"] as? String, isTmHookCommand(cmd) { return cmd }
         return nil
     }
 
@@ -130,14 +141,14 @@ enum HookInstaller {
         while i < entries.count {
             var entry = entries[i]
             if var inner = entry["hooks"] as? [[String: Any]] {
-                inner.removeAll { ($0["command"] as? String)?.contains("tm-hook") == true }
+                inner.removeAll { (($0["command"] as? String).map(isTmHookCommand) ?? false) }
                 if inner.isEmpty {
                     entries.remove(at: i)
                     continue
                 }
                 entry["hooks"] = inner
                 entries[i] = entry
-            } else if (entry["command"] as? String)?.contains("tm-hook") == true {
+            } else if let cmd = entry["command"] as? String, isTmHookCommand(cmd) {
                 entries.remove(at: i)
                 continue
             }
@@ -156,9 +167,22 @@ enum HookInstaller {
     }
 
     private static func writeSettings(_ dict: [String: Any]) throws {
-        try FileManager.default.createDirectory(
+        let fm = FileManager.default
+        try fm.createDirectory(
             at: claudeSettingsPath.deletingLastPathComponent(),
             withIntermediateDirectories: true)
+
+        // On the very first install (no backup exists yet) and only if the
+        // user already had a settings.json, snapshot it so they have a known-
+        // good reference if our rewrite ever surprises them.
+        let backupPath = claudeSettingsPath
+            .deletingLastPathComponent()
+            .appendingPathComponent("settings.json.tm-backup")
+        if fm.fileExists(atPath: claudeSettingsPath.path),
+           !fm.fileExists(atPath: backupPath.path) {
+            try? fm.copyItem(at: claudeSettingsPath, to: backupPath)
+        }
+
         let data = try JSONSerialization.data(
             withJSONObject: dict,
             options: [.prettyPrinted, .sortedKeys])

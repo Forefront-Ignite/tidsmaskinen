@@ -21,39 +21,36 @@ let args = CommandLine.arguments
 let eventType = args.count > 1 ? args[1] : "Unknown"
 
 let stdinData = FileHandle.standardInput.readDataToEndOfFile()
-let payloadString: String = {
-    guard !stdinData.isEmpty else { return "null" }
-    // The hook delivers JSON via stdin; pass it through as-is.
-    if let s = String(data: stdinData, encoding: .utf8) {
-        return s.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-    return "null"
-}()
+
+// Decode the incoming payload as JSON. If it isn't valid JSON, drop it on
+// the floor (better than corrupting the JSONL log with a forged line).
+let payloadObject: Any
+if stdinData.isEmpty {
+    payloadObject = NSNull()
+} else if let parsed = try? JSONSerialization.jsonObject(with: stdinData,
+                                                          options: [.fragmentsAllowed]) {
+    payloadObject = parsed
+} else {
+    exit(0)
+}
 
 let isoFormatter = ISO8601DateFormatter()
 isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 let timestamp = isoFormatter.string(from: Date())
 
-// Build a single-line JSON envelope: {"timestamp":"...","eventType":"...","payload":{...}}
-let envelope = """
-{"timestamp":"\(timestamp)","eventType":"\(escapeJSON(eventType))","payload":\(payloadString)}
+let envelope: [String: Any] = [
+    "timestamp": timestamp,
+    "eventType": eventType,
+    "payload": payloadObject
+]
 
-"""
-
-func escapeJSON(_ s: String) -> String {
-    var out = ""
-    for ch in s {
-        switch ch {
-        case "\"":  out += "\\\""
-        case "\\":  out += "\\\\"
-        case "\n":  out += "\\n"
-        case "\r":  out += "\\r"
-        case "\t":  out += "\\t"
-        default:    out.append(ch)
-        }
-    }
-    return out
+// Use .sortedKeys so the output is deterministic; pad with a single trailing
+// newline so this is one JSONL line.
+guard var envelopeData = try? JSONSerialization.data(withJSONObject: envelope,
+                                                      options: [.sortedKeys]) else {
+    exit(0)
 }
+envelopeData.append(0x0A)  // '\n'
 
 let fm = FileManager.default
 guard let appSupport = try? fm.url(for: .applicationSupportDirectory,
@@ -63,18 +60,30 @@ guard let appSupport = try? fm.url(for: .applicationSupportDirectory,
     exit(0)
 }
 let dir = appSupport.appendingPathComponent("Tidsmaskinen", isDirectory: true)
-try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+try? fm.createDirectory(at: dir,
+                        withIntermediateDirectories: true,
+                        attributes: [.posixPermissions: 0o700])
 let logURL = dir.appendingPathComponent("claude-events.jsonl")
 
 if !fm.fileExists(atPath: logURL.path) {
-    fm.createFile(atPath: logURL.path, contents: nil)
+    fm.createFile(atPath: logURL.path,
+                  contents: nil,
+                  attributes: [.posixPermissions: 0o600])
+} else {
+    // Belt-and-braces: tighten perms if a previous build created the file
+    // with the default umask.
+    try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logURL.path)
 }
 
-guard let handle = try? FileHandle(forWritingTo: logURL) else { exit(0) }
-do {
-    try handle.seekToEnd()
-    try handle.write(contentsOf: Data(envelope.utf8))
-    try handle.close()
-} catch {
-    // Silent failure — Claude Code must not see this.
+// Open with O_APPEND so concurrent writes from parallel Claude sessions don't
+// stomp on each other. POSIX guarantees atomic append for writes up to
+// PIPE_BUF (≥ 512 bytes on macOS); our envelopes can exceed that, but
+// O_APPEND still gives us "writes don't overlap" because the kernel updates
+// the file offset to EOF on each write.
+let fd = open(logURL.path, O_WRONLY | O_APPEND | O_CREAT, 0o600)
+if fd < 0 { exit(0) }
+defer { close(fd) }
+_ = envelopeData.withUnsafeBytes { buf -> ssize_t in
+    guard let base = buf.baseAddress else { return 0 }
+    return write(fd, base, buf.count)
 }

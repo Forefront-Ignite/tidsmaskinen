@@ -28,6 +28,10 @@ enum KeychainStore {
         if updateStatus == errSecItemNotFound {
             var addQuery = baseQuery
             addQuery[kSecValueData as String] = data
+            // Bind the item to this device so the MS Graph refresh token
+            // doesn't ride iCloud Keychain to another Mac (where TCC grants
+            // and the bundled cert's leaf hash wouldn't match anyway).
+            addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
             guard addStatus == errSecSuccess else { throw KeychainError.unhandled(addStatus) }
         } else if updateStatus != errSecSuccess {

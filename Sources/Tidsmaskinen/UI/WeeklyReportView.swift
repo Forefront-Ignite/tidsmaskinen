@@ -4,6 +4,10 @@ import AppKit
 struct WeeklyReportView: View {
     @EnvironmentObject private var state: AppState
     @State private var weekStart: Date = Calendar.weekStartingMonday().currentWeekInterval().start
+    // Tracks which week was "current" the last time we computed the report.
+    // If the wall clock rolls into a new week while the window is open AND the
+    // user hasn't manually navigated, we snap weekStart forward.
+    @State private var lastKnownCurrentWeekStart: Date = Calendar.weekStartingMonday().currentWeekInterval().start
     @State private var report: WeeklyReport?
     @State private var loadError: String?
     @State private var copied: Bool = false
@@ -188,6 +192,16 @@ struct WeeklyReportView: View {
     }
 
     private func reload() {
+        // If the calendar has rolled into a new week and the user is still
+        // viewing the previously-current week, advance to the new current
+        // week. If they've navigated elsewhere, leave them alone.
+        let currentWeek = calendar.currentWeekInterval().start
+        if currentWeek != lastKnownCurrentWeekStart {
+            if weekStart == lastKnownCurrentWeekStart {
+                weekStart = currentWeek
+            }
+            lastKnownCurrentWeekStart = currentWeek
+        }
         do {
             let samples = try state.database.samples(in: week)
             let events = try state.database.calendarEvents(in: week)

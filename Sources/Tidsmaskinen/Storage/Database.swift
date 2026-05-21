@@ -11,6 +11,7 @@ struct AppDatabase {
             withIntermediateDirectories: true
         )
         var config = Configuration()
+        config.foreignKeysEnabled = true
         config.prepareDatabase { db in
             try db.execute(sql: "PRAGMA journal_mode = WAL;")
         }
@@ -201,7 +202,7 @@ struct AppDatabase {
     /// Pass nil to clear.
     func setSampleAttribution(sampleIDs: [Int64], customerID: String?, projectID: String?) throws {
         guard !sampleIDs.isEmpty else { return }
-        try dbQueue.write { db in
+        _ = try dbQueue.write { db in
             try ActivitySample
                 .filter(sampleIDs.contains(ActivitySample.Columns.id))
                 .updateAll(db,
@@ -211,7 +212,7 @@ struct AppDatabase {
     }
 
     func setCalendarEventAttribution(eventID: String, customerID: String?, projectID: String?) throws {
-        try dbQueue.write { db in
+        _ = try dbQueue.write { db in
             try CalendarEvent
                 .filter(CalendarEvent.Columns.id == eventID)
                 .updateAll(db,
@@ -221,7 +222,7 @@ struct AppDatabase {
     }
 
     func setClaudeSessionAttribution(sessionID: String, customerID: String?, projectID: String?) throws {
-        try dbQueue.write { db in
+        _ = try dbQueue.write { db in
             try ClaudeSession
                 .filter(ClaudeSession.Columns.id == sessionID)
                 .updateAll(db,
