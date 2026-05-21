@@ -75,7 +75,7 @@ Never add `Co-Authored-By` trailers or AI-attribution footers (e.g. "🤖 Genera
 - **Probe permissions**: `Probes.windowTitle` and `windowDocumentPath` short-circuit when `AXIsProcessTrusted` is false. AppleScript probes (Chrome) trigger Automation prompts on first call. Don't call probes outside the relevant frontmost-app branch — it surfaces unwanted prompts.
 - **GRDB upserts**: records are value types but `upsert(_:)` mutates `id` on insert. Always declare a local `var` copy inside `dbQueue.write { ... }`.
 - **Glob vs substring**: `Rule.Kind.supportsGlob` decides the matching mode. Window titles and email domains are substring (case-insensitive); everything else is glob (`*` wildcard).
-- **Customer vs project**: rules can target a `customer` alone (URL hosts, email domains, generic apps) or a `(customer, project)` pair (git repos). The Discover sheet enforces this — keep it consistent if adding new rule kinds.
+- **Customer vs project**: rules can target a `customer` alone or a `(customer, project)` pair for any kind. The Discover and Calls assignment sheets expose the project picker for every kind once a customer is chosen.
 
 ## Phases
 

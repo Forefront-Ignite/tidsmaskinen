@@ -501,6 +501,15 @@ struct DiscoverView: View {
         .padding(.vertical, indented ? 4 : 6)
         .padding(.horizontal, 10)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.controlBackgroundColor).opacity(indented ? 0.5 : 1.0)))
+        // Make the entire row a hit target for the disclosure when expandable —
+        // the small chevron is a precise tap. Inner Buttons (Assign…, hide,
+        // chevron) consume their own taps so this only fires on row body.
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isExpandable {
+                toggleExpansion(host: item.value)
+            }
+        }
     }
 
     private func displayValue(for item: AppDatabase.SignalAggregate, indented: Bool) -> String {
@@ -687,9 +696,6 @@ private struct AssignSheet: View {
     @State private var localProjects: [Project] = []
     @State private var error: String?
 
-    private var canPickProject: Bool { signal.kind == .gitRepoSlug }
-    private var hideProjectExplanation: Bool { signal.kind == .meetingDomain }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
@@ -703,12 +709,8 @@ private struct AssignSheet: View {
 
             customerPicker
 
-            if canPickProject, selectedCustomerID != nil {
+            if selectedCustomerID != nil {
                 projectPicker
-            } else if !canPickProject {
-                Text("Project assignment is only available for Git repos. \(kindLabel) maps directly to a customer.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             if let error {
@@ -730,16 +732,6 @@ private struct AssignSheet: View {
         .onAppear {
             localCustomers = customers
             localProjects = projects
-        }
-    }
-
-    private var kindLabel: String {
-        switch signal.kind {
-        case .gitRepoSlug: return "Git repo"
-        case .urlHost: return "Browser host"
-        case .urlPath: return "Browser URL"
-        case .appBundleID: return "App"
-        case .meetingDomain: return "Meeting attendee domain"
         }
     }
 
@@ -846,7 +838,7 @@ private struct AssignSheet: View {
 
     private func save() {
         guard let customerID = selectedCustomerID else { return }
-        onSave(customerID, canPickProject ? selectedProjectID : nil)
+        onSave(customerID, selectedProjectID)
         dismiss()
     }
 }
