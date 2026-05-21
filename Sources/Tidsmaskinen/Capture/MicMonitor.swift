@@ -10,7 +10,9 @@ enum MicDebug {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("mic-debug.log", isDirectory: false)
     }()
-    private static let formatter: ISO8601DateFormatter = {
+    // ISO8601DateFormatter isn't Sendable but is only touched from the
+    // serial `mic-debug` queue below, so concurrent access is impossible.
+    nonisolated(unsafe) private static let formatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f

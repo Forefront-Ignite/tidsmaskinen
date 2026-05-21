@@ -73,7 +73,10 @@ enum MeetingRSVPFilter: String, CaseIterable, Identifiable {
 /// Read-only access to user settings for non-View call sites.
 /// Views should use `@AppStorage` directly so they reactively rebuild.
 enum AppSettings {
-    static let defaults = UserDefaults.standard
+    // UserDefaults.standard is documented thread-safe, but its type isn't
+    // Sendable. nonisolated(unsafe) lets us share it across actors without
+    // wrapping every accessor.
+    nonisolated(unsafe) static let defaults = UserDefaults.standard
 
     static var sampleIntervalSeconds: Int {
         let v = defaults.integer(forKey: SettingsKey.sampleIntervalSeconds)

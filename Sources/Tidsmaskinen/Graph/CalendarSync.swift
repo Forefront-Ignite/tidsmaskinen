@@ -13,8 +13,11 @@ final class CalendarSync: ObservableObject {
     let client: GraphClient
 
     private static let lastSyncedKey = "calendarSync.lastSyncedAt"
-    private var autoSyncTimer: Timer?
-    private var autoSyncObserver: NSObjectProtocol?
+    // Timer and NSObjectProtocol aren't Sendable. These are only mutated from
+    // the main actor (this class is @MainActor); nonisolated(unsafe) lets
+    // deinit read them for cleanup. Don't access from any non-main context.
+    nonisolated(unsafe) private var autoSyncTimer: Timer?
+    nonisolated(unsafe) private var autoSyncObserver: NSObjectProtocol?
 
     init(database: AppDatabase, client: GraphClient) {
         self.database = database

@@ -2,13 +2,15 @@ import Foundation
 import AppKit
 import CoreGraphics
 
+@MainActor
 final class ActivityMonitor {
     private let database: AppDatabase
     private var timer: Timer?
     private var isPaused = false
     private let ownPID: pid_t = ProcessInfo.processInfo.processIdentifier
     private var currentInterval: TimeInterval = 0
-    private var settingsObserver: NSObjectProtocol?
+    // Read in deinit-style teardown paths; mutated only on MainActor.
+    nonisolated(unsafe) private var settingsObserver: NSObjectProtocol?
 
     var onSample: ((ActivitySample) -> Void)?
     var onError: ((Error) -> Void)?
@@ -30,7 +32,12 @@ final class ActivityMonitor {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.rescheduleTimer()
+            // The notification queue runs on the main thread (queue: .main)
+            // but the closure is @Sendable; hop explicitly so the compiler
+            // can see we're back on the actor.
+            Task { @MainActor [weak self] in
+                self?.rescheduleTimer()
+            }
         }
     }
 
@@ -49,7 +56,9 @@ final class ActivityMonitor {
         if desired == currentInterval, timer != nil { return }
         timer?.invalidate()
         let t = Timer(timeInterval: desired, repeats: true) { [weak self] _ in
-            self?.captureNow()
+            Task { @MainActor [weak self] in
+                self?.captureNow()
+            }
         }
         t.tolerance = max(1, desired * 0.1)
         RunLoop.main.add(t, forMode: .common)

@@ -28,7 +28,12 @@ enum WindowID {
     static let main = "main"
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    // NSApplicationDelegateAdaptor instantiates this from a generic context
+    // that doesn't get to assume MainActor isolation.
+    nonisolated override init() { super.init() }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
@@ -50,10 +55,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
-    @objc private func windowVisibilityChanged(_ notification: Notification) {
-        // Defer one runloop tick so willCloseNotification has already removed
-        // the window from NSApp.windows by the time we count.
-        DispatchQueue.main.async { [weak self] in
+    @objc private nonisolated func windowVisibilityChanged(_ notification: Notification) {
+        // NotificationCenter posts can arrive on any thread under Swift 6's
+        // stricter rules; hop back to MainActor to access NSApp safely. The
+        // deferred dispatch also gives willCloseNotification time to remove
+        // the window from NSApp.windows before we count.
+        Task { @MainActor [weak self] in
             self?.updateActivationPolicy()
         }
     }

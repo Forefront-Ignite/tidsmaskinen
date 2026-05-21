@@ -1,6 +1,11 @@
 import Foundation
 import AppKit
-import ApplicationServices
+// @preconcurrency: the ApplicationServices C-bridged constants like
+// `kAXTrustedCheckOptionPrompt` are declared as global `var` in the SDK
+// even though they're effectively immutable after process start. Swift 6
+// flags any read as unsafe; treat those as warnings until Apple annotates
+// them.
+@preconcurrency import ApplicationServices
 
 enum Probes {
     static let codeEditorBundleIDs: Set<String> = [
@@ -21,11 +26,19 @@ enum Probes {
     static let chromeBundleID = "com.google.Chrome"
 
     /// Last AppleScript error from `chromeActiveTabURL`. Useful for diagnostics.
-    static var lastChromeError: String?
+    /// Single-writer (ActivityMonitor's main-thread timer); the debug Diagnostics
+    /// view reads it on main too. nonisolated(unsafe) avoids dragging actor
+    /// isolation through the whole module.
+    nonisolated(unsafe) static var lastChromeError: String?
+
+    /// Captured once at first access so we don't repeatedly reach into the
+    /// global var `kAXTrustedCheckOptionPrompt` from concurrent contexts.
+    /// String is Sendable; the underlying CFString is process-lifetime.
+    private static let axTrustedCheckOptionPrompt: String =
+        kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
 
     static func isAccessibilityTrusted(promptIfNeeded: Bool) -> Bool {
-        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        let opts: NSDictionary = [key: promptIfNeeded]
+        let opts: NSDictionary = [axTrustedCheckOptionPrompt: promptIfNeeded]
         return AXIsProcessTrustedWithOptions(opts)
     }
 
@@ -95,7 +108,7 @@ enum Probes {
         let err = AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &window)
         guard err == .success, let window else { return nil }
         var title: CFTypeRef?
-        AXUIElementCopyAttributeValue(unsafeBitCast(window, to: AXUIElement.self),
+        AXUIElementCopyAttributeValue(unsafeDowncast(window, to: AXUIElement.self),
                                       kAXTitleAttribute as CFString,
                                       &title)
         return title as? String
@@ -108,7 +121,7 @@ enum Probes {
         guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &window) == .success,
               let window else { return nil }
         var doc: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(unsafeBitCast(window, to: AXUIElement.self),
+        guard AXUIElementCopyAttributeValue(unsafeDowncast(window, to: AXUIElement.self),
                                             kAXDocumentAttribute as CFString,
                                             &doc) == .success,
               let raw = doc as? String else { return nil }
@@ -128,7 +141,10 @@ enum Probes {
     end tell
     """
 
-    private static let chromeScript: NSAppleScript? = NSAppleScript(source: chromeScriptSource)
+    // NSAppleScript isn't Sendable but is only ever used from the main thread
+    // (ActivityMonitor.captureNow runs on the main runloop). nonisolated(unsafe)
+    // pins this acknowledgement at the storage site rather than per call.
+    nonisolated(unsafe) private static let chromeScript: NSAppleScript? = NSAppleScript(source: chromeScriptSource)
 
     /// Returns the URL of the active tab if Chrome is frontmost.
     /// First successful call triggers an Automation permission prompt for Google Chrome.

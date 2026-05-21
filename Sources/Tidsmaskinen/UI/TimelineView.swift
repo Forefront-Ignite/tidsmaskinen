@@ -927,7 +927,9 @@ private struct TimelineScrollZoom: NSViewRepresentable {
 
 final class ScrollZoomMonitorView: NSView {
     var onZoomDelta: ((CGFloat) -> Void)?
-    private var monitor: Any?
+    // `monitor` is the opaque handle returned by addLocalMonitorForEvents.
+    // Stored as Any?; only ever set on the main actor, read in deinit.
+    nonisolated(unsafe) private var monitor: Any?
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
