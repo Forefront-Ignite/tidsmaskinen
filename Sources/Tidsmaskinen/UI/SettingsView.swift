@@ -12,12 +12,6 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.graphTenantID) private var graphTenantID: String = ""
     @AppStorage(SettingsKey.calendarAutoSyncMinutes) private var autoSyncMinutes: Int = 5
     @AppStorage(SettingsKey.claudeIdleThresholdMinutes) private var claudeIdleMinutes: Int = 5
-    @AppStorage(SettingsKey.aiModel) private var aiModel: String = AppSettings.defaultAIModel
-    @AppStorage(SettingsKey.aiAuthMode) private var aiAuthModeRaw: String = ""
-    @State private var apiKeyDraft: String = ""
-    @State private var apiKeyStatus: String = ""
-    @State private var didLoadApiKey: Bool = false
-    @State private var detectedClaudePath: String? = nil
     @State private var launchAtLogin: Bool = LoginItemManager.isEnabled
     @State private var loginItemError: String?
 
@@ -86,10 +80,6 @@ struct SettingsView: View {
                 claudeCodeSection
             }
 
-            Section("AI Suggestions") {
-                aiSection
-            }
-
             Section("Microsoft Graph") {
                 Picker("Preset", selection: presetBinding) {
                     ForEach(GraphPreset.allCases) { preset in
@@ -148,108 +138,6 @@ struct SettingsView: View {
                 }
                 launchAtLogin = LoginItemManager.isEnabled
             }
-        )
-    }
-
-    @ViewBuilder
-    private var aiSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Picker("Auth", selection: authModeBinding) {
-                ForEach(AIAuthMode.allCases) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-
-            switch authModeBinding.wrappedValue {
-            case .claudeCodeCLI:
-                claudeCLIRow
-            case .apiKey:
-                apiKeyRow
-            }
-
-            Picker("Model", selection: $aiModel) {
-                Text("Sonnet 4.6 (balanced)").tag("claude-sonnet-4-6")
-                Text("Opus 4.7 (most accurate)").tag("claude-opus-4-7")
-                Text("Haiku 4.5 (fastest)").tag("claude-haiku-4-5-20251001")
-            }
-            Text("Used by Discover's \"Suggest with AI\" button to map unassigned signals to customers.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .onAppear {
-            detectedClaudePath = ClaudeCLIDetector.findClaudeBinary()
-            if !didLoadApiKey {
-                if let existing = KeychainStore.getData(account: ClaudeAPI.apiKeyAccount)
-                    .flatMap({ String(data: $0, encoding: .utf8) }), !existing.isEmpty {
-                    apiKeyStatus = "•••• \(String(existing.suffix(4)))"
-                } else {
-                    apiKeyStatus = "Not set"
-                }
-                didLoadApiKey = true
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var claudeCLIRow: some View {
-        HStack(spacing: 6) {
-            if let path = detectedClaudePath {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.green)
-                Text("Detected `claude` at").font(.caption)
-                Text(path).font(.caption.monospaced()).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.middle)
-            } else {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.orange)
-                Text("Could not find `claude` in common paths. Install Claude Code (npm i -g @anthropic-ai/claude-code) or switch to API key mode.")
-                    .font(.caption)
-            }
-            Spacer()
-            Button("Re-detect") { detectedClaudePath = ClaudeCLIDetector.findClaudeBinary() }
-                .controlSize(.small)
-        }
-        Text("Uses your existing Claude Code login (Pro / Max / Premium seat). Calls shell out to `claude -p` — slightly slower than the API but no separate billing.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-    }
-
-    @ViewBuilder
-    private var apiKeyRow: some View {
-        LabeledContent("API key") {
-            SecureField("sk-ant-…", text: $apiKeyDraft, prompt: Text(apiKeyStatus.isEmpty ? "Not set" : apiKeyStatus))
-                .textFieldStyle(.roundedBorder)
-                .font(.body.monospaced())
-                .frame(minWidth: 320)
-        }
-        HStack {
-            Button("Save key") {
-                let trimmed = apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.isEmpty {
-                    apiKeyStatus = "Empty"
-                } else if let data = trimmed.data(using: .utf8),
-                          (try? KeychainStore.setData(data, account: ClaudeAPI.apiKeyAccount)) != nil {
-                    apiKeyStatus = "Saved (•••• \(String(trimmed.suffix(4))))"
-                    apiKeyDraft = ""
-                } else {
-                    apiKeyStatus = "Save failed"
-                }
-            }
-            .disabled(apiKeyDraft.isEmpty)
-            Button(role: .destructive) {
-                KeychainStore.delete(account: ClaudeAPI.apiKeyAccount)
-                apiKeyStatus = "Cleared"
-            } label: { Text("Remove") }
-            Spacer()
-            Text(apiKeyStatus).font(.caption).foregroundStyle(.secondary)
-        }
-        Text("Billed against your console.anthropic.com credits — separate from any claude.ai subscription. Key stays in your macOS Keychain.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-    }
-
-    private var authModeBinding: Binding<AIAuthMode> {
-        Binding(
-            get: { AppSettings.aiAuthMode },
-            set: { aiAuthModeRaw = $0.rawValue }
         )
     }
 

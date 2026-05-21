@@ -17,7 +17,6 @@ final class AppState: ObservableObject {
     let graph: GraphClient
     let calendarSync: CalendarSync
     let hookIngester: HookIngester
-    let claudeAPI: ClaudeAPI
     let micMonitor: MicMonitor
 
     private var cancellables = Set<AnyCancellable>()
@@ -32,7 +31,6 @@ final class AppState: ObservableObject {
         self.graph = GraphClient()
         self.calendarSync = CalendarSync(database: database, client: graph)
         self.hookIngester = HookIngester(database: database)
-        self.claudeAPI = ClaudeAPI()
         self.micMonitor = MicMonitor(database: database)
 
         // Forward nested ObservableObject changes so views observing AppState

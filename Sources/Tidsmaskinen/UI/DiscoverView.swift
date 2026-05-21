@@ -9,9 +9,6 @@ struct DiscoverView: View {
     @State private var projects: [Project] = []
     @State private var assignTarget: AppDatabase.SignalAggregate?
     @State private var loadError: String?
-    @State private var suggestions: [String: AttributionSuggester.Suggestion] = [:]
-    @State private var isSuggesting: Bool = false
-    @State private var suggestionError: String?
     @State private var expandedHosts: Set<String> = []
     @State private var hostPathDetails: [String: [AppDatabase.SignalAggregate]] = [:]
     @State private var hidden: [HiddenSignal] = []
@@ -71,31 +68,12 @@ struct DiscoverView: View {
             HStack {
                 Text("Where your time is going").font(.title3.bold())
                 Spacer()
-                Button {
-                    Task { await runSuggest() }
-                } label: {
-                    if isSuggesting {
-                        HStack(spacing: 4) {
-                            ProgressView().scaleEffect(0.55)
-                            Text("Asking Claude…")
-                        }
-                    } else {
-                        Label("Suggest with AI", systemImage: "sparkles")
-                    }
-                }
-                .disabled(isSuggesting || unassignedSignals.isEmpty)
                 rangePicker
             }
             if scope.isDay {
                 dayControls
             }
             filterBar
-            if let err = suggestionError {
-                Text(err)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(3)
-            }
         }
         .padding(.horizontal)
         .padding(.vertical, 10)
@@ -214,12 +192,6 @@ struct DiscoverView: View {
         }
     }
 
-    private var unassignedSignals: [AppDatabase.SignalAggregate] {
-        visibleAggregates.filter {
-            matcher.attribute(kind: ruleKind($0.kind), value: $0.value).customer == nil
-        }
-    }
-
     /// Customer IDs attributed to *any* loaded child path under each urlHost.
     private var hostChildCustomerIDs: [String: Set<String>] {
         var map: [String: Set<String>] = [:]
@@ -329,7 +301,6 @@ struct DiscoverView: View {
         guard let kind = hiddenSignalKind(for: item) else { return }
         do {
             try state.database.hideSignal(kind: kind, value: item.value)
-            suggestions.removeValue(forKey: item.id)
             expandedHosts.remove(item.value)
             reload()
         } catch {
@@ -400,7 +371,7 @@ struct DiscoverView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Text("Hidden apps and browser hosts are excluded from AI suggestions and from the Timeline (unless you enable “Show hidden”).")
+                Text("Hidden apps and browser hosts are excluded from the Timeline unless you enable “Show hidden”.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -501,9 +472,6 @@ struct DiscoverView: View {
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 70, alignment: .trailing)
-            if !isHiddenRow, let suggestion = suggestions[item.id] {
-                suggestionBadge(suggestion, for: item)
-            }
             if isHiddenRow {
                 Button {
                     unhide(item)
@@ -564,114 +532,6 @@ struct DiscoverView: View {
         } catch {
             hostPathDetails[host] = []
             loadError = error.localizedDescription
-        }
-    }
-
-    @ViewBuilder
-    private func suggestionBadge(_ s: AttributionSuggester.Suggestion,
-                                 for item: AppDatabase.SignalAggregate) -> some View {
-        let confidenceColor: Color = s.confidence >= 0.9 ? .green
-            : s.confidence >= 0.6 ? .blue
-            : .orange
-        HStack(spacing: 6) {
-            Image(systemName: "sparkles")
-                .foregroundStyle(confidenceColor)
-            VStack(alignment: .leading, spacing: 1) {
-                let projSuffix = s.projectName.map { " · \($0)\(s.projectIsNew ? " ⊕" : "")" } ?? ""
-                Text("\(s.customerName)\(s.isNewCustomer ? " ⊕" : "")\(projSuffix)")
-                    .font(.caption)
-                Text(s.reasoning)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-            Text(String(format: "%.0f%%", s.confidence * 100))
-                .font(.caption2.monospaced())
-                .foregroundStyle(confidenceColor)
-            Button("Accept") {
-                acceptSuggestion(s, for: item)
-            }
-            .controlSize(.small)
-            Button {
-                suggestions.removeValue(forKey: item.id)
-            } label: {
-                Image(systemName: "xmark")
-            }
-            .controlSize(.small)
-            .buttonStyle(.borderless)
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(RoundedRectangle(cornerRadius: 4).fill(confidenceColor.opacity(0.08)))
-    }
-
-    private func runSuggest() async {
-        suggestionError = nil
-        suggestions = [:]
-        isSuggesting = true
-        defer { isSuggesting = false }
-
-        let inputs = unassignedSignals.map {
-            AttributionSuggester.InputSignal(
-                id: $0.id,
-                kind: $0.kind,
-                value: $0.value,
-                totalSeconds: $0.totalSeconds
-            )
-        }
-        guard !inputs.isEmpty else { return }
-
-        let suggester = AttributionSuggester(api: state.claudeAPI)
-        do {
-            let rules = try state.database.allRules()
-            let results = try await suggester.suggest(
-                signals: inputs,
-                customers: customers,
-                projects: projects,
-                rules: rules,
-                model: AppSettings.aiModel
-            )
-            suggestions = Dictionary(uniqueKeysWithValues: results.map { ($0.signalID, $0) })
-        } catch {
-            suggestionError = "\(error)"
-        }
-    }
-
-    private func acceptSuggestion(_ s: AttributionSuggester.Suggestion,
-                                  for item: AppDatabase.SignalAggregate) {
-        do {
-            // Find or create the customer.
-            let customer: Customer
-            if let existing = customers.first(where: { $0.name.localizedCaseInsensitiveCompare(s.customerName) == .orderedSame }) {
-                customer = existing
-            } else {
-                customer = try createCustomer(name: s.customerName)
-            }
-
-            // Find or create the project, if specified and supported by this signal kind.
-            var projectID: String? = nil
-            if let pname = s.projectName, item.kind == .gitRepoSlug {
-                if let existing = projects.first(where: {
-                    $0.customerID == customer.id
-                        && $0.name.localizedCaseInsensitiveCompare(pname) == .orderedSame
-                }) {
-                    projectID = existing.id
-                } else {
-                    let p = try createProject(customerID: customer.id, name: pname)
-                    projectID = p.id
-                }
-            }
-
-            // Use the model's suggested pattern if it looks sane; else fall back to the raw value.
-            let pattern = s.rulePattern.isEmpty ? item.value : s.rulePattern
-
-            saveAssignment(for: AppDatabase.SignalAggregate(
-                kind: item.kind, value: pattern, totalSeconds: item.totalSeconds
-            ), customerID: customer.id, projectID: projectID)
-
-            suggestions.removeValue(forKey: item.id)
-        } catch {
-            suggestionError = error.localizedDescription
         }
     }
 

@@ -12,22 +12,6 @@ enum SettingsKey {
     static let calendarAutoSyncMinutes = "calendarAutoSyncMinutes"
     static let graphPreset = "graphPreset"
     static let claudeIdleThresholdMinutes = "claudeIdleThresholdMinutes"
-    static let aiModel = "aiModel"
-    static let aiAuthMode = "aiAuthMode"
-}
-
-enum AIAuthMode: String, CaseIterable, Identifiable {
-    case claudeCodeCLI
-    case apiKey
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .claudeCodeCLI: return "Claude Code CLI (use your subscription)"
-        case .apiKey:        return "Anthropic API key (separate billing)"
-        }
-    }
 }
 
 enum GraphPreset: String, CaseIterable, Identifiable {
@@ -151,57 +135,5 @@ enum AppSettings {
         if defaults.object(forKey: SettingsKey.claudeIdleThresholdMinutes) == nil { return 5 }
         let v = defaults.integer(forKey: SettingsKey.claudeIdleThresholdMinutes)
         return v <= 0 ? 5 : v
-    }
-
-    static let defaultAIModel = "claude-sonnet-4-6"
-    static var aiModel: String {
-        let v = defaults.string(forKey: SettingsKey.aiModel)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return v.isEmpty ? defaultAIModel : v
-    }
-
-    static var aiAuthMode: AIAuthMode {
-        if let raw = defaults.string(forKey: SettingsKey.aiAuthMode),
-           let mode = AIAuthMode(rawValue: raw) {
-            return mode
-        }
-        // Auto-detect: prefer CLI if claude binary is reachable, else require API key.
-        return ClaudeCLIDetector.findClaudeBinary() != nil ? .claudeCodeCLI : .apiKey
-    }
-}
-
-enum ClaudeCLIDetector {
-    static let candidates: [String] = [
-        "/opt/homebrew/bin/claude",
-        "/usr/local/bin/claude",
-        NSHomeDirectory() + "/.local/bin/claude",
-        NSHomeDirectory() + "/.claude/local/claude"
-    ]
-
-    /// Returns the absolute path to a `claude` binary if one can be located, else nil.
-    static func findClaudeBinary() -> String? {
-        let fm = FileManager.default
-        for path in candidates where fm.isExecutableFile(atPath: path) {
-            return path
-        }
-        // Last resort: `which claude` via login shell so user's PATH is respected.
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: shell)
-        proc.arguments = ["-l", "-c", "which claude"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = Pipe()
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let out = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !out.isEmpty, fm.isExecutableFile(atPath: out) {
-                return out
-            }
-        } catch {
-            // ignore
-        }
-        return nil
     }
 }
