@@ -4,7 +4,7 @@
 
 You spend the week on a mix of customer meetings, coding for client projects, and ad-hoc research, and at the end of the week you have to reconstruct hours-per-customer-per-day from memory. The goal is a passive macOS menu-bar app that captures the signals that already identify "what customer is this?" — meeting attendees, git remotes, Chrome hosts, Claude Code project paths — and produces a reviewable weekly grid you can paste into your reporting tool.
 
-The repo is greenfield (`/Users/niklas.salarp/Dev/Forefront/Ignite/tidsmaskinen`) so this plan defines the project from scratch.
+The repo is greenfield so this plan defines the project from scratch.
 
 ## Decisions
 

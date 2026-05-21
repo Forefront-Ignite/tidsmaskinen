@@ -786,8 +786,8 @@ struct AppDatabase {
 
     /// Pulls the participant name out of a Teams window title's segments.
     /// Teams window titles look like:
-    ///   "Chat | Jonas Roslin | Forefront Group | niklas@forefront.se | Microsoft Teams"
-    ///   "Jonas Roslin | Forefront Group | niklas@forefront.se | Microsoft Teams"
+    ///   "Chat | Some Person | Some Org | someone@example.com | Microsoft Teams"
+    ///   "Some Person | Some Org | someone@example.com | Microsoft Teams"
     /// We drop "Chat", "Microsoft Teams", and any email-like segment, then take
     /// the first remaining piece.
     private func participant(fromTitleSegments segments: [String]) -> String? {
