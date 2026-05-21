@@ -4,7 +4,8 @@ struct WeeklyReportRowDetailView: View {
     let breakdown: WeeklyReport.Breakdown
     let weekDays: [Date]
     let rowColor: Color
-    private let maxContributors = 8
+    private let collapsedLimit = 5
+    @State private var showAllContributors = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -78,19 +79,27 @@ struct WeeklyReportRowDetailView: View {
 
     @ViewBuilder
     private var contributorSection: some View {
-        let top = Array(breakdown.topContributors.prefix(maxContributors))
+        // Drop entries whose displayed time rounds to zero — they're just
+        // noise in the list (a couple of sampled seconds on a stray browser
+        // tab) and the user explicitly asked not to see them.
+        let visible = breakdown.topContributors.filter {
+            WeeklyReport.roundedQuarter($0.hours) > 0
+        }
+        let shown = showAllContributors ? visible : Array(visible.prefix(collapsedLimit))
+        let hiddenCount = visible.count - shown.count
+
         VStack(alignment: .leading, spacing: 6) {
             Text("Top contributors")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
 
-            if top.isEmpty {
+            if shown.isEmpty {
                 Text("Nothing to show.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             } else {
                 VStack(alignment: .leading, spacing: 3) {
-                    ForEach(top) { c in
+                    ForEach(shown) { c in
                         HStack(spacing: 8) {
                             Image(systemName: c.systemImage)
                                 .font(.caption2)
@@ -113,6 +122,21 @@ struct WeeklyReportRowDetailView: View {
                                 .font(.caption.monospacedDigit())
                                 .frame(minWidth: 50, alignment: .trailing)
                         }
+                    }
+                    if hiddenCount > 0 || (showAllContributors && visible.count > collapsedLimit) {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                showAllContributors.toggle()
+                            }
+                        } label: {
+                            Text(showAllContributors
+                                 ? "Show less"
+                                 : "Show \(hiddenCount) more")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 2)
                     }
                 }
             }

@@ -13,6 +13,7 @@ struct WeeklyReport {
     let rows: [Row]                    // attributed customer/project rows only
     let dayTotals: [Double]            // 7 entries, attributed only
     let unattributedPerDay: [Double]   // 7 entries — informational, not summed into totals
+    let breakdownsByRowID: [String: Breakdown]
     var grandTotal: Double { dayTotals.reduce(0, +) }
     var unattributedTotal: Double { unattributedPerDay.reduce(0, +) }
 
@@ -45,6 +46,7 @@ struct WeeklyReport {
         var rows: [Row] = []
         var dayTotals = Array(repeating: 0.0, count: 7)
         var unattributedSeconds = Array(repeating: 0.0, count: 7)
+        var breakdowns: [String: Breakdown] = [:]
 
         for (bucketID, bySource) in engine.perBucketPerSource {
             var seconds = Array(repeating: 0.0, count: 7)
@@ -69,6 +71,7 @@ struct WeeklyReport {
                 perDayHours: roundedDay
             ))
             for d in 0..<7 { dayTotals[d] += roundedDay[d] }
+            breakdowns[bucketID] = makeBreakdown(rowID: bucketID, engine: engine)
         }
 
         rows.sort { lhs, rhs in
@@ -80,7 +83,45 @@ struct WeeklyReport {
             week: week,
             rows: rows,
             dayTotals: dayTotals,
-            unattributedPerDay: unattributedSeconds.map { roundedQuarter($0 / 3600.0) }
+            unattributedPerDay: unattributedSeconds.map { roundedQuarter($0 / 3600.0) },
+            breakdownsByRowID: breakdowns
+        )
+    }
+
+    private static func makeBreakdown(rowID: String, engine: DedupEngine) -> Breakdown {
+        let bySource = engine.perBucketPerSource[rowID] ?? [:]
+        var perDayHours: [Breakdown.SourceKind: [Double]] = [:]
+        for kind in Breakdown.SourceKind.allCases {
+            let secs = bySource[kind] ?? Array(repeating: 0.0, count: 7)
+            perDayHours[kind] = secs.map { $0 / 3600.0 }
+        }
+
+        let contribSeconds = engine.perBucketContribSeconds[rowID] ?? [:]
+        let contribInfos = engine.perBucketContribInfo[rowID] ?? [:]
+        let contributors: [Breakdown.Contributor] = contribSeconds.compactMap { (id, secs) -> Breakdown.Contributor? in
+            guard let info = contribInfos[id], secs > 0 else { return nil }
+            return Breakdown.Contributor(
+                id: id,
+                label: info.label,
+                kindLabel: info.kindLabel,
+                systemImage: info.systemImage,
+                seconds: secs
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.seconds != rhs.seconds { return lhs.seconds > rhs.seconds }
+            return lhs.label < rhs.label
+        }
+
+        let totalSeconds = bySource.reduce(0.0) { sum, kv in
+            sum + kv.value.reduce(0, +)
+        }
+
+        return Breakdown(
+            rowID: rowID,
+            perDayBySourceKind: perDayHours,
+            topContributors: contributors,
+            totalHours: totalSeconds / 3600.0
         )
     }
 
@@ -180,69 +221,6 @@ struct WeeklyReport {
         var activeSourceKinds: [SourceKind] {
             SourceKind.allCases.filter { (perDayBySourceKind[$0] ?? []).contains(where: { $0 > 0 }) }
         }
-    }
-
-    /// Compute the contribution breakdown for a single row using the same
-    /// per-bucket, priority-ordered interval dedup as `compute()`. Pure
-    /// function — re-runnable on demand without touching the database.
-    static func breakdown(forRowID rowID: String,
-                          week: DateInterval,
-                          samples: [ActivitySample],
-                          events: [CalendarEvent],
-                          sessions: [ClaudeSession],
-                          claudeDeltas: [AppDatabase.ClaudeActiveDelta],
-                          matcher: RuleMatcher,
-                          sampleIntervalSeconds: Int,
-                          idleThresholdSeconds: TimeInterval) -> Breakdown {
-        var engine = DedupEngine(week: week)
-        let records = collectRecords(
-            week: week,
-            samples: samples,
-            events: events,
-            sessions: sessions,
-            claudeDeltas: claudeDeltas,
-            matcher: matcher,
-            sampleIntervalSeconds: sampleIntervalSeconds,
-            idleThresholdSeconds: idleThresholdSeconds
-        )
-        for record in records.sorted(by: byPriority) {
-            engine.add(record)
-        }
-
-        let bySource = engine.perBucketPerSource[rowID] ?? [:]
-        var perDayHours: [Breakdown.SourceKind: [Double]] = [:]
-        for kind in Breakdown.SourceKind.allCases {
-            let secs = bySource[kind] ?? Array(repeating: 0.0, count: 7)
-            perDayHours[kind] = secs.map { $0 / 3600.0 }
-        }
-
-        let contribSeconds = engine.perBucketContribSeconds[rowID] ?? [:]
-        let contribInfos = engine.perBucketContribInfo[rowID] ?? [:]
-        let contributors: [Breakdown.Contributor] = contribSeconds.compactMap { (id, secs) -> Breakdown.Contributor? in
-            guard let info = contribInfos[id], secs > 0 else { return nil }
-            return Breakdown.Contributor(
-                id: id,
-                label: info.label,
-                kindLabel: info.kindLabel,
-                systemImage: info.systemImage,
-                seconds: secs
-            )
-        }
-        .sorted { lhs, rhs in
-            if lhs.seconds != rhs.seconds { return lhs.seconds > rhs.seconds }
-            return lhs.label < rhs.label
-        }
-
-        let totalSeconds = bySource.reduce(0.0) { sum, kv in
-            sum + kv.value.reduce(0, +)
-        }
-
-        return Breakdown(
-            rowID: rowID,
-            perDayBySourceKind: perDayHours,
-            topContributors: contributors,
-            totalHours: totalSeconds / 3600.0
-        )
     }
 
     // MARK: - Aggregation engine

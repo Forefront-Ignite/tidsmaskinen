@@ -351,6 +351,16 @@ private struct CallDetailSheet: View {
     @State private var urlBreakdown: [URLUsage] = []
     @State private var loadError: String?
 
+    // Local copies so newly-created customers/projects appear immediately
+    // in the picker without having to dismiss and reopen the sheet. The
+    // parent reloads from the DB after save.
+    @State private var localCustomers: [Customer] = []
+    @State private var localProjects: [Project] = []
+    @State private var creatingCustomer = false
+    @State private var creatingProject = false
+    @State private var newCustomerName = ""
+    @State private var newProjectName = ""
+
     struct AppUsage: Identifiable, Hashable {
         let id: String         // bundle ID
         let name: String
@@ -387,6 +397,8 @@ private struct CallDetailSheet: View {
         .onAppear {
             selectedCustomerID = session.customerID ?? ""
             selectedProjectID = session.projectID ?? ""
+            localCustomers = customers
+            localProjects = projects
             loadBreakdowns()
         }
         .alert("Error", isPresented: errorBinding) {
@@ -415,32 +427,110 @@ private struct CallDetailSheet: View {
     private var attributionSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Attribution").font(.subheadline.bold())
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Customer").font(.caption).foregroundStyle(.secondary)
-                    Picker("", selection: $selectedCustomerID) {
-                        Text("Unassigned").tag("")
-                        ForEach(customers) { Text($0.name).tag($0.id) }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                }
+            HStack(alignment: .top, spacing: 12) {
+                customerField
                 if !selectedCustomerID.isEmpty {
-                    let avail = projects.filter { $0.customerID == selectedCustomerID }
-                    if !avail.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Project").font(.caption).foregroundStyle(.secondary)
-                            Picker("", selection: $selectedProjectID) {
-                                Text("(no project)").tag("")
-                                ForEach(avail) { Text($0.name).tag($0.id) }
-                            }
-                            .pickerStyle(.menu)
-                            .labelsHidden()
-                        }
-                    }
+                    projectField
                 }
                 Spacer()
             }
+        }
+    }
+
+    @ViewBuilder
+    private var customerField: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Customer").font(.caption).foregroundStyle(.secondary)
+            if creatingCustomer {
+                HStack {
+                    TextField("Customer name", text: $newCustomerName)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { confirmCreateCustomer() }
+                    Button("Add") { confirmCreateCustomer() }
+                        .disabled(newCustomerName.trimmingCharacters(in: .whitespaces).isEmpty)
+                    Button("Cancel") {
+                        creatingCustomer = false
+                        newCustomerName = ""
+                    }
+                }
+            } else {
+                HStack {
+                    Picker("", selection: $selectedCustomerID) {
+                        Text("Unassigned").tag("")
+                        ForEach(localCustomers) { Text($0.name).tag($0.id) }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    Button("+ New") { creatingCustomer = true }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var projectField: some View {
+        let avail = localProjects.filter { $0.customerID == selectedCustomerID }
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Project").font(.caption).foregroundStyle(.secondary)
+            if creatingProject {
+                HStack {
+                    TextField("Project name", text: $newProjectName)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { confirmCreateProject() }
+                    Button("Add") { confirmCreateProject() }
+                        .disabled(newProjectName.trimmingCharacters(in: .whitespaces).isEmpty)
+                    Button("Cancel") {
+                        creatingProject = false
+                        newProjectName = ""
+                    }
+                }
+            } else {
+                HStack {
+                    Picker("", selection: $selectedProjectID) {
+                        Text("(no project)").tag("")
+                        ForEach(avail) { Text($0.name).tag($0.id) }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    Button("+ New") { creatingProject = true }
+                }
+            }
+        }
+    }
+
+    private func confirmCreateCustomer() {
+        let name = newCustomerName.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        let palette = ["#3B82F6", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#EC4899", "#14B8A6"]
+        let color = palette[localCustomers.count % palette.count]
+        let c = Customer(id: UUID().uuidString, name: name, color: color, createdAt: Date())
+        do {
+            try database.upsert(c)
+            localCustomers.append(c)
+            localCustomers.sort { $0.name < $1.name }
+            selectedCustomerID = c.id
+            selectedProjectID = ""
+            creatingCustomer = false
+            newCustomerName = ""
+        } catch {
+            loadError = error.localizedDescription
+        }
+    }
+
+    private func confirmCreateProject() {
+        guard !selectedCustomerID.isEmpty else { return }
+        let name = newProjectName.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        let p = Project(id: UUID().uuidString, customerID: selectedCustomerID, name: name, color: nil, createdAt: Date())
+        do {
+            try database.upsert(p)
+            localProjects.append(p)
+            localProjects.sort { $0.name < $1.name }
+            selectedProjectID = p.id
+            creatingProject = false
+            newProjectName = ""
+        } catch {
+            loadError = error.localizedDescription
         }
     }
 

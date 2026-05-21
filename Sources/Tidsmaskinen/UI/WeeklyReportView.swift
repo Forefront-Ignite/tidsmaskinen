@@ -12,14 +12,7 @@ struct WeeklyReportView: View {
     @State private var loadError: String?
     @State private var copied: Bool = false
     @State private var expandedRowID: String?
-
-    // Raw inputs cached from reload() so row drill-down can recompute breakdowns
-    // without re-querying the database.
-    @State private var cachedSamples: [ActivitySample] = []
-    @State private var cachedEvents: [CalendarEvent] = []
-    @State private var cachedSessions: [ClaudeSession] = []
-    @State private var cachedClaudeDeltas: [AppDatabase.ClaudeActiveDelta] = []
-    @State private var cachedMatcher: RuleMatcher?
+    @State private var reloadTask: Task<Void, Never>?
 
     private let calendar = Calendar.weekStartingMonday()
 
@@ -43,10 +36,11 @@ struct WeeklyReportView: View {
                 Spacer()
             }
         }
-        .onAppear { reload() }
-        .onChange(of: weekStart) { _, _ in reload() }
-        .onChange(of: state.sampleCount) { _, _ in reload() }
-        .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload() }
+        .onAppear { reload(immediate: true) }
+        .onDisappear { reloadTask?.cancel() }
+        .onChange(of: weekStart) { _, _ in reload(immediate: true) }
+        .onChange(of: state.sampleCount) { _, _ in reload(immediate: false) }
+        .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload(immediate: true) }
     }
 
     @ViewBuilder
@@ -99,36 +93,38 @@ struct WeeklyReportView: View {
         return "\(f.string(from: weekStart)) – \(f.string(from: endDate)) \(yearF.string(from: weekStart))"
     }
 
+    // Grid spacing is collapsed into per-cell padding so the visual gap
+    // between cells is absorbed into each cell's tap target — the 18pt
+    // horizontal gap and 8pt vertical gap were dead zones that swallowed
+    // taps and made rows feel unresponsive.
+    private static let cellHPadding: CGFloat = 9
+    private static let cellVPadding: CGFloat = 4
+
     @ViewBuilder
     private func gridTable(report: WeeklyReport) -> some View {
         ScrollView([.horizontal, .vertical]) {
-            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
+            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
                 GridRow {
-                    Text("Customer").font(.caption.bold()).foregroundStyle(.secondary)
+                    headerCell { Text("Customer") }
                     ForEach(Array(days.enumerated()), id: \.offset) { _, day in
-                        Text(dayHeader(day))
-                            .font(.caption.bold())
-                            .foregroundStyle(.secondary)
-                            .frame(minWidth: 56, alignment: .trailing)
+                        headerCell(minWidth: 56, trailing: true) { Text(dayHeader(day)) }
                     }
-                    Text("Total")
-                        .font(.caption.bold())
-                        .foregroundStyle(.secondary)
-                        .frame(minWidth: 60, alignment: .trailing)
+                    headerCell(minWidth: 60, trailing: true) { Text("Total") }
                 }
-                Divider().gridCellColumns(9)
+                Divider().gridCellColumns(9).padding(.vertical, 4)
 
                 if report.rows.isEmpty {
                     GridRow {
-                        Text("No activity this week.").foregroundStyle(.secondary)
+                        Text("No activity this week.")
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, Self.cellHPadding)
+                            .padding(.vertical, Self.cellVPadding)
                     }
                 }
 
                 ForEach(report.rows) { row in
                     GridRow {
-                        Button {
-                            toggleExpansion(row.id)
-                        } label: {
+                        rowCell(rowID: row.id) {
                             HStack(spacing: 6) {
                                 Image(systemName: expandedRowID == row.id ? "chevron.down" : "chevron.right")
                                     .font(.caption2.weight(.semibold))
@@ -140,21 +136,21 @@ struct WeeklyReportView: View {
                                 Text(row.label)
                                 Spacer(minLength: 0)
                             }
-                            .contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
                         ForEach(0..<7, id: \.self) { i in
-                            Text(WeeklyReport.formatHours(row.perDayHours[i]))
-                                .monospacedDigit()
-                                .frame(minWidth: 56, alignment: .trailing)
-                                .foregroundStyle(row.perDayHours[i] == 0 ? Color.secondary : Color.primary)
+                            rowCell(rowID: row.id, minWidth: 56, trailing: true) {
+                                Text(WeeklyReport.formatHours(row.perDayHours[i]))
+                                    .monospacedDigit()
+                                    .foregroundStyle(row.perDayHours[i] == 0 ? Color.secondary : Color.primary)
+                            }
                         }
-                        Text(WeeklyReport.formatHours(row.totalHours))
-                            .monospacedDigit()
-                            .bold()
-                            .frame(minWidth: 60, alignment: .trailing)
+                        rowCell(rowID: row.id, minWidth: 60, trailing: true) {
+                            Text(WeeklyReport.formatHours(row.totalHours))
+                                .monospacedDigit()
+                                .bold()
+                        }
                     }
-                    if expandedRowID == row.id, let breakdown = breakdown(for: row) {
+                    if expandedRowID == row.id, let breakdown = report.breakdownsByRowID[row.id] {
                         GridRow {
                             WeeklyReportRowDetailView(
                                 breakdown: breakdown,
@@ -166,23 +162,56 @@ struct WeeklyReportView: View {
                     }
                 }
 
-                Divider().gridCellColumns(9)
+                Divider().gridCellColumns(9).padding(.vertical, 4)
                 GridRow {
-                    Text("Total").bold()
+                    headerCell { Text("Total").bold().foregroundStyle(.primary) }
                     ForEach(0..<7, id: \.self) { i in
-                        Text(WeeklyReport.formatHours(report.dayTotals[i]))
+                        headerCell(minWidth: 56, trailing: true) {
+                            Text(WeeklyReport.formatHours(report.dayTotals[i]))
+                                .monospacedDigit()
+                                .bold()
+                                .foregroundStyle(.primary)
+                        }
+                    }
+                    headerCell(minWidth: 60, trailing: true) {
+                        Text(WeeklyReport.formatHours(report.grandTotal))
                             .monospacedDigit()
                             .bold()
-                            .frame(minWidth: 56, alignment: .trailing)
+                            .foregroundStyle(.primary)
                     }
-                    Text(WeeklyReport.formatHours(report.grandTotal))
-                        .monospacedDigit()
-                        .bold()
-                        .frame(minWidth: 60, alignment: .trailing)
                 }
             }
             .padding()
         }
+    }
+
+    @ViewBuilder
+    private func headerCell<Content: View>(
+        minWidth: CGFloat? = nil,
+        trailing: Bool = false,
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
+        content()
+            .font(.caption.bold())
+            .foregroundStyle(.secondary)
+            .frame(minWidth: minWidth, alignment: trailing ? .trailing : .leading)
+            .padding(.horizontal, Self.cellHPadding)
+            .padding(.vertical, Self.cellVPadding)
+    }
+
+    @ViewBuilder
+    private func rowCell<Content: View>(
+        rowID: String,
+        minWidth: CGFloat? = nil,
+        trailing: Bool = false,
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
+        content()
+            .frame(minWidth: minWidth, maxWidth: .infinity, alignment: trailing ? .trailing : .leading)
+            .padding(.horizontal, Self.cellHPadding)
+            .padding(.vertical, Self.cellVPadding)
+            .contentShape(Rectangle())
+            .onTapGesture { toggleExpansion(rowID) }
     }
 
     private func dayHeader(_ date: Date) -> String {
@@ -191,10 +220,14 @@ struct WeeklyReportView: View {
         return f.string(from: date)
     }
 
-    private func reload() {
-        // If the calendar has rolled into a new week and the user is still
-        // viewing the previously-current week, advance to the new current
-        // week. If they've navigated elsewhere, leave them alone.
+    /// Schedule a reload. `immediate` reloads run as soon as possible (week
+    /// navigation, calendar sync). Non-immediate reloads are debounced so the
+    /// 15s sample-count tick doesn't re-query and re-dedup the entire week
+    /// every time a single sample lands.
+    private func reload(immediate: Bool) {
+        // Snap the displayed week forward if the wall clock rolled into a new
+        // week while the window was open AND the user hasn't navigated away
+        // from the previously-current week.
         let currentWeek = calendar.currentWeekInterval().start
         if currentWeek != lastKnownCurrentWeekStart {
             if weekStart == lastKnownCurrentWeekStart {
@@ -202,45 +235,45 @@ struct WeeklyReportView: View {
             }
             lastKnownCurrentWeekStart = currentWeek
         }
-        do {
-            let samples = try state.database.samples(in: week)
-            let events = try state.database.calendarEvents(in: week)
-            let sessions = try state.database.sessions(in: week)
-            let claudeDeltas = try state.database.claudeActiveDeltas(in: week)
-            let matcher = try RuleMatcher.load(from: state.database)
-            self.cachedSamples = samples
-            self.cachedEvents = events
-            self.cachedSessions = sessions
-            self.cachedClaudeDeltas = claudeDeltas
-            self.cachedMatcher = matcher
-            self.report = WeeklyReport.compute(
-                week: week,
-                samples: samples,
-                events: events,
-                sessions: sessions,
-                claudeDeltas: claudeDeltas,
-                idleThresholdSeconds: TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60),
-                matcher: matcher,
-                sampleIntervalSeconds: AppSettings.sampleIntervalSeconds
-            )
-        } catch {
-            loadError = error.localizedDescription
-        }
-    }
 
-    private func breakdown(for row: WeeklyReport.Row) -> WeeklyReport.Breakdown? {
-        guard let matcher = cachedMatcher else { return nil }
-        return WeeklyReport.breakdown(
-            forRowID: row.id,
-            week: week,
-            samples: cachedSamples,
-            events: cachedEvents,
-            sessions: cachedSessions,
-            claudeDeltas: cachedClaudeDeltas,
-            matcher: matcher,
-            sampleIntervalSeconds: AppSettings.sampleIntervalSeconds,
-            idleThresholdSeconds: TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60)
-        )
+        reloadTask?.cancel()
+        let database = state.database
+        let weekValue = week
+        let sampleInterval = AppSettings.sampleIntervalSeconds
+        let idleThresholdMinutes = AppSettings.claudeIdleThresholdMinutes
+        let debounceNs: UInt64 = immediate ? 0 : 1_500_000_000
+
+        reloadTask = Task { @MainActor in
+            if debounceNs > 0 {
+                try? await Task.sleep(nanoseconds: debounceNs)
+                if Task.isCancelled { return }
+            }
+            do {
+                let computed = try await Task.detached(priority: .userInitiated) {
+                    let samples = try database.samples(in: weekValue)
+                    let events = try database.calendarEvents(in: weekValue)
+                    let sessions = try database.sessions(in: weekValue)
+                    let claudeDeltas = try database.claudeActiveDeltas(in: weekValue)
+                    let matcher = try RuleMatcher.load(from: database)
+                    return WeeklyReport.compute(
+                        week: weekValue,
+                        samples: samples,
+                        events: events,
+                        sessions: sessions,
+                        claudeDeltas: claudeDeltas,
+                        idleThresholdSeconds: TimeInterval(idleThresholdMinutes * 60),
+                        matcher: matcher,
+                        sampleIntervalSeconds: sampleInterval
+                    )
+                }.value
+                if Task.isCancelled { return }
+                self.report = computed
+                self.loadError = nil
+            } catch {
+                if Task.isCancelled { return }
+                self.loadError = error.localizedDescription
+            }
+        }
     }
 
     private func toggleExpansion(_ rowID: String) {
