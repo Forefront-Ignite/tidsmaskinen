@@ -12,8 +12,13 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.graphTenantID) private var graphTenantID: String = ""
     @AppStorage(SettingsKey.calendarAutoSyncMinutes) private var autoSyncMinutes: Int = 5
     @AppStorage(SettingsKey.claudeIdleThresholdMinutes) private var claudeIdleMinutes: Int = 5
+    @AppStorage(SettingsKey.commandCenterEnabled) private var commandCenterEnabled: Bool = true
+    @AppStorage(SettingsKey.commandCenterBaseURL) private var commandCenterBaseURL: String = ""
     @State private var launchAtLogin: Bool = LoginItemManager.isEnabled
     @State private var loginItemError: String?
+    @State private var commandCenterTokenInput: String = ""
+    @State private var commandCenterCustomerCount: Int = 0
+    @State private var commandCenterProjectCount: Int = 0
 
     var body: some View {
         Form {
@@ -80,6 +85,10 @@ struct SettingsView: View {
                 claudeCodeSection
             }
 
+            Section("Command Center") {
+                commandCenterSection
+            }
+
             Section("Microsoft Graph") {
                 Picker("Preset", selection: presetBinding) {
                     ForEach(GraphPreset.allCases) { preset in
@@ -121,6 +130,115 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(minWidth: 600, minHeight: 640)
         .padding(.horizontal, 4)
+        .onAppear { refreshCommandCenterCounts() }
+        .onChange(of: state.commandCenterLastSyncAt) { _, _ in refreshCommandCenterCounts() }
+    }
+
+    @ViewBuilder
+    private var commandCenterSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle("Sync customers & projects from Command Center", isOn: $commandCenterEnabled)
+
+            if state.commandCenterTokenInvalid {
+                Label("Token rejected — paste a fresh one below.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                SecureField(
+                    state.commandCenterHasToken ? "Token saved (paste to replace)" : "Paste API token (cc_…)",
+                    text: $commandCenterTokenInput
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.body.monospaced())
+                Button("Save") {
+                    let token = commandCenterTokenInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !token.isEmpty else { return }
+                    state.saveCommandCenterToken(token)
+                    commandCenterTokenInput = ""
+                }
+                .disabled(commandCenterTokenInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                if state.commandCenterHasToken {
+                    Button(role: .destructive) {
+                        state.clearCommandCenterToken()
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+
+            HStack(spacing: 8) {
+                if let url = portalSettingsURL {
+                    Link(destination: url) {
+                        Label("Generate a token in Command Center", systemImage: "arrow.up.right.square")
+                    }
+                    .font(.caption)
+                }
+                Text("Tokens are stored in the macOS Keychain and never leave this Mac.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            TextField("Base URL",
+                      text: $commandCenterBaseURL,
+                      prompt: Text(AppSettings.defaultCommandCenterBaseURL))
+                .textFieldStyle(.roundedBorder)
+                .font(.body.monospaced())
+
+            HStack {
+                if state.commandCenterIsSyncing {
+                    ProgressView().controlSize(.small)
+                    Text("Syncing…").font(.caption).foregroundStyle(.secondary)
+                } else if let lastSync = state.commandCenterLastSyncAt {
+                    Text("Last synced \(lastSync.formatted(.relative(presentation: .named)))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Not synced yet").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    Task { await state.refreshCommandCenter() }
+                } label: {
+                    Label("Sync now", systemImage: "arrow.clockwise")
+                }
+                .disabled(!state.commandCenterHasToken || state.commandCenterIsSyncing || !commandCenterEnabled)
+            }
+
+            if commandCenterCustomerCount > 0 || commandCenterProjectCount > 0 {
+                Text("\(commandCenterCustomerCount) customer\(commandCenterCustomerCount == 1 ? "" : "s"), \(commandCenterProjectCount) project\(commandCenterProjectCount == 1 ? "" : "s") from Command Center.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let err = state.commandCenterLastError {
+                Text(err).font(.caption).foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func refreshCommandCenterCounts() {
+        commandCenterCustomerCount = (try? state.database.externalCustomerCount(source: .commandCenter)) ?? 0
+        commandCenterProjectCount = (try? state.database.externalProjectCount(source: .commandCenter)) ?? 0
+    }
+
+    /// Derives the portal token-settings page from the configured API base URL.
+    /// `api.ignitestudio.eu` → `app.ignitestudio.eu`; anything else (e.g. localhost
+    /// dev) gets `/me/settings` appended verbatim. Returns nil for unparseable URLs.
+    private var portalSettingsURL: URL? {
+        let base = commandCenterBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? AppSettings.defaultCommandCenterBaseURL
+            : commandCenterBaseURL
+        guard var components = URLComponents(string: base) else { return nil }
+        if let host = components.host, host.hasPrefix("api.") {
+            components.host = "app." + host.dropFirst("api.".count)
+        }
+        components.path = "/me/settings"
+        components.query = nil
+        components.fragment = nil
+        return components.url
     }
 
     @State private var hookState: HookInstaller.InstallState = HookInstaller.currentState()

@@ -1,11 +1,23 @@
 import Foundation
 import GRDB
 
+/// Marker for the upstream system this row was imported from.
+/// Locally-created rows have `nil`. `commandCenter` rows are read-only in the
+/// UI; `commandCenterArchived` rows are hidden from pickers but kept for
+/// historical reports.
+enum ExternalSource: String, Codable, Hashable {
+    case commandCenter = "command-center"
+    case commandCenterArchived = "command-center-archived"
+}
+
 struct Customer: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
     var id: String
     var name: String
     var color: String?
     var createdAt: Date
+    var externalSource: String?
+    var externalID: String?
+    var externalSyncedAt: Date?
 
     static let databaseTableName = "customers"
 
@@ -14,7 +26,14 @@ struct Customer: Codable, FetchableRecord, MutablePersistableRecord, Identifiabl
         static let name = Column(CodingKeys.name)
         static let color = Column(CodingKeys.color)
         static let createdAt = Column(CodingKeys.createdAt)
+        static let externalSource = Column(CodingKeys.externalSource)
+        static let externalID = Column(CodingKeys.externalID)
+        static let externalSyncedAt = Column(CodingKeys.externalSyncedAt)
     }
+
+    var external: ExternalSource? { externalSource.flatMap(ExternalSource.init(rawValue:)) }
+    var isExternal: Bool { external == .commandCenter }
+    var isArchived: Bool { external == .commandCenterArchived }
 }
 
 struct Project: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
@@ -23,6 +42,11 @@ struct Project: Codable, FetchableRecord, MutablePersistableRecord, Identifiable
     var name: String
     var color: String?
     var createdAt: Date
+    var externalSource: String?
+    var externalID: String?
+    var externalSyncedAt: Date?
+    var engagementType: String?     // "tm" | "fixed_price" | "retainer" | "prospect" | "internal" (CC only)
+    var externalColor: String?      // CC-provided color; user-edited `color` wins on display
 
     static let databaseTableName = "projects"
 
@@ -31,7 +55,19 @@ struct Project: Codable, FetchableRecord, MutablePersistableRecord, Identifiable
         static let customerID = Column(CodingKeys.customerID)
         static let name = Column(CodingKeys.name)
         static let color = Column(CodingKeys.color)
+        static let externalSource = Column(CodingKeys.externalSource)
+        static let externalID = Column(CodingKeys.externalID)
+        static let externalSyncedAt = Column(CodingKeys.externalSyncedAt)
+        static let engagementType = Column(CodingKeys.engagementType)
+        static let externalColor = Column(CodingKeys.externalColor)
     }
+
+    var external: ExternalSource? { externalSource.flatMap(ExternalSource.init(rawValue:)) }
+    var isExternal: Bool { external == .commandCenter }
+    var isArchived: Bool { external == .commandCenterArchived }
+
+    /// Color to render. Local edits take precedence; falls back to the CC-provided color.
+    var displayColor: String? { color ?? externalColor }
 }
 
 struct Rule: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {

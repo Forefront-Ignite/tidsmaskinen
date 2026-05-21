@@ -12,6 +12,9 @@ enum SettingsKey {
     static let calendarAutoSyncMinutes = "calendarAutoSyncMinutes"
     static let graphPreset = "graphPreset"
     static let claudeIdleThresholdMinutes = "claudeIdleThresholdMinutes"
+    static let commandCenterEnabled = "commandCenterEnabled"
+    static let commandCenterBaseURL = "commandCenterBaseURL"
+    static let commandCenterLastSyncAt = "commandCenterLastSyncAt"
 }
 
 enum GraphPreset: String, CaseIterable, Identifiable {
@@ -138,5 +141,28 @@ enum AppSettings {
         if defaults.object(forKey: SettingsKey.claudeIdleThresholdMinutes) == nil { return 5 }
         let v = defaults.integer(forKey: SettingsKey.claudeIdleThresholdMinutes)
         return v <= 0 ? 5 : v
+    }
+
+    // MARK: Command Center
+
+    static let defaultCommandCenterBaseURL = "https://api.ignitestudio.eu"
+
+    static var commandCenterEnabled: Bool {
+        if defaults.object(forKey: SettingsKey.commandCenterEnabled) == nil { return true }
+        return defaults.bool(forKey: SettingsKey.commandCenterEnabled)
+    }
+
+    static var commandCenterBaseURL: String {
+        let v = defaults.string(forKey: SettingsKey.commandCenterBaseURL)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return v.isEmpty ? defaultCommandCenterBaseURL : v
+    }
+
+    static var commandCenterLastSyncAt: Date? {
+        defaults.object(forKey: SettingsKey.commandCenterLastSyncAt) as? Date
+    }
+
+    static func setCommandCenterLastSyncAt(_ date: Date) {
+        defaults.set(date, forKey: SettingsKey.commandCenterLastSyncAt)
     }
 }

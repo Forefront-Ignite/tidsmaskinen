@@ -10,20 +10,54 @@ struct CustomersView: View {
     @State private var loadError: String?
 
     var body: some View {
-        HSplitView {
-            customerSidebar
-                .frame(minWidth: 200, idealWidth: 240, maxWidth: 320)
-            customerDetail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 0) {
+            if state.commandCenterTokenInvalid {
+                tokenInvalidBanner
+            }
+            HSplitView {
+                customerSidebar
+                    .frame(minWidth: 200, idealWidth: 240, maxWidth: 320)
+                customerDetail
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
         .navigationTitle("Customers & Rules")
-        .onAppear { reload() }
+        .onAppear {
+            reload()
+            // Debounced refresh: only nudge a sync if the last one is stale.
+            if AppSettings.commandCenterEnabled,
+               state.commandCenterHasToken,
+               !state.commandCenterTokenInvalid,
+               shouldDebouncedRefresh() {
+                Task { await state.refreshCommandCenter() }
+            }
+        }
         .onChange(of: selectedCustomerID) { _, _ in reload() }
+        .onChange(of: state.commandCenterLastSyncAt) { _, _ in reload() }
         .alert("Database error", isPresented: errorBinding) {
             Button("OK") { loadError = nil }
         } message: {
             Text(loadError ?? "")
         }
+    }
+
+    @ViewBuilder
+    private var tokenInvalidBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+            Text("Command Center token rejected — update it in Settings.")
+                .font(.callout)
+            Spacer()
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.red)
+    }
+
+    private func shouldDebouncedRefresh() -> Bool {
+        guard let last = state.commandCenterLastSyncAt else { return true }
+        return Date().timeIntervalSince(last) > 5 * 60
     }
 
     private var errorBinding: Binding<Bool> {
@@ -35,16 +69,24 @@ struct CustomersView: View {
         VStack(alignment: .leading, spacing: 0) {
             List(selection: $selectedCustomerID) {
                 ForEach(customers) { customer in
-                    HStack {
+                    HStack(spacing: 6) {
                         Circle()
                             .fill(Color(hex: customer.color) ?? .blue)
                             .frame(width: 10, height: 10)
                         Text(customer.name)
+                        if customer.isExternal {
+                            CommandCenterBadge()
+                        }
                     }
                     .tag(customer.id)
                     .contextMenu {
-                        Button("Delete", role: .destructive) {
-                            delete(customer)
+                        if customer.isExternal {
+                            Text("Synced from Command Center")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Button("Delete", role: .destructive) {
+                                delete(customer)
+                            }
                         }
                     }
                 }
@@ -69,9 +111,13 @@ struct CustomersView: View {
         if let customerID = selectedCustomerID,
            let customer = customers.first(where: { $0.id == customerID }) {
             VStack(alignment: .leading, spacing: 0) {
-                HStack {
+                HStack(spacing: 8) {
                     Text(customer.name)
                         .font(.title2.bold())
+                    if customer.isExternal {
+                        CommandCenterBadge()
+                            .help("Synced from Command Center. Name and projects are read-only here.")
+                    }
                     Spacer()
                     Button {
                         showingAddRule = true
@@ -286,6 +332,26 @@ private struct AddRuleSheet: View {
         case .emailDomain:
             return "Domain of meeting attendees (Phase 4 — meetings not yet imported)."
         }
+    }
+}
+
+/// Small "CC" capsule shown next to customers and projects synced from
+/// Command Center. Used in CustomersView, DiscoverView, and anywhere else the
+/// user picks an attribution target.
+struct CommandCenterBadge: View {
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "building.2")
+                .font(.caption2)
+            Text("CC")
+                .font(.caption2.bold())
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 1)
+        .background(
+            Capsule().fill(Color.secondary.opacity(0.12))
+        )
     }
 }
 

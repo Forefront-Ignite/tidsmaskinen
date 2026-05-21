@@ -172,6 +172,47 @@ struct AppDatabase {
             try db.create(index: "idx_claude_active_deltas_sessionID",
                           on: "claude_active_deltas", columns: ["sessionID"])
         }
+        // Adds externalSource/externalID/externalSyncedAt for Command Center sync,
+        // and rebuilds `customers` to drop the inline UNIQUE(name) constraint —
+        // CC clients can legitimately share names with local customers, and a
+        // declared UNIQUE in the table body cannot be dropped via ALTER TABLE.
+        migrator.registerMigration("v11_external_source") { db in
+            // ---- customers: rebuild to drop UNIQUE(name) + add external columns
+            try db.create(table: "customers_new") { t in
+                t.primaryKey("id", .text)
+                t.column("name", .text).notNull()
+                t.column("color", .text)
+                t.column("createdAt", .datetime).notNull()
+                t.column("externalSource", .text)
+                t.column("externalID", .text)
+                t.column("externalSyncedAt", .datetime)
+            }
+            try db.execute(sql: """
+                INSERT INTO customers_new (id, name, color, createdAt)
+                SELECT id, name, color, createdAt FROM customers
+                """)
+            try db.drop(table: "customers")
+            try db.rename(table: "customers_new", to: "customers")
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX idx_customers_external
+                ON customers(externalSource, externalID)
+                WHERE externalSource IS NOT NULL
+                """)
+
+            // ---- projects: nullable columns can be added in place
+            try db.alter(table: "projects") { t in
+                t.add(column: "externalSource", .text)
+                t.add(column: "externalID", .text)
+                t.add(column: "externalSyncedAt", .datetime)
+                t.add(column: "engagementType", .text)
+                t.add(column: "externalColor", .text)
+            }
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX idx_projects_external
+                ON projects(externalSource, externalID)
+                WHERE externalSource IS NOT NULL
+                """)
+        }
         try migrator.migrate(dbQueue)
     }
 
@@ -340,7 +381,20 @@ struct AppDatabase {
 
     // MARK: - Customers
 
+    /// Active customers (locals + non-archived externals). Use this in pickers.
     func allCustomers() throws -> [Customer] {
+        try dbQueue.read { db in
+            try Customer
+                .filter(Customer.Columns.externalSource == nil
+                        || Customer.Columns.externalSource == ExternalSource.commandCenter.rawValue)
+                .order(Customer.Columns.name.asc)
+                .fetchAll(db)
+        }
+    }
+
+    /// Every customer row regardless of archive status. Use for reporting,
+    /// where historical attributions to a now-archived customer must still resolve.
+    func allCustomersIncludingArchived() throws -> [Customer] {
         try dbQueue.read { db in
             try Customer.order(Customer.Columns.name.asc).fetchAll(db)
         }
@@ -356,6 +410,27 @@ struct AppDatabase {
     func deleteCustomer(id: String) throws {
         _ = try dbQueue.write { db in
             try Customer.deleteOne(db, key: id)
+        }
+    }
+
+    func customer(externalSource: ExternalSource, externalID: String) throws -> Customer? {
+        try dbQueue.read { db in
+            try Customer
+                .filter(Customer.Columns.externalSource == externalSource.rawValue
+                        && Customer.Columns.externalID == externalID)
+                .fetchOne(db)
+        }
+    }
+
+    /// Customers that came from `source` and are not in `keepingExternalIDs` get
+    /// flipped to the archived flavor. Returns the count archived.
+    @discardableResult
+    func archiveMissingCustomers(source: ExternalSource, keepingExternalIDs: Set<String>) throws -> Int {
+        try dbQueue.write { db in
+            try Customer
+                .filter(Customer.Columns.externalSource == source.rawValue
+                        && !keepingExternalIDs.contains(Customer.Columns.externalID))
+                .updateAll(db, Customer.Columns.externalSource.set(to: ExternalSource.commandCenterArchived.rawValue))
         }
     }
 
@@ -391,7 +466,18 @@ struct AppDatabase {
 
     // MARK: - Projects
 
+    /// Active projects only. Includes locals + non-archived externals.
     func allProjects() throws -> [Project] {
+        try dbQueue.read { db in
+            try Project
+                .filter(Project.Columns.externalSource == nil
+                        || Project.Columns.externalSource == ExternalSource.commandCenter.rawValue)
+                .order(Project.Columns.name.asc)
+                .fetchAll(db)
+        }
+    }
+
+    func allProjectsIncludingArchived() throws -> [Project] {
         try dbQueue.read { db in
             try Project.order(Project.Columns.name.asc).fetchAll(db)
         }
@@ -400,7 +486,9 @@ struct AppDatabase {
     func projects(forCustomer customerID: String) throws -> [Project] {
         try dbQueue.read { db in
             try Project
-                .filter(Project.Columns.customerID == customerID)
+                .filter(Project.Columns.customerID == customerID
+                        && (Project.Columns.externalSource == nil
+                            || Project.Columns.externalSource == ExternalSource.commandCenter.rawValue))
                 .order(Project.Columns.name.asc)
                 .fetchAll(db)
         }
@@ -416,6 +504,41 @@ struct AppDatabase {
     func deleteProject(id: String) throws {
         _ = try dbQueue.write { db in
             try Project.deleteOne(db, key: id)
+        }
+    }
+
+    func project(externalSource: ExternalSource, externalID: String) throws -> Project? {
+        try dbQueue.read { db in
+            try Project
+                .filter(Project.Columns.externalSource == externalSource.rawValue
+                        && Project.Columns.externalID == externalID)
+                .fetchOne(db)
+        }
+    }
+
+    @discardableResult
+    func archiveMissingProjects(source: ExternalSource, keepingExternalIDs: Set<String>) throws -> Int {
+        try dbQueue.write { db in
+            try Project
+                .filter(Project.Columns.externalSource == source.rawValue
+                        && !keepingExternalIDs.contains(Project.Columns.externalID))
+                .updateAll(db, Project.Columns.externalSource.set(to: ExternalSource.commandCenterArchived.rawValue))
+        }
+    }
+
+    func externalCustomerCount(source: ExternalSource) throws -> Int {
+        try dbQueue.read { db in
+            try Customer
+                .filter(Customer.Columns.externalSource == source.rawValue)
+                .fetchCount(db)
+        }
+    }
+
+    func externalProjectCount(source: ExternalSource) throws -> Int {
+        try dbQueue.read { db in
+            try Project
+                .filter(Project.Columns.externalSource == source.rawValue)
+                .fetchCount(db)
         }
     }
 

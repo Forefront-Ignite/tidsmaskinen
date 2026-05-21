@@ -737,6 +737,8 @@ private struct AssignSheet: View {
 
     @ViewBuilder
     private var customerPicker: some View {
+        let cc = localCustomers.filter { $0.isExternal }.sorted { $0.name < $1.name }
+        let locals = localCustomers.filter { !$0.isExternal }.sorted { $0.name < $1.name }
         VStack(alignment: .leading, spacing: 6) {
             Text("Customer").font(.subheadline.bold())
             if creatingCustomer {
@@ -758,8 +760,19 @@ private struct AssignSheet: View {
                         }
                     )) {
                         Text("Choose…").tag("")
-                        ForEach(localCustomers) { c in
-                            Text(c.name).tag(c.id)
+                        if !cc.isEmpty {
+                            Section("Command Center") {
+                                ForEach(cc) { c in
+                                    Text("\(c.name)  ·  CC").tag(c.id)
+                                }
+                            }
+                        }
+                        if !locals.isEmpty {
+                            Section("Local") {
+                                ForEach(locals) { c in
+                                    Text(c.name).tag(c.id)
+                                }
+                            }
                         }
                     }
                     .pickerStyle(.menu)
@@ -773,6 +786,9 @@ private struct AssignSheet: View {
     @ViewBuilder
     private var projectPicker: some View {
         let availableProjects = localProjects.filter { $0.customerID == selectedCustomerID }
+        let cc = availableProjects.filter { $0.isExternal }.sorted { $0.name < $1.name }
+        let locals = availableProjects.filter { !$0.isExternal }.sorted { $0.name < $1.name }
+        let selectedCustomerIsExternal = localCustomers.first { $0.id == selectedCustomerID }?.isExternal == true
         VStack(alignment: .leading, spacing: 6) {
             Text("Project").font(.subheadline.bold())
             if creatingProject {
@@ -791,14 +807,28 @@ private struct AssignSheet: View {
                         set: { selectedProjectID = $0.isEmpty ? nil : $0 }
                     )) {
                         Text("(no project)").tag("")
-                        ForEach(availableProjects) { p in
-                            Text(p.name).tag(p.id)
+                        if !cc.isEmpty {
+                            Section("Command Center") {
+                                ForEach(cc) { p in
+                                    Text("\(p.name)  ·  CC").tag(p.id)
+                                }
+                            }
+                        }
+                        if !locals.isEmpty {
+                            Section("Local") {
+                                ForEach(locals) { p in
+                                    Text(p.name).tag(p.id)
+                                }
+                            }
                         }
                     }
                     .pickerStyle(.menu)
                     .labelsHidden()
                     Button("+ New") { creatingProject = true }
-                        .disabled(selectedCustomerID == nil)
+                        .disabled(selectedCustomerID == nil || selectedCustomerIsExternal)
+                        .help(selectedCustomerIsExternal
+                              ? "Projects under a Command Center customer come from Command Center too."
+                              : "")
                 }
             }
         }
