@@ -14,6 +14,9 @@ struct TeamsCallsView: View {
     @State private var projects: [Project] = []
     @State private var loadError: String?
     @State private var attributing: MicSession?
+    /// How many sessions were hidden because they overlapped a calendar event.
+    /// Surfaced in the empty state so the user knows time isn't being silently lost.
+    @State private var hiddenByCalendarOverlap: Int = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -162,14 +165,23 @@ struct TeamsCallsView: View {
             Image(systemName: "mic.slash")
                 .font(.system(size: 32))
                 .foregroundStyle(.secondary)
-            Text("No mic-active sessions captured in this range yet.")
+            Text("No impromptu calls in this range.")
                 .foregroundStyle(.secondary)
-            Text("New sessions will appear as soon as you have a call.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if hiddenByCalendarOverlap > 0 {
+                Text("\(hiddenByCalendarOverlap) mic session\(hiddenByCalendarOverlap == 1 ? "" : "s") overlapping a calendar event \(hiddenByCalendarOverlap == 1 ? "is" : "are") shown under Meetings instead.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            } else {
+                Text("New ad-hoc calls will appear here. Scheduled meetings live under Meetings.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
             Spacer()
         }
         .frame(maxWidth: .infinity)
+        .padding(.horizontal, 32)
     }
 
     @ViewBuilder
@@ -314,7 +326,26 @@ struct TeamsCallsView: View {
 
     private func reload() {
         do {
-            sessions = try state.database.micSessions(in: scope.interval)
+            let raw = try state.database.micSessions(in: scope.interval)
+            // Booked time lives under Meetings. Hide any mic session that
+            // overlaps a calendar event so the same minute isn't shown twice.
+            let events = try state.database.calendarEvents(in: scope.interval)
+            var filtered: [MicSession] = []
+            var hidden = 0
+            for s in raw {
+                let sStart = s.startedAt
+                let sEnd = s.endedAt ?? Date()
+                let overlaps = events.contains { e in
+                    e.endAt > sStart && e.startAt < sEnd
+                }
+                if overlaps {
+                    hidden += 1
+                } else {
+                    filtered.append(s)
+                }
+            }
+            sessions = filtered
+            hiddenByCalendarOverlap = hidden
             customers = try state.database.allCustomers()
             projects = try state.database.allProjects()
         } catch {
@@ -351,15 +382,6 @@ private struct CallDetailSheet: View {
     @State private var urlBreakdown: [URLUsage] = []
     @State private var loadError: String?
 
-    // Local copies so newly-created customers/projects appear immediately
-    // in the picker without having to dismiss and reopen the sheet. The
-    // parent reloads from the DB after save.
-    @State private var localCustomers: [Customer] = []
-    @State private var localProjects: [Project] = []
-    @State private var creatingCustomer = false
-    @State private var creatingProject = false
-    @State private var newCustomerName = ""
-    @State private var newProjectName = ""
 
     struct AppUsage: Identifiable, Hashable {
         let id: String         // bundle ID
@@ -397,8 +419,6 @@ private struct CallDetailSheet: View {
         .onAppear {
             selectedCustomerID = session.customerID ?? ""
             selectedProjectID = session.projectID ?? ""
-            localCustomers = customers
-            localProjects = projects
             loadBreakdowns()
         }
         .alert("Error", isPresented: errorBinding) {
@@ -427,110 +447,16 @@ private struct CallDetailSheet: View {
     private var attributionSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Attribution").font(.subheadline.bold())
-            HStack(alignment: .top, spacing: 12) {
-                customerField
-                if !selectedCustomerID.isEmpty {
-                    projectField
-                }
-                Spacer()
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var customerField: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Customer").font(.caption).foregroundStyle(.secondary)
-            if creatingCustomer {
-                HStack {
-                    TextField("Customer name", text: $newCustomerName)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { confirmCreateCustomer() }
-                    Button("Add") { confirmCreateCustomer() }
-                        .disabled(newCustomerName.trimmingCharacters(in: .whitespaces).isEmpty)
-                    Button("Cancel") {
-                        creatingCustomer = false
-                        newCustomerName = ""
-                    }
-                }
-            } else {
-                HStack {
-                    Picker("", selection: $selectedCustomerID) {
-                        Text("Unassigned").tag("")
-                        ForEach(localCustomers) { Text($0.name).tag($0.id) }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    Button("+ New") { creatingCustomer = true }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var projectField: some View {
-        let avail = localProjects.filter { $0.customerID == selectedCustomerID }
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Project").font(.caption).foregroundStyle(.secondary)
-            if creatingProject {
-                HStack {
-                    TextField("Project name", text: $newProjectName)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { confirmCreateProject() }
-                    Button("Add") { confirmCreateProject() }
-                        .disabled(newProjectName.trimmingCharacters(in: .whitespaces).isEmpty)
-                    Button("Cancel") {
-                        creatingProject = false
-                        newProjectName = ""
-                    }
-                }
-            } else {
-                HStack {
-                    Picker("", selection: $selectedProjectID) {
-                        Text("(no project)").tag("")
-                        ForEach(avail) { Text($0.name).tag($0.id) }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    Button("+ New") { creatingProject = true }
-                }
-            }
-        }
-    }
-
-    private func confirmCreateCustomer() {
-        let name = newCustomerName.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else { return }
-        let palette = ["#3B82F6", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#EC4899", "#14B8A6"]
-        let color = palette[localCustomers.count % palette.count]
-        let c = Customer(id: UUID().uuidString, name: name, color: color, createdAt: Date())
-        do {
-            try database.upsert(c)
-            localCustomers.append(c)
-            localCustomers.sort { $0.name < $1.name }
-            selectedCustomerID = c.id
-            selectedProjectID = ""
-            creatingCustomer = false
-            newCustomerName = ""
-        } catch {
-            loadError = error.localizedDescription
-        }
-    }
-
-    private func confirmCreateProject() {
-        guard !selectedCustomerID.isEmpty else { return }
-        let name = newProjectName.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else { return }
-        let p = Project(id: UUID().uuidString, customerID: selectedCustomerID, name: name, color: nil, createdAt: Date())
-        do {
-            try database.upsert(p)
-            localProjects.append(p)
-            localProjects.sort { $0.name < $1.name }
-            selectedProjectID = p.id
-            creatingProject = false
-            newProjectName = ""
-        } catch {
-            loadError = error.localizedDescription
+            AttributionPickerSection(
+                customers: customers,
+                projects: projects,
+                selectedCustomerID: $selectedCustomerID,
+                selectedProjectID: $selectedProjectID,
+                onCreateCustomer: { name in try database.createLocalCustomer(name: name) },
+                onCreateProject: { customerID, name in try database.createLocalProject(customerID: customerID, name: name) },
+                emptyCustomerLabel: "Unassigned",
+                error: Binding(get: { loadError }, set: { loadError = $0 })
+            )
         }
     }
 

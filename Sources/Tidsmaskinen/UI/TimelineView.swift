@@ -755,68 +755,66 @@ private struct ReattributePopover: View {
     @State private var selectedProjectID: String = ""
     @State private var error: String?
 
+    private var isCalendarBlock: Bool { block.track == .calendar }
+    private var isClaudeBlock: Bool { block.track == .claudeCode }
+    private var hasSeries: Bool { block.seriesMasterID != nil }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(block.title).font(.body.bold())
-            if let sub = block.subtitle {
-                Text(sub).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-            }
-            Text(timeRange).font(.caption.monospaced()).foregroundStyle(.secondary)
+            header
 
-            if block.track == .claudeCode {
-                sessionAttributionBanner
+            if isClaudeBlock {
+                claudeSessionBanner
+            } else if isCalendarBlock {
+                calendarEventBanner
             }
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Customer").font(.caption.bold())
-                Picker("", selection: $selectedCustomerID) {
-                    Text(emptyPickerLabel).tag("")
-                    ForEach(customers) { Text($0.name).tag($0.id) }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-            }
-
-            if !selectedCustomerID.isEmpty {
-                let avail = projects.filter { $0.customerID == selectedCustomerID }
-                if !avail.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Project").font(.caption.bold())
-                        Picker("", selection: $selectedProjectID) {
-                            Text("(no project)").tag("")
-                            ForEach(avail) { Text($0.name).tag($0.id) }
-                        }
-                        .pickerStyle(.menu)
-                        .labelsHidden()
-                    }
-                }
-            }
+            AttributionPickerSection(
+                customers: customers,
+                projects: projects,
+                selectedCustomerID: $selectedCustomerID,
+                selectedProjectID: $selectedProjectID,
+                onCreateCustomer: { name in try state.database.createLocalCustomer(name: name) },
+                onCreateProject: { customerID, name in try state.database.createLocalProject(customerID: customerID, name: name) },
+                emptyCustomerLabel: emptyCustomerLabel,
+                error: $error
+            )
 
             if let error {
                 Text(error).font(.caption).foregroundStyle(.red)
             }
 
-            HStack {
-                Button("Cancel") { onCancel() }
-                Spacer()
-                Button("Clear override", role: .destructive) {
-                    apply(customerID: nil, projectID: nil)
-                }
-                .disabled(!block.hasManualOverride)
-                Button("Save") {
-                    apply(customerID: selectedCustomerID.isEmpty ? nil : selectedCustomerID,
-                          projectID: selectedProjectID.isEmpty ? nil : selectedProjectID)
-                }
-                .keyboardShortcut(.defaultAction)
+            if isCalendarBlock {
+                calendarFooter
+            } else {
+                nonCalendarFooter
             }
         }
         .padding(16)
-        .frame(width: 360)
+        .frame(width: 380)
         .onAppear {
             selectedCustomerID = block.attribution.customer?.id ?? ""
             selectedProjectID = block.attribution.project?.id ?? ""
+        }
+    }
+
+    @ViewBuilder
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(block.title).font(.body.bold())
+            if let sub = block.subtitle {
+                Text(sub).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Text(timeRange).font(.caption.monospaced()).foregroundStyle(.secondary)
+            if isCalendarBlock, hasSeries {
+                HStack(spacing: 4) {
+                    Image(systemName: "repeat").font(.caption2)
+                    Text("Part of a recurring series").font(.caption)
+                }
+                .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -827,20 +825,19 @@ private struct ReattributePopover: View {
         return "\(f.string(from: block.startedAt))–\(f.string(from: block.endedAt))  ·  \(mins) min"
     }
 
-    /// For Claude blocks, picker's empty option means "fall back to the rule"
-    /// rather than "this block has no assignment". Other tracks keep "Unassigned".
-    private var emptyPickerLabel: String {
-        if block.track == .claudeCode, !block.hasManualOverride {
+    private var emptyCustomerLabel: String {
+        if isClaudeBlock, !block.hasManualOverride {
             return "(use rule)"
         }
         return "Unassigned"
     }
 
-    /// Status banner shown above the customer picker for Claude session blocks.
-    /// Explains rule-based attribution so users don't feel they must assign
-    /// every session manually.
+    // MARK: - Banners
+
+    /// Claude session attribution status banner — unchanged behaviour from
+    /// before the calendar-event work; just renamed and isolated.
     @ViewBuilder
-    private var sessionAttributionBanner: some View {
+    private var claudeSessionBanner: some View {
         let repoName = block.title
         if block.hasManualOverride, let customer = block.attribution.customer {
             attributionBanner(
@@ -862,6 +859,46 @@ private struct ReattributePopover: View {
                 tint: .orange,
                 primary: "Not matched by any rule.",
                 secondary: "Either assign \(repoName) in Discover (covers every session in this repo) or pick a customer below to attribute just this session."
+            )
+        }
+    }
+
+    /// Calendar event attribution status banner. Distinguishes per-event
+    /// override, series rule, and the new ignored state.
+    @ViewBuilder
+    private var calendarEventBanner: some View {
+        switch block.eventAttribution {
+        case .attributed(let customer, let project, .event):
+            attributionBanner(
+                systemImage: "pin.fill",
+                tint: .blue,
+                primary: "Manual override on this occurrence.",
+                secondary: hasSeries
+                    ? "Set to \(displayName(customer: customer, project: project)). Clear override to fall back to the series rule."
+                    : "Set to \(displayName(customer: customer, project: project)). Clear override to leave this meeting unattributed."
+            )
+        case .attributed(let customer, let project, .series):
+            attributionBanner(
+                systemImage: "checkmark.seal.fill",
+                tint: .green,
+                primary: "Attributed via the series rule.",
+                secondary: "Counted as \(displayName(customer: customer, project: project)) in the weekly report. Pick a customer below only to override this specific occurrence."
+            )
+        case .ignored:
+            attributionBanner(
+                systemImage: "eye.slash.fill",
+                tint: .gray,
+                primary: "This meeting is ignored.",
+                secondary: "Time is excluded from the weekly report. Manage in Discover → Ignored meetings."
+            )
+        case .unattributed, .none:
+            attributionBanner(
+                systemImage: "exclamationmark.triangle.fill",
+                tint: .orange,
+                primary: "Not yet attributed.",
+                secondary: hasSeries
+                    ? "Use Apply to series to attribute every occurrence at once, or pick a customer below for just this meeting. You can also ignore it."
+                    : "Pick a customer below to attribute this meeting, or ignore it to exclude it from the weekly report."
             )
         }
     }
@@ -888,6 +925,70 @@ private struct ReattributePopover: View {
         return customer.name
     }
 
+    // MARK: - Footers
+
+    @ViewBuilder
+    private var nonCalendarFooter: some View {
+        HStack {
+            Button("Cancel") { onCancel() }
+            Spacer()
+            Button("Clear override", role: .destructive) {
+                apply(customerID: nil, projectID: nil)
+            }
+            .disabled(!block.hasManualOverride)
+            Button("Save") {
+                apply(customerID: selectedCustomerID.isEmpty ? nil : selectedCustomerID,
+                      projectID: selectedProjectID.isEmpty ? nil : selectedProjectID)
+            }
+            .keyboardShortcut(.defaultAction)
+        }
+    }
+
+    @ViewBuilder
+    private var calendarFooter: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Button("Cancel") { onCancel() }
+                Spacer()
+                Menu("Ignore…") {
+                    Button("Ignore this meeting") { ignoreEvent() }
+                    if hasSeries {
+                        Button("Ignore series") { ignoreSeries() }
+                    }
+                }
+                .menuStyle(.button)
+                .controlSize(.small)
+                .fixedSize()
+                Button("Clear override", role: .destructive) {
+                    applyEvent(customerID: nil, projectID: nil)
+                }
+                .disabled(!block.hasManualOverride)
+            }
+            HStack {
+                Spacer()
+                if hasSeries {
+                    Button("Apply to series") {
+                        applySeries(
+                            customerID: selectedCustomerID.isEmpty ? nil : selectedCustomerID,
+                            projectID: selectedProjectID.isEmpty ? nil : selectedProjectID
+                        )
+                    }
+                    .disabled(selectedCustomerID.isEmpty)
+                    .help("Save this attribution for every occurrence of the series.")
+                }
+                Button("Save for this meeting") {
+                    applyEvent(
+                        customerID: selectedCustomerID.isEmpty ? nil : selectedCustomerID,
+                        projectID: selectedProjectID.isEmpty ? nil : selectedProjectID
+                    )
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+    }
+
+    // MARK: - Persistence
+
     private func apply(customerID: String?, projectID: String?) {
         do {
             switch block.source {
@@ -898,6 +999,56 @@ private struct ReattributePopover: View {
             case .foregroundSamples(let ids):
                 try state.database.setSampleAttribution(sampleIDs: ids, customerID: customerID, projectID: projectID)
             }
+            onSaved()
+        } catch let e {
+            error = e.localizedDescription
+        }
+    }
+
+    private func applyEvent(customerID: String?, projectID: String?) {
+        guard case .calendarEvent(let id) = block.source else { return }
+        do {
+            try state.database.setCalendarEventAttribution(eventID: id, customerID: customerID, projectID: projectID)
+            onSaved()
+        } catch let e {
+            error = e.localizedDescription
+        }
+    }
+
+    private func applySeries(customerID: String?, projectID: String?) {
+        guard let seriesID = block.seriesMasterID else { return }
+        do {
+            try state.database.setMeetingSeriesAttribution(
+                seriesID: seriesID,
+                customerID: customerID,
+                projectID: projectID,
+                isIgnored: false
+            )
+            onSaved()
+        } catch let e {
+            error = e.localizedDescription
+        }
+    }
+
+    private func ignoreEvent() {
+        guard case .calendarEvent(let id) = block.source else { return }
+        do {
+            try state.database.setCalendarEventIgnored(eventID: id, isIgnored: true)
+            onSaved()
+        } catch let e {
+            error = e.localizedDescription
+        }
+    }
+
+    private func ignoreSeries() {
+        guard let seriesID = block.seriesMasterID else { return }
+        do {
+            try state.database.setMeetingSeriesAttribution(
+                seriesID: seriesID,
+                customerID: nil,
+                projectID: nil,
+                isIgnored: true
+            )
             onSaved()
         } catch let e {
             error = e.localizedDescription

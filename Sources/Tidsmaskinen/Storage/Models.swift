@@ -86,7 +86,6 @@ struct Rule: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, E
         case urlPath
         case windowTitle
         case appBundleID
-        case emailDomain
 
         var id: String { rawValue }
 
@@ -98,7 +97,6 @@ struct Rule: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, E
             case .urlPath:       return "Browser URL path"
             case .windowTitle:   return "Window title contains"
             case .appBundleID:   return "App bundle ID"
-            case .emailDomain:   return "Email domain (meetings)"
             }
         }
 
@@ -110,13 +108,12 @@ struct Rule: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, E
             case .urlPath:       return "github.com/forefront/*"
             case .windowTitle:   return "Acme staging"
             case .appBundleID:   return "com.acme.app"
-            case .emailDomain:   return "acme.com"
             }
         }
 
         var supportsGlob: Bool {
             switch self {
-            case .windowTitle, .emailDomain: return false
+            case .windowTitle: return false
             default: return true
             }
         }
@@ -201,6 +198,12 @@ struct CalendarEvent: Codable, FetchableRecord, MutablePersistableRecord, Identi
     var verifiedAttended: Bool
     var customerID: String?         // optional manual override
     var projectID: String?
+    /// Microsoft Graph event type: "singleInstance" | "occurrence" | "exception" | "seriesMaster".
+    var eventType: String?
+    /// Set on occurrence/exception rows, points at the series master's id.
+    var seriesMasterID: String?
+    /// Per-event ignore flag — excludes the event from Timeline and weekly report.
+    var isIgnored: Bool
     var createdAt: Date
     var updatedAt: Date
 
@@ -214,6 +217,9 @@ struct CalendarEvent: Codable, FetchableRecord, MutablePersistableRecord, Identi
         static let attendeeDomainsCSV = Column(CodingKeys.attendeeDomainsCSV)
         static let customerID = Column(CodingKeys.customerID)
         static let projectID = Column(CodingKeys.projectID)
+        static let eventType = Column(CodingKeys.eventType)
+        static let seriesMasterID = Column(CodingKeys.seriesMasterID)
+        static let isIgnored = Column(CodingKeys.isIgnored)
     }
 
     var attendeeDomains: [String] {
@@ -222,6 +228,29 @@ struct CalendarEvent: Codable, FetchableRecord, MutablePersistableRecord, Identi
 
     var durationMinutes: Int {
         max(0, Int(endAt.timeIntervalSince(startAt) / 60))
+    }
+}
+
+/// Per-series attribution. Keyed by the Graph series master id; one row per
+/// recurring series. `customerID` nil + `isIgnored` true means "ignore this
+/// series"; `customerID` set means "attribute every occurrence to this customer
+/// unless the specific occurrence has its own override".
+struct MeetingSeriesAttribution: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
+    var id: String { seriesMasterID }
+    var seriesMasterID: String
+    var customerID: String?
+    var projectID: String?
+    var isIgnored: Bool
+    var updatedAt: Date
+
+    static let databaseTableName = "meeting_series_attributions"
+
+    enum Columns {
+        static let seriesMasterID = Column(CodingKeys.seriesMasterID)
+        static let customerID = Column(CodingKeys.customerID)
+        static let projectID = Column(CodingKeys.projectID)
+        static let isIgnored = Column(CodingKeys.isIgnored)
+        static let updatedAt = Column(CodingKeys.updatedAt)
     }
 }
 

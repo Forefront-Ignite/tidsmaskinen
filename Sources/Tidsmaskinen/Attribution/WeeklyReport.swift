@@ -284,7 +284,9 @@ struct WeeklyReport {
         }
 
         for event in events {
-            let result = matcher.attribute(event: event)
+            let attribution = matcher.attribute(event: event)
+            if attribution.isIgnored { continue }
+            let result = attribution.asAttributionResult
             records.append(AttributedRecord(
                 bucketID: rowKey(customer: result.customer, project: result.project),
                 source: .events,
@@ -447,7 +449,7 @@ struct WeeklyReport {
                         systemImage: "macwindow"
                     )
                 }
-            case .appBundleID, .emailDomain:
+            case .appBundleID:
                 break
             }
         }

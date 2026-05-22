@@ -213,6 +213,29 @@ struct AppDatabase {
                 WHERE externalSource IS NOT NULL
                 """)
         }
+        // Series-aware meeting attribution. Drops the old auto-by-attendee-domain
+        // path in favour of explicit per-event / per-series attribution + ignore.
+        migrator.registerMigration("v12_meeting_series_and_ignore") { db in
+            try db.alter(table: "calendar_events") { t in
+                t.add(column: "eventType", .text)
+                t.add(column: "seriesMasterID", .text)
+                t.add(column: "isIgnored", .boolean).notNull().defaults(to: false)
+            }
+            try db.create(
+                index: "idx_calendar_events_seriesMasterID",
+                on: "calendar_events",
+                columns: ["seriesMasterID"]
+            )
+            try db.create(table: "meeting_series_attributions") { t in
+                t.primaryKey("seriesMasterID", .text)
+                t.column("customerID", .text)
+                t.column("projectID", .text)
+                t.column("isIgnored", .boolean).notNull().defaults(to: false)
+                t.column("updatedAt", .datetime).notNull()
+            }
+            // Remove rows from the discontinued .emailDomain rule kind.
+            try db.execute(sql: "DELETE FROM rules WHERE kind = 'emailDomain'")
+        }
         try migrator.migrate(dbQueue)
     }
 
@@ -704,33 +727,208 @@ struct AppDatabase {
         }
     }
 
-    /// Per attendee-domain time totals over an interval. Each event's duration
-    /// is added to every distinct attendee domain on that event.
-    func meetingDomainAggregates(in interval: DateInterval) throws -> [SignalAggregate] {
-        let events = try calendarEvents(in: interval)
-        var totals: [String: Double] = [:]
-        for event in events {
-            let duration = max(0, event.endAt.timeIntervalSince(event.startAt))
-            guard duration > 0 else { continue }
-            for domain in event.attendeeDomains {
-                totals[domain, default: 0] += duration
-            }
-        }
-        return totals
-            .map { SignalAggregate(kind: .meetingDomain, value: $0.key, totalSeconds: $0.value) }
-            .sorted { $0.totalSeconds > $1.totalSeconds }
-    }
-
     func deleteCalendarEvent(id: String) throws {
         _ = try dbQueue.write { db in
             try CalendarEvent.deleteOne(db, key: id)
         }
     }
 
+    // MARK: - Meeting attribution
+
+    func setCalendarEventIgnored(eventID: String, isIgnored: Bool) throws {
+        _ = try dbQueue.write { db in
+            try CalendarEvent
+                .filter(CalendarEvent.Columns.id == eventID)
+                .updateAll(db, CalendarEvent.Columns.isIgnored.set(to: isIgnored))
+        }
+    }
+
+    func allMeetingSeriesAttributions() throws -> [MeetingSeriesAttribution] {
+        try dbQueue.read { db in
+            try MeetingSeriesAttribution.fetchAll(db)
+        }
+    }
+
+    func meetingSeriesAttribution(seriesID: String) throws -> MeetingSeriesAttribution? {
+        try dbQueue.read { db in
+            try MeetingSeriesAttribution.fetchOne(db, key: seriesID)
+        }
+    }
+
+    /// Upsert (or delete-if-empty) the row for a series.
+    /// Passing `customerID = nil`, `projectID = nil`, and `isIgnored = false`
+    /// deletes the row — i.e. the series falls back to "unattributed".
+    func setMeetingSeriesAttribution(seriesID: String,
+                                     customerID: String?,
+                                     projectID: String?,
+                                     isIgnored: Bool) throws {
+        try dbQueue.write { db in
+            if customerID == nil && projectID == nil && !isIgnored {
+                try MeetingSeriesAttribution.deleteOne(db, key: seriesID)
+                return
+            }
+            var record = MeetingSeriesAttribution(
+                seriesMasterID: seriesID,
+                customerID: customerID,
+                projectID: projectID,
+                isIgnored: isIgnored,
+                updatedAt: Date()
+            )
+            try record.upsert(db)
+        }
+    }
+
+    /// Aggregates suitable for the Discover "Recurring series" list.
+    struct MeetingSeriesAggregate: Identifiable, Hashable {
+        let seriesMasterID: String
+        let sampleSubject: String
+        let occurrenceCount: Int
+        let totalSeconds: Double
+        let firstStartAt: Date
+        let lastStartAt: Date
+        var id: String { seriesMasterID }
+    }
+
+    /// Series with at least one occurrence in the interval, ignoring per-event
+    /// `isIgnored` flags (we leave it to the caller to filter out ignored
+    /// series via `meetingSeriesAttribution`).
+    func meetingSeriesAggregates(in interval: DateInterval) throws -> [MeetingSeriesAggregate] {
+        try dbQueue.read { db in
+            let events = try CalendarEvent
+                .filter(CalendarEvent.Columns.startAt >= interval.start
+                        && CalendarEvent.Columns.startAt < interval.end
+                        && CalendarEvent.Columns.seriesMasterID != nil)
+                .order(CalendarEvent.Columns.startAt.asc)
+                .fetchAll(db)
+
+            var byID: [String: [CalendarEvent]] = [:]
+            for e in events {
+                guard let sid = e.seriesMasterID else { continue }
+                byID[sid, default: []].append(e)
+            }
+            return byID.compactMap { (sid, group) -> MeetingSeriesAggregate? in
+                guard let first = group.first, let last = group.last else { return nil }
+                // Pick the most-frequent subject so a series that gets renamed
+                // on one occurrence still surfaces under its canonical name.
+                var counts: [String: Int] = [:]
+                for e in group { counts[e.subject, default: 0] += 1 }
+                let subject = counts.max { $0.value < $1.value }?.key ?? first.subject
+                let total = group.reduce(0.0) { $0 + max(0, $1.endAt.timeIntervalSince($1.startAt)) }
+                return MeetingSeriesAggregate(
+                    seriesMasterID: sid,
+                    sampleSubject: subject.isEmpty ? "(no subject)" : subject,
+                    occurrenceCount: group.count,
+                    totalSeconds: total,
+                    firstStartAt: first.startAt,
+                    lastStartAt: last.startAt
+                )
+            }
+            .sorted { $0.totalSeconds > $1.totalSeconds }
+        }
+    }
+
+    /// One-off meetings: events that are not part of a series. Ignored events
+    /// are filtered out at the database level — Discover surfaces them under
+    /// the Ignored list instead.
+    func oneOffMeetingAggregates(in interval: DateInterval) throws -> [CalendarEvent] {
+        try dbQueue.read { db in
+            try CalendarEvent
+                .filter(CalendarEvent.Columns.startAt >= interval.start
+                        && CalendarEvent.Columns.startAt < interval.end
+                        && CalendarEvent.Columns.seriesMasterID == nil
+                        && CalendarEvent.Columns.isIgnored == false)
+                .order(CalendarEvent.Columns.startAt.desc)
+                .fetchAll(db)
+        }
+    }
+
+    /// Ignored items in the range — both per-event ignores and series-level
+    /// ignores. Series rows are exposed as their seriesMasterID; the caller
+    /// joins to `meetingSeriesAggregates` for a friendly label.
+    struct IgnoredMeetingAggregate: Identifiable, Hashable {
+        enum Scope: Hashable { case event, series }
+        let scope: Scope
+        let id: String              // event id or seriesMasterID
+        let label: String           // event subject or series subject
+        let totalSeconds: Double    // event duration or sum of in-range occurrences
+        let occurrenceCount: Int?   // series only
+    }
+
+    func ignoredMeetingAggregates(in interval: DateInterval) throws -> [IgnoredMeetingAggregate] {
+        try dbQueue.read { db in
+            // Per-event ignores within range.
+            let ignoredEvents = try CalendarEvent
+                .filter(CalendarEvent.Columns.startAt >= interval.start
+                        && CalendarEvent.Columns.startAt < interval.end
+                        && CalendarEvent.Columns.isIgnored == true)
+                .order(CalendarEvent.Columns.startAt.desc)
+                .fetchAll(db)
+
+            var rows: [IgnoredMeetingAggregate] = ignoredEvents.map { e in
+                IgnoredMeetingAggregate(
+                    scope: .event,
+                    id: e.id,
+                    label: e.subject.isEmpty ? "(no subject)" : e.subject,
+                    totalSeconds: max(0, e.endAt.timeIntervalSince(e.startAt)),
+                    occurrenceCount: nil
+                )
+            }
+
+            // Series ignores: every series that has a stored attribution row
+            // with isIgnored=true. We still surface them even when no
+            // occurrence falls in range — the user can un-ignore from there.
+            let ignoredSeries = try MeetingSeriesAttribution
+                .filter(MeetingSeriesAttribution.Columns.isIgnored == true)
+                .fetchAll(db)
+
+            for series in ignoredSeries {
+                let occurrences = try CalendarEvent
+                    .filter(CalendarEvent.Columns.seriesMasterID == series.seriesMasterID
+                            && CalendarEvent.Columns.startAt >= interval.start
+                            && CalendarEvent.Columns.startAt < interval.end)
+                    .fetchAll(db)
+                let firstSubject = occurrences.first?.subject ?? ""
+                let label = firstSubject.isEmpty ? "(no subject)" : firstSubject
+                let total = occurrences.reduce(0.0) { $0 + max(0, $1.endAt.timeIntervalSince($1.startAt)) }
+                rows.append(IgnoredMeetingAggregate(
+                    scope: .series,
+                    id: series.seriesMasterID,
+                    label: label,
+                    totalSeconds: total,
+                    occurrenceCount: occurrences.count
+                ))
+            }
+            return rows
+        }
+    }
+
+    // MARK: - Local entity creation
+
+    /// Color palette used for newly-created local customers. Picked round-robin
+    /// from the count of existing customers so the first few are visually distinct.
+    private static let localCustomerPalette = [
+        "#3B82F6", "#10B981", "#F59E0B", "#EF4444",
+        "#8B5CF6", "#EC4899", "#14B8A6"
+    ]
+
+    func createLocalCustomer(name: String) throws -> Customer {
+        let count = try dbQueue.read { db in try Customer.fetchCount(db) }
+        let color = Self.localCustomerPalette[count % Self.localCustomerPalette.count]
+        let c = Customer(id: UUID().uuidString, name: name, color: color, createdAt: Date())
+        try upsert(c)
+        return c
+    }
+
+    func createLocalProject(customerID: String, name: String) throws -> Project {
+        let p = Project(id: UUID().uuidString, customerID: customerID, name: name, color: nil, createdAt: Date())
+        try upsert(p)
+        return p
+    }
+
     // MARK: - Aggregations for Discover
 
     struct SignalAggregate: Identifiable, Hashable {
-        enum Kind: String, Hashable { case gitRepoSlug, urlHost, urlPath, appBundleID, meetingDomain }
+        enum Kind: String, Hashable { case gitRepoSlug, urlHost, urlPath, appBundleID }
         let kind: Kind
         let value: String      // raw value (e.g. owner/repo, host, bundle id, attendee domain)
         let totalSeconds: Double

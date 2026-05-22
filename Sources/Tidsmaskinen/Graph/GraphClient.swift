@@ -220,7 +220,7 @@ actor GraphClient {
             URLQueryItem(name: "endDateTime", value: isoOut.string(from: end)),
             URLQueryItem(name: "$top", value: "200"),
             URLQueryItem(name: "$orderby", value: "start/dateTime"),
-            URLQueryItem(name: "$select", value: "id,iCalUId,subject,bodyPreview,start,end,isAllDay,organizer,attendees,responseStatus,location,isOnlineMeeting,onlineMeetingProvider,createdDateTime,lastModifiedDateTime")
+            URLQueryItem(name: "$select", value: "id,iCalUId,subject,bodyPreview,start,end,isAllDay,organizer,attendees,responseStatus,location,isOnlineMeeting,onlineMeetingProvider,type,seriesMasterId,createdDateTime,lastModifiedDateTime")
         ]
         var req = URLRequest(url: components.url!)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -355,6 +355,8 @@ private struct GraphEvent: Codable {
     let location: GraphLocation?
     let isOnlineMeeting: Bool?
     let onlineMeetingProvider: String?
+    let type: String?
+    let seriesMasterId: String?
     let createdDateTime: String?
     let lastModifiedDateTime: String?
 
@@ -397,6 +399,9 @@ private struct GraphEvent: Codable {
             verifiedAttended: false,
             customerID: nil,
             projectID: nil,
+            eventType: type,
+            seriesMasterID: seriesMasterId,
+            isIgnored: false,
             createdAt: parsedCreated,
             updatedAt: parsedUpdated
         )

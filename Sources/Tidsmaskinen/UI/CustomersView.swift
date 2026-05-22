@@ -329,8 +329,6 @@ private struct AddRuleSheet: View {
             return "Substring (case-insensitive) found in the frontmost window title."
         case .appBundleID:
             return "App bundle identifier of the frontmost app. Wildcards supported."
-        case .emailDomain:
-            return "Domain of meeting attendees (Phase 4 — meetings not yet imported)."
         }
     }
 }

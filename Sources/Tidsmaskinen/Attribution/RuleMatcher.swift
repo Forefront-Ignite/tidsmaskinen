@@ -8,19 +8,61 @@ struct AttributionResult: Equatable {
     static let unattributed = AttributionResult(customer: nil, project: nil, matchingRule: nil)
 }
 
+/// Attribution result for a single calendar event. Carries enough state for
+/// the UI to show *why* the event is attributed (per-occurrence override vs
+/// series rule) and to distinguish "ignored" from "unattributed".
+enum EventAttribution: Equatable {
+    enum Source: Equatable { case event, series }
+
+    case attributed(customer: Customer, project: Project?, source: Source)
+    case ignored(source: Source)
+    case unattributed
+
+    var customer: Customer? {
+        if case .attributed(let c, _, _) = self { return c }
+        return nil
+    }
+
+    var project: Project? {
+        if case .attributed(_, let p, _) = self { return p }
+        return nil
+    }
+
+    var isIgnored: Bool {
+        if case .ignored = self { return true }
+        return false
+    }
+
+    /// Project-the-event-onto-WeeklyReport view: just the attributed customer
+    /// and project, with no source distinction. Ignored events return
+    /// `.unattributed` here because they shouldn't contribute hours to any
+    /// bucket — callers should skip ignored events before calling this.
+    var asAttributionResult: AttributionResult {
+        if case .attributed(let c, let p, _) = self {
+            return AttributionResult(customer: c, project: p, matchingRule: nil)
+        }
+        return .unattributed
+    }
+}
+
 struct RuleMatcher {
     let customersByID: [String: Customer]
     let projectsByID: [String: Project]
     let rulesByKind: [Rule.Kind: [Rule]]
+    let seriesAttributionsByID: [String: MeetingSeriesAttribution]
 
     static func load(from db: AppDatabase) throws -> RuleMatcher {
         let customers = try db.allCustomers()
         let projects = try db.allProjects()
         let rules = try db.allRules()
-        return make(customers: customers, projects: projects, rules: rules)
+        let series = try db.allMeetingSeriesAttributions()
+        return make(customers: customers, projects: projects, rules: rules, series: series)
     }
 
-    static func make(customers: [Customer], projects: [Project], rules: [Rule]) -> RuleMatcher {
+    static func make(customers: [Customer],
+                     projects: [Project],
+                     rules: [Rule],
+                     series: [MeetingSeriesAttribution] = []) -> RuleMatcher {
         let byID = Dictionary(uniqueKeysWithValues: customers.map { ($0.id, $0) })
         let projByID = Dictionary(uniqueKeysWithValues: projects.map { ($0.id, $0) })
         let byKind = Dictionary(grouping: rules, by: { $0.kind })
@@ -28,7 +70,13 @@ struct RuleMatcher {
                 if lhs.priority != rhs.priority { return lhs.priority > rhs.priority }
                 return lhs.pattern.count > rhs.pattern.count
             } }
-        return RuleMatcher(customersByID: byID, projectsByID: projByID, rulesByKind: byKind)
+        let seriesByID = Dictionary(uniqueKeysWithValues: series.map { ($0.seriesMasterID, $0) })
+        return RuleMatcher(
+            customersByID: byID,
+            projectsByID: projByID,
+            rulesByKind: byKind,
+            seriesAttributionsByID: seriesByID
+        )
     }
 
     func attribute(_ sample: ActivitySample) -> AttributionResult {
@@ -97,16 +145,28 @@ struct RuleMatcher {
         return .unattributed
     }
 
-    /// Attribute a calendar event. Manual override (event.customerID/projectID) wins;
-    /// otherwise match by attendee domains via `.emailDomain` rules.
-    func attribute(event: CalendarEvent) -> AttributionResult {
+    /// Attribute a calendar event. Priority:
+    ///   1. event.isIgnored                             → .ignored(.event)
+    ///   2. event.customerID set                        → .attributed(_, _, .event)
+    ///   3. series ignored (if seriesMasterID != nil)   → .ignored(.series)
+    ///   4. series has customerID                       → .attributed(_, _, .series)
+    ///   5. otherwise                                   → .unattributed
+    func attribute(event: CalendarEvent) -> EventAttribution {
+        if event.isIgnored {
+            return .ignored(source: .event)
+        }
         if let customerID = event.customerID, let customer = customersByID[customerID] {
             let project = event.projectID.flatMap { projectsByID[$0] }
-            return AttributionResult(customer: customer, project: project, matchingRule: nil)
+            return .attributed(customer: customer, project: project, source: .event)
         }
-        for domain in event.attendeeDomains {
-            if let rule = match(kind: .emailDomain, against: domain) {
-                return result(for: rule)
+        if let seriesID = event.seriesMasterID,
+           let series = seriesAttributionsByID[seriesID] {
+            if series.isIgnored {
+                return .ignored(source: .series)
+            }
+            if let cid = series.customerID, let customer = customersByID[cid] {
+                let project = series.projectID.flatMap { projectsByID[$0] }
+                return .attributed(customer: customer, project: project, source: .series)
             }
         }
         return .unattributed

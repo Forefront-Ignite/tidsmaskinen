@@ -30,11 +30,17 @@ struct TimelineBlock: Identifiable {
     let title: String          // app name / repo / meeting subject
     let subtitle: String?      // optional secondary line (window title / cwd / attendees)
     let attribution: AttributionResult
+    /// For calendar-event blocks: the richer attribution that distinguishes
+    /// "attributed via the series rule" from "attributed via the per-event
+    /// override". `nil` for foreground and Claude blocks.
+    let eventAttribution: EventAttribution?
     let hasManualOverride: Bool
     let isIdle: Bool
     /// Bundle identifier of the underlying app, when known (foreground blocks).
     /// The timeline view uses this to render the real app icon inside the block.
     let appBundleID: String?
+    /// Series master id, present on calendar-event blocks that are part of a series.
+    let seriesMasterID: String?
 
     var durationSeconds: TimeInterval {
         max(1, endedAt.timeIntervalSince(startedAt))
@@ -62,7 +68,9 @@ enum TimelineBuilder {
             let clippedStart = max(event.startAt, day.start)
             let clippedEnd = min(event.endAt, day.end)
             guard clippedEnd > clippedStart else { return nil }
-            let attribution = matcher.attribute(event: event)
+            let eventAttribution = matcher.attribute(event: event)
+            // Ignored events are not drawn on the timeline at all.
+            if eventAttribution.isIgnored { return nil }
             let override = (event.customerID != nil)
             return TimelineBlock(
                 id: "evt-\(event.id)",
@@ -72,10 +80,12 @@ enum TimelineBuilder {
                 endedAt: clippedEnd,
                 title: event.subject.isEmpty ? "(no subject)" : event.subject,
                 subtitle: event.attendeeDomains.isEmpty ? nil : event.attendeeDomains.joined(separator: ", "),
-                attribution: attribution,
+                attribution: eventAttribution.asAttributionResult,
+                eventAttribution: eventAttribution,
                 hasManualOverride: override,
                 isIdle: false,
-                appBundleID: nil
+                appBundleID: nil,
+                seriesMasterID: event.seriesMasterID
             )
         }
 
@@ -113,9 +123,11 @@ enum TimelineBuilder {
                 title: title,
                 subtitle: subtitle,
                 attribution: attribution,
+                eventAttribution: nil,
                 hasManualOverride: override,
                 isIdle: !session.isActive(idleThresholdSeconds: claudeIdleThresholdSeconds) && session.endedAt == nil,
-                appBundleID: nil
+                appBundleID: nil,
+                seriesMasterID: nil
             )
         }
 
@@ -176,9 +188,11 @@ enum TimelineBuilder {
                 title: title,
                 subtitle: subtitle,
                 attribution: attribution,
+                eventAttribution: nil,
                 hasManualOverride: override,
                 isIdle: g.representative.isIdle,
-                appBundleID: g.representative.appBundleID
+                appBundleID: g.representative.appBundleID,
+                seriesMasterID: nil
             )
         }
     }

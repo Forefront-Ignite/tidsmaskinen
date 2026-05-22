@@ -93,6 +93,7 @@ final class CalendarSync: ObservableObject {
                 copy.customerID = prior.customerID
                 copy.projectID = prior.projectID
                 copy.verifiedAttended = prior.verifiedAttended
+                copy.isIgnored = prior.isIgnored
                 return copy
             }
             try database.upsertEvents(merged)
