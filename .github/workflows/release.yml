@@ -1,0 +1,129 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # creates the GitHub Release and pushes appcast.xml back to main
+
+jobs:
+  build-and-release:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main          # we'll push the appcast update back to main
+
+      - name: Select latest Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app || sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Resolve Swift package dependencies
+        run: swift package resolve
+
+      - name: Import Developer ID signing certificate
+        env:
+          CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          CERT_P12_PASSWORD: ${{ secrets.MACOS_CERT_P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/build.keychain"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          # Keep the system keychain in the search list so notarytool can still
+          # find the App Store Connect API key trust roots.
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" \
+              -k "$KEYCHAIN" \
+              -P "$CERT_P12_PASSWORD" \
+              -T /usr/bin/codesign \
+              -T /usr/bin/security
+          security set-key-partition-list \
+              -S apple-tool:,apple:,codesign: \
+              -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Stage App Store Connect API key
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/asc"
+          printf '%s' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/asc/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/asc/AuthKey.p8"
+          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/asc/AuthKey.p8" >> "$GITHUB_ENV"
+
+      - name: Build, sign, and notarize
+        env:
+          VERSION: ${{ github.ref_name }}
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          NOTARIZE: '1'
+          SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          export VERSION="${VERSION#v}"
+          ./bin/make-app.sh release
+
+      - name: Sign update for Sparkle
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          PRIV="$RUNNER_TEMP/sparkle_ed_private_key"
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" | base64 --decode > "$PRIV"
+          chmod 600 "$PRIV"
+          SIGN_UPDATE=$(find .build/artifacts -name sign_update -type f -path "*/bin/sign_update" | head -n1)
+          if [[ -z "$SIGN_UPDATE" ]]; then
+            echo "sign_update tool not found under .build/artifacts" >&2
+            exit 1
+          fi
+          SIG_LINE=$("$SIGN_UPDATE" -f "$PRIV" build/Tidsmaskinen.zip)
+          rm -f "$PRIV"
+          # Persist for later steps via the multiline env-file format.
+          {
+            echo "SIG_LINE<<__SIG_EOF__"
+            echo "$SIG_LINE"
+            echo "__SIG_EOF__"
+          } >> "$GITHUB_ENV"
+
+      - name: Update appcast.xml on main
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          ./bin/update-appcast.sh "$VERSION" "$SIG_LINE"
+          git config user.name  "tidsmaskinen-release-bot"
+          git config user.email "tidsmaskinen-release-bot@users.noreply.github.com"
+          git add appcast.xml
+          git commit -m "release: appcast for v$VERSION"
+          git push origin HEAD:main
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/Tidsmaskinen.zip
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          body: |
+            **Install:**
+
+            1. Download `Tidsmaskinen.zip` below and unzip it.
+            2. Drag `Tidsmaskinen.app` to `/Applications` (replacing any older copy).
+            3. Launch from the menu bar.
+
+            Future updates install automatically from inside the app — check the menu bar dropdown.
+
+      - name: Cleanup signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/build.keychain" || true

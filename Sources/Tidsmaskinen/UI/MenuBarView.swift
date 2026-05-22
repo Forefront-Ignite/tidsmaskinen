@@ -351,6 +351,11 @@ struct MenuBarView: View {
             footerIcon("Raw samples", systemImage: "list.bullet.rectangle") { open(.samples) }
             footerIcon("Diagnostics", systemImage: "stethoscope") { open(.diagnostics) }
             footerIcon("Settings", systemImage: "gearshape.fill") { open(.settings) }
+            if hasUpdateFeed {
+                footerIcon("Check for Updates", systemImage: "arrow.down.circle") {
+                    state.updaterController.checkForUpdates(nil)
+                }
+            }
             Spacer()
             Button {
                 NSApp.terminate(nil)
@@ -391,6 +396,12 @@ struct MenuBarView: View {
     private var cardBackground: some View {
         RoundedRectangle(cornerRadius: 12, style: .continuous)
             .fill(.quaternary.opacity(0.6))
+    }
+
+    // Dev builds ship without SUFeedURL; hiding the button avoids surfacing
+    // Sparkle's "no feed URL" alert when someone clicks it locally.
+    private var hasUpdateFeed: Bool {
+        Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil
     }
 
     private func open(_ section: SidebarItem) {

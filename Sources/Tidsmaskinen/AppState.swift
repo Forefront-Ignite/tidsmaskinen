@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import GRDB
+import Sparkle
 
 @MainActor
 final class AppState: ObservableObject {
@@ -27,6 +28,7 @@ final class AppState: ObservableObject {
     let micMonitor: MicMonitor
     let commandCenter: CommandCenterClient
     let commandCenterSync: CommandCenterSync
+    let updaterController: SPUStandardUpdaterController
 
     private var cancellables = Set<AnyCancellable>()
     private var commandCenterAutoSyncTask: Task<Void, Never>?
@@ -45,6 +47,11 @@ final class AppState: ObservableObject {
         let ccClient = CommandCenterClient()
         self.commandCenter = ccClient
         self.commandCenterSync = CommandCenterSync(database: database, client: ccClient)
+        self.updaterController = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
 
         // Forward nested ObservableObject changes so views observing AppState
         // (e.g. MenuBarView, CalendarView) repaint when sync state changes.

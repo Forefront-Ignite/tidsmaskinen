@@ -9,13 +9,15 @@ let package = Package(
         .executable(name: "tm-hook", targets: ["tm-hook"])
     ],
     dependencies: [
-        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.5.0")
+        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.5.0"),
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0")
     ],
     targets: [
         .executableTarget(
             name: "Tidsmaskinen",
             dependencies: [
-                .product(name: "GRDB", package: "GRDB.swift")
+                .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "Sparkle", package: "Sparkle")
             ],
             path: "Sources/Tidsmaskinen"
         ),

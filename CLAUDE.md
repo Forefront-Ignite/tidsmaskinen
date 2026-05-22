@@ -81,6 +81,36 @@ Never add `Co-Authored-By` trailers or AI-attribution footers (e.g. "🤖 Genera
 
 `plans/master-plan.md` defines six phases. We're currently between Phase 3 (rules + grid + Discover UX) and Phase 4 (MS Graph calendar). When you start work, check the master plan for current scope; do not invent new phases without updating the plan.
 
+## Releasing
+
+Cutting a release is one `git push`:
+
+```sh
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The `.github/workflows/release.yml` workflow then signs (Developer ID), notarizes, packages, and publishes a GitHub Release with `Tidsmaskinen.zip` attached, and prepends a new `<item>` to `appcast.xml` on `main`. Installed apps pick up the new version on their next Sparkle check (daily) or when the user clicks "Check for Updates" in the menu bar.
+
+`bin/make-app.sh` keeps its local-dev defaults (self-signed, no notarization, no Sparkle keys) and only switches behaviour when these env vars are set:
+
+| Env var | Purpose |
+|---|---|
+| `VERSION` | Bundle version baked into Info.plist (defaults to `0.1.0-dev`) |
+| `SIGNING_IDENTITY` | Developer ID CN, e.g. `Developer ID Application: Forefront AB (TEAMID)` |
+| `NOTARIZE` | `1` triggers `notarytool submit --wait` + `stapler staple` + a re-zipped `build/Tidsmaskinen.zip` |
+| `SPARKLE_PUBLIC_ED_KEY` | base64 EdDSA public key; enables the `SU*` Info.plist keys |
+| `SPARKLE_FEED_URL` | override the default appcast URL |
+| `APPLE_API_KEY_ID` / `APPLE_API_ISSUER_ID` / `APPLE_API_KEY_PATH` | App Store Connect API key for notarytool |
+
+One-time setup (already done if the workflow has run successfully):
+
+1. **Developer ID Application** cert from the Apple Developer portal → export as `.p12` → base64-encode → store as the `MACOS_CERT_P12_BASE64` secret along with `MACOS_CERT_P12_PASSWORD`, `MACOS_KEYCHAIN_PASSWORD`, `MACOS_SIGNING_IDENTITY`, `MACOS_TEAM_ID`.
+2. **App Store Connect API key** (Developer role) → store contents as `APPLE_API_KEY_P8` plus `APPLE_API_KEY_ID` and `APPLE_API_ISSUER_ID` secrets.
+3. **Sparkle EdDSA key pair** — run `.build/artifacts/sparkle/Sparkle/bin/generate_keys` once (private key lands in the login keychain). Re-export with `generate_keys -x sparkle_ed_private_key`, base64-encode the file, store as the `SPARKLE_ED_PRIVATE_KEY` secret. The matching public key (printed by `generate_keys`) goes into the `SPARKLE_PUBLIC_ED_KEY` GitHub Variable.
+
+`appcast.xml` lives at the repo root and is served via `https://raw.githubusercontent.com/Forefront-Ignite/tidsmaskinen/main/appcast.xml`. The release workflow rewrites it; don't hand-edit unless rolling back a release.
+
 ## What this app deliberately does NOT do
 
 - No cloud sync. Everything is local.
