@@ -268,6 +268,20 @@ if [[ ! -f "$ENTITLEMENTS" ]]; then
     exit 1
 fi
 
+# Local dev signs with the self-signed "Tidsmaskinen Self-Signed" cert, which
+# has no Team Identifier. Hardened runtime's library validation then refuses
+# to load Sparkle.framework because the host process and framework appear to
+# have "different Team IDs". For release builds (real Developer ID), Sparkle
+# and the host share a Team ID so validation passes — leaving the entitlement
+# off keeps notarised builds strict.
+if [[ "$SIGN_IDENTITY" == "$CERT_CN" || "$SIGN_IDENTITY" == "-" ]]; then
+    ENTITLEMENTS_FINAL="$(mktemp -t tidsmaskinen-entitlements).plist"
+    /usr/libexec/PlistBuddy -c "Merge $ENTITLEMENTS" "$ENTITLEMENTS_FINAL" >/dev/null 2>&1 \
+        || cp "$ENTITLEMENTS" "$ENTITLEMENTS_FINAL"
+    /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.disable-library-validation bool true" "$ENTITLEMENTS_FINAL" >/dev/null 2>&1 || true
+    ENTITLEMENTS="$ENTITLEMENTS_FINAL"
+fi
+
 # ---- Sign -----------------------------------------------------------------
 
 # Sign inside-out so each nested bundle's seal includes its own signature.
