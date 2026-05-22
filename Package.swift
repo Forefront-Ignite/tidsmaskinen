@@ -19,7 +19,13 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Sparkle", package: "Sparkle")
             ],
-            path: "Sources/Tidsmaskinen"
+            path: "Sources/Tidsmaskinen",
+            linkerSettings: [
+                // SPM only sets @executable_path on the rpath; Sparkle.framework
+                // lives at Contents/Frameworks/ once make-app.sh bundles it, so
+                // dyld needs this second rpath to find it at launch.
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])
+            ]
         ),
         .executableTarget(
             name: "tm-hook",
