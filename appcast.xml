@@ -7,5 +7,13 @@
         <link>https://github.com/Forefront-Ignite/tidsmaskinen</link>
         <description>Auto-update feed for Tidsmaskinen.</description>
         <language>en</language>
+        <item>
+            <title>Version 0.1.0</title>
+            <sparkle:version>0.1.0</sparkle:version>
+            <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+            <pubDate>Fri, 22 May 2026 15:35:45 +0000</pubDate>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/Forefront-Ignite/tidsmaskinen/releases/download/v0.1.0/Tidsmaskinen.zip" sparkle:edSignature="uE3grfZDNlLiFz5lczwGVb1ustSYY5Iplt8vXyDUgXHMGaDKsrT/KrqeuFsWdK88vGj59wMNHuJ0zXL27dmnDg==" length="5169789" type="application/octet-stream" />
+        </item>
     </channel>
 </rss>
