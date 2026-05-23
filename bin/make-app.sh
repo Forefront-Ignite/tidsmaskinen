@@ -108,12 +108,39 @@ CONF
         return 1
     fi
 
-    if security find-identity -p codesigning 2>/dev/null | grep -q "\"$CERT_CN\""; then
-        echo "    ✓ Created \"$CERT_CN\" (untrusted but usable for codesign)"
-        return 0
+    if ! security find-identity -p codesigning 2>/dev/null | grep -q "\"$CERT_CN\""; then
+        echo "    ✗ Identity not visible after import" >&2
+        return 1
     fi
-    echo "    ✗ Identity not visible after import" >&2
-    return 1
+
+    # macOS Sierra+ requires the private key's *partition list* to include the
+    # tools that will use it — even when those tools are in the ACL. Without
+    # this, codesign prompts for the login keychain password on every build,
+    # and clicking "Always Allow" doesn't stick. Setting the partition list
+    # is a one-time pay-up: the user types their login password once, never
+    # sees the prompt again. Skipping is allowed — codesign still works,
+    # they just keep getting prompted.
+    echo "    Configuring keychain partition list (silences future codesign prompts)."
+    echo "    Enter your login keychain password (same as login password)."
+    echo "    Press Return to skip and keep the codesign prompt."
+    local kc_pw=""
+    read -r -s -p "    Login keychain password: " kc_pw || true
+    echo
+    if [[ -n "$kc_pw" ]]; then
+        if security set-key-partition-list \
+                -S apple-tool:,apple:,codesign: \
+                -s -k "$kc_pw" \
+                "$HOME/Library/Keychains/login.keychain-db" >/dev/null 2>&1; then
+            echo "    ✓ Keychain partition list configured"
+        else
+            echo "    ⚠ Partition list update failed (wrong password?). Run this to retry:"
+            echo "      security set-key-partition-list -S apple-tool:,apple:,codesign: \\"
+            echo "          -s -k <login-keychain-password> \"\$HOME/Library/Keychains/login.keychain-db\""
+        fi
+    fi
+
+    echo "    ✓ Created \"$CERT_CN\" (untrusted but usable for codesign)"
+    return 0
 }
 
 if [[ -n "$SIGNING_IDENTITY" ]]; then

@@ -103,15 +103,15 @@ struct Rule {
   id: String
   customerID: String
   projectID: String?       // optional — null when the rule maps to a customer at any project
-  kind: Kind               // .emailDomain, .gitRemoteHost, .gitRepoSlug, .appBundleID, .claudeProjectPath, .urlHost, .windowTitle
-  pattern: String          // glob (gitRepoSlug, urlHost, gitRemoteHost, appBundleID); substring (windowTitle, emailDomain)
+  kind: Kind               // .gitRemoteHost, .gitRepoSlug, .appBundleID, .urlHost, .urlPath, .windowTitle
+  pattern: String          // glob (gitRepoSlug, urlHost, urlPath, gitRemoteHost, appBundleID); substring (windowTitle)
   priority: Int            // higher wins, longer pattern as tiebreaker
 }
 ```
 Mapping conventions:
 - Git repo signals → `(customer, project)` — different repos for the same customer go to different projects.
 - URL host / app bundle / window title → typically `(customer, project=null)` unless the host clearly belongs to one project.
-- Email domain (meeting attendees) → `(customer, project=null)`. The user chooses a project per-meeting in the review timeline (Phase 6).
+- **Calendar events are not rule-driven.** Attribution is explicit per series (stored in `meeting_series_attributions`, keyed by Graph's `seriesMasterId`) or per individual event (`CalendarEvent.customerID/projectID`); either can be flagged `isIgnored` to exclude from Timeline and the weekly report. The earlier `.emailDomain` rule kind (attendee-domain auto-match) is removed — see migration `v12_meeting_series_and_ignore`.
 
 **Onboarding via Discover.** Customers window opens to a Discover tab listing top observed signals over the last 7/14/30 days, ranked by time spent (`SignalAggregate(kind, value, totalSeconds)`). Each row shows current attribution or "Unassigned" and an "Assign…" / "Change…" button that opens a sheet with customer + (for repo signals) project picker, with inline "+ New" for both. Save creates a rule with priority 100. Manage tab keeps the manual rule editor as a power-user fallback.
 
