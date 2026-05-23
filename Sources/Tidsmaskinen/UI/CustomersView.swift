@@ -247,6 +247,7 @@ private struct AddRuleSheet: View {
     let onSave: (Rule) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var state: AppState
     @State private var kind: Rule.Kind = .gitRepoSlug
     @State private var pattern: String = ""
     @State private var priority: Int = 100
@@ -273,11 +274,21 @@ private struct AddRuleSheet: View {
                 .foregroundStyle(.secondary)
 
             if !availableProjects.isEmpty {
-                Picker("Project", selection: $projectID) {
-                    Text("(none — customer level)").tag("")
-                    ForEach(availableProjects) { p in
-                        Text(p.name).tag(p.id)
-                    }
+                HStack {
+                    Text("Project").font(.subheadline.bold())
+                    SearchableEntityPicker(
+                        items: availableProjects.map {
+                            .init(id: $0.id, label: $0.name, isExternal: $0.isExternal)
+                        },
+                        selectedID: $projectID,
+                        placeholder: "(none — customer level)",
+                        allowsClear: true,
+                        clearLabel: "(none — customer level)",
+                        canSync: AppSettings.commandCenterEnabled && state.commandCenterHasToken,
+                        isSyncing: state.commandCenterIsSyncing,
+                        lastSyncedAt: state.commandCenterLastSyncAt,
+                        onSync: { Task { await state.refreshCommandCenter() } }
+                    )
                 }
             }
 

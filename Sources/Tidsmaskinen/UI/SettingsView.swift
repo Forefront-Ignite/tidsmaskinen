@@ -22,6 +22,26 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            if hasUpdateFeed {
+                Section("Updates") {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Tidsmaskinen \(appVersionLabel)")
+                                .font(.body)
+                            Text("Auto-checks daily. Click below to check now.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button {
+                            state.updaterController.checkForUpdates(nil)
+                        } label: {
+                            Label("Check for Updates", systemImage: "arrow.down.circle")
+                        }
+                    }
+                }
+            }
+
             Section("Startup") {
                 Toggle("Open at login", isOn: launchAtLoginBinding)
                 Text(LoginItemManager.statusDescription)
@@ -216,6 +236,24 @@ struct SettingsView: View {
             if let err = state.commandCenterLastError {
                 Text(err).font(.caption).foregroundStyle(.red)
             }
+        }
+    }
+
+    // Dev builds ship without SUFeedURL; hiding the Updates section avoids
+    // Sparkle's "no feed URL" alert. Mirrors MenuBarView.hasUpdateFeed.
+    private var hasUpdateFeed: Bool {
+        Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil
+    }
+
+    private var appVersionLabel: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String
+        let build = info?["CFBundleVersion"] as? String
+        switch (short, build) {
+        case let (v?, b?) where v != b: return "v\(v) (\(b))"
+        case let (v?, _):                return "v\(v)"
+        case let (_, b?):                return "build \(b)"
+        default:                          return ""
         }
     }
 

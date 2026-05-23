@@ -199,19 +199,23 @@ struct DiscoverView: View {
             }
             .toggleStyle(.checkbox)
 
-            Picker("", selection: Binding(
-                get: { customerFilterID ?? "" },
-                set: { customerFilterID = $0.isEmpty ? nil : $0 }
-            )) {
-                Text("All customers").tag("")
-                Divider()
-                ForEach(customers) { c in
-                    Text(c.name).tag(c.id)
-                }
-            }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .frame(maxWidth: 200)
+            SearchableEntityPicker(
+                items: customers.map {
+                    .init(id: $0.id, label: $0.name, isExternal: $0.isExternal)
+                },
+                selectedID: Binding(
+                    get: { customerFilterID ?? "" },
+                    set: { customerFilterID = $0.isEmpty ? nil : $0 }
+                ),
+                placeholder: "All customers",
+                allowsClear: true,
+                clearLabel: "All customers",
+                canSync: AppSettings.commandCenterEnabled && state.commandCenterHasToken,
+                isSyncing: state.commandCenterIsSyncing,
+                lastSyncedAt: state.commandCenterLastSyncAt,
+                onSync: { Task { await state.refreshCommandCenter() } }
+            )
+            .frame(maxWidth: 220)
 
             if unassignedOnly || customerFilterID != nil {
                 Button {

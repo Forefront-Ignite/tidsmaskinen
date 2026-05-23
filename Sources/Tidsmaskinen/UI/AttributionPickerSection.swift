@@ -5,14 +5,10 @@ import SwiftUI
 /// popover). Owns the inline-creation state so a freshly-added customer or
 /// project appears in the menu without the parent re-fetching.
 ///
-/// Layout matches the original Discover sheet:
-///   • Customer picker splits into "Command Center" (with `·  CC` suffix) and
-///     "Local" sections, both sorted by name. A "+ New" button sits next to the
-///     picker.
-///   • Project picker filters projects to the chosen customer, with the same
-///     CC/Local split. "+ New Project" is disabled (with help text) when the
-///     chosen customer is external — projects under a CC customer must come
-///     from Command Center too.
+/// Both selects are rendered by `SearchableEntityPicker` — single source of
+/// truth for the CC/Local split, search, and the "Sync from Command Center"
+/// footer. "+ New" inline creation lives here so the parent doesn't have to
+/// re-fetch after creating a customer or project.
 struct AttributionPickerSection: View {
     let customers: [Customer]
     let projects: [Project]
@@ -27,6 +23,7 @@ struct AttributionPickerSection: View {
     /// creation throws.
     @Binding var error: String?
 
+    @EnvironmentObject private var state: AppState
     @State private var localCustomers: [Customer] = []
     @State private var localProjects: [Project] = []
     @State private var creatingCustomer = false
@@ -55,8 +52,6 @@ struct AttributionPickerSection: View {
 
     @ViewBuilder
     private var customerPicker: some View {
-        let cc = localCustomers.filter { $0.isExternal }.sorted { $0.name < $1.name }
-        let locals = localCustomers.filter { !$0.isExternal }.sorted { $0.name < $1.name }
         VStack(alignment: .leading, spacing: 6) {
             Text("Customer").font(.subheadline.bold())
             if creatingCustomer {
@@ -73,32 +68,26 @@ struct AttributionPickerSection: View {
                 }
             } else {
                 HStack {
-                    Picker("", selection: Binding(
-                        get: { selectedCustomerID },
-                        set: { newValue in
-                            selectedCustomerID = newValue
-                            // Changing customer wipes any stale project choice.
-                            selectedProjectID = ""
-                        }
-                    )) {
-                        Text(emptyCustomerLabel).tag("")
-                        if !cc.isEmpty {
-                            Section("Command Center") {
-                                ForEach(cc) { c in
-                                    Text("\(c.name)  ·  CC").tag(c.id)
-                                }
+                    SearchableEntityPicker(
+                        items: localCustomers.map {
+                            .init(id: $0.id, label: $0.name, isExternal: $0.isExternal)
+                        },
+                        selectedID: Binding(
+                            get: { selectedCustomerID },
+                            set: { newValue in
+                                selectedCustomerID = newValue
+                                // Changing customer wipes any stale project choice.
+                                selectedProjectID = ""
                             }
-                        }
-                        if !locals.isEmpty {
-                            Section("Local") {
-                                ForEach(locals) { c in
-                                    Text(c.name).tag(c.id)
-                                }
-                            }
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
+                        ),
+                        placeholder: emptyCustomerLabel,
+                        allowsClear: true,
+                        clearLabel: emptyCustomerLabel,
+                        canSync: AppSettings.commandCenterEnabled && state.commandCenterHasToken,
+                        isSyncing: state.commandCenterIsSyncing,
+                        lastSyncedAt: state.commandCenterLastSyncAt,
+                        onSync: { Task { await state.refreshCommandCenter() } }
+                    )
                     Button("+ New") { creatingCustomer = true }
                 }
             }
@@ -108,8 +97,6 @@ struct AttributionPickerSection: View {
     @ViewBuilder
     private var projectPicker: some View {
         let avail = localProjects.filter { $0.customerID == selectedCustomerID }
-        let cc = avail.filter { $0.isExternal }.sorted { $0.name < $1.name }
-        let locals = avail.filter { !$0.isExternal }.sorted { $0.name < $1.name }
         let customerIsExternal = localCustomers.first { $0.id == selectedCustomerID }?.isExternal == true
         VStack(alignment: .leading, spacing: 6) {
             Text("Project").font(.subheadline.bold())
@@ -127,25 +114,19 @@ struct AttributionPickerSection: View {
                 }
             } else {
                 HStack {
-                    Picker("", selection: $selectedProjectID) {
-                        Text("(no project)").tag("")
-                        if !cc.isEmpty {
-                            Section("Command Center") {
-                                ForEach(cc) { p in
-                                    Text("\(p.name)  ·  CC").tag(p.id)
-                                }
-                            }
-                        }
-                        if !locals.isEmpty {
-                            Section("Local") {
-                                ForEach(locals) { p in
-                                    Text(p.name).tag(p.id)
-                                }
-                            }
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
+                    SearchableEntityPicker(
+                        items: avail.map {
+                            .init(id: $0.id, label: $0.name, isExternal: $0.isExternal)
+                        },
+                        selectedID: $selectedProjectID,
+                        placeholder: "(no project)",
+                        allowsClear: true,
+                        clearLabel: "(no project)",
+                        canSync: AppSettings.commandCenterEnabled && state.commandCenterHasToken,
+                        isSyncing: state.commandCenterIsSyncing,
+                        lastSyncedAt: state.commandCenterLastSyncAt,
+                        onSync: { Task { await state.refreshCommandCenter() } }
+                    )
                     Button("+ New") { creatingProject = true }
                         .disabled(customerIsExternal)
                         .help(customerIsExternal
