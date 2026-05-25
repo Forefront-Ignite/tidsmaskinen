@@ -286,7 +286,7 @@ struct TeamsCallsView: View {
                 if let c = customer {
                     HStack(spacing: 4) {
                         Circle()
-                            .fill(Color(hex: project?.color ?? c.color) ?? .blue)
+                            .fill(Color(hex: project?.displayColor ?? c.displayColor) ?? .blue)
                             .frame(width: 8, height: 8)
                         Text(attributionLabel(customer: c, project: project))
                             .font(.caption)
@@ -393,11 +393,12 @@ struct TeamsCallsView: View {
     private func reload() {
         do {
             let raw = try state.database.micSessions(in: scope.interval)
-            // Booked time lives under Meetings. Subtract calendar events from
-            // each mic session so the overlap stays under Meetings while the
-            // pre/post tails (a forgotten-to-leave Teams call, a meeting that
-            // ran long) still surface here as their own ad-hoc Call rows.
-            let events = try state.database.calendarEvents(in: scope.interval)
+            // Booked time lives under Meetings. Use the mic-extended event
+            // bounds (so meeting over/undershoot is treated as part of the
+            // meeting) and subtract that from each mic session. Whatever's
+            // left is genuinely ad-hoc and shows up here.
+            let rawEvents = try state.database.calendarEvents(in: scope.interval)
+            let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: raw)
             var emitted: [CallSegment] = []
             var fullyHidden = 0
             for s in raw {

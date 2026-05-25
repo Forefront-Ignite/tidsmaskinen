@@ -10,6 +10,36 @@ enum ExternalSource: String, Codable, Hashable {
     case commandCenterArchived = "command-center-archived"
 }
 
+/// Stable palette used when a row has no stored color. Command Center's
+/// `Client` API doesn't expose a client color, so every CC customer would
+/// otherwise collapse to the fallback blue in the UI.
+enum ColorPalette {
+    static let hexes = [
+        "#3B82F6", // blue
+        "#10B981", // emerald
+        "#F59E0B", // amber
+        "#EF4444", // red
+        "#8B5CF6", // violet
+        "#EC4899", // pink
+        "#14B8A6", // teal
+        "#F97316", // orange
+        "#22C55E", // green
+        "#6366F1", // indigo
+    ]
+
+    /// Deterministic pick from `hexes` derived from `key`. Stable across
+    /// process restarts (does not use `String.hashValue`, which is randomized
+    /// per launch).
+    static func deterministic(for key: String) -> String {
+        var sum: UInt64 = 0
+        for scalar in key.unicodeScalars {
+            sum = sum &+ UInt64(scalar.value)
+            sum = sum &* 1_315_423_911
+        }
+        return hexes[Int(sum % UInt64(hexes.count))]
+    }
+}
+
 struct Customer: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
     var id: String
     var name: String
@@ -34,6 +64,10 @@ struct Customer: Codable, FetchableRecord, MutablePersistableRecord, Identifiabl
     var external: ExternalSource? { externalSource.flatMap(ExternalSource.init(rawValue:)) }
     var isExternal: Bool { external == .commandCenter }
     var isArchived: Bool { external == .commandCenterArchived }
+
+    /// Color to render. Falls back to a deterministic palette pick when no
+    /// color is stored (Command Center's client API doesn't surface one).
+    var displayColor: String { color ?? ColorPalette.deterministic(for: id) }
 }
 
 struct Project: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
@@ -66,8 +100,10 @@ struct Project: Codable, FetchableRecord, MutablePersistableRecord, Identifiable
     var isExternal: Bool { external == .commandCenter }
     var isArchived: Bool { external == .commandCenterArchived }
 
-    /// Color to render. Local edits take precedence; falls back to the CC-provided color.
-    var displayColor: String? { color ?? externalColor }
+    /// Color to render. Local edits take precedence; falls back to the
+    /// CC-provided color, then to a deterministic palette pick so a project
+    /// with no stored color still varies between rows.
+    var displayColor: String { color ?? externalColor ?? ColorPalette.deterministic(for: id) }
 }
 
 struct Rule: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
@@ -228,6 +264,45 @@ struct CalendarEvent: Codable, FetchableRecord, MutablePersistableRecord, Identi
 
     var durationMinutes: Int {
         max(0, Int(endAt.timeIntervalSince(startAt) / 60))
+    }
+
+    /// Stretch each event's effective time range to absorb adjacent mic
+    /// activity, so meeting under/overshoot inherits the meeting's
+    /// attribution and rolls into Timeline + weekly report without manual
+    /// intervention. A mic session that overlaps the booked event extends the
+    /// event back to its start (joined early) and forward to its end (ran
+    /// long), capped at the previous/next event boundary so back-to-back
+    /// meetings don't bleed into each other.
+    ///
+    /// Returns in-memory copies — does not mutate persisted rows.
+    static func withMicOverrun(events: [CalendarEvent],
+                                micSessions: [MicSession],
+                                now: Date = Date()) -> [CalendarEvent] {
+        guard !events.isEmpty, !micSessions.isEmpty else { return events }
+        var extended = events.sorted { $0.startAt < $1.startAt }
+        for i in extended.indices {
+            let originalStart = extended[i].startAt
+            let originalEnd = extended[i].endAt
+            // Cap against the (possibly already extended) neighbor on each
+            // side so an overrun can't push past the next meeting.
+            let prevEnd = i > 0 ? extended[i - 1].endAt : Date.distantPast
+            let nextStart = i + 1 < extended.count ? extended[i + 1].startAt : Date.distantFuture
+            var newStart = originalStart
+            var newEnd = originalEnd
+            for mic in micSessions {
+                let micEnd = mic.endedAt ?? now
+                guard micEnd > originalStart && mic.startedAt < originalEnd else { continue }
+                if mic.startedAt < originalStart {
+                    newStart = min(newStart, max(mic.startedAt, prevEnd))
+                }
+                if micEnd > originalEnd {
+                    newEnd = max(newEnd, min(micEnd, nextStart))
+                }
+            }
+            extended[i].startAt = newStart
+            extended[i].endAt = newEnd
+        }
+        return extended
     }
 }
 

@@ -719,15 +719,17 @@ struct TimelineView: View {
     }
 
     private func color(for block: TimelineBlock) -> Color {
-        if let project = block.attribution.project, let c = Color(hex: project.color) { return c }
-        if let customer = block.attribution.customer, let c = Color(hex: customer.color) { return c }
+        if let project = block.attribution.project, let c = Color(hex: project.displayColor) { return c }
+        if let customer = block.attribution.customer, let c = Color(hex: customer.displayColor) { return c }
         return block.attribution.customer != nil ? .blue : trackTint(block.track).opacity(0.85)
     }
 
     private func reload() {
         do {
             let allSamples = try state.database.samples(in: dayInterval)
-            let events = try state.database.calendarEvents(in: dayInterval)
+            let rawEvents = try state.database.calendarEvents(in: dayInterval)
+            let micSessions = try state.database.micSessions(in: dayInterval)
+            let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions)
             let sessions = try state.database.sessions(in: dayInterval)
             customers = try state.database.allCustomers()
             projects = try state.database.allProjects()

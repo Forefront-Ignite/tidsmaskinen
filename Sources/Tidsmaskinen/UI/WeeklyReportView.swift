@@ -264,7 +264,9 @@ struct WeeklyReportView: View {
             do {
                 let computed = try await Task.detached(priority: .userInitiated) {
                     let samples = try database.samples(in: weekValue)
-                    let events = try database.calendarEvents(in: weekValue)
+                    let rawEvents = try database.calendarEvents(in: weekValue)
+                    let micSessions = try database.micSessions(in: weekValue)
+                    let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions)
                     let sessions = try database.sessions(in: weekValue)
                     let claudeDeltas = try database.claudeActiveDeltas(in: weekValue)
                     let matcher = try RuleMatcher.load(from: database)
