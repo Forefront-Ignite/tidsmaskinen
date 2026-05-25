@@ -6,23 +6,87 @@ import SwiftUI
 /// "this was a Slack huddle". Attribution is per-row and writes only to the
 /// MicSession record — it does NOT touch sample-level attribution, since the
 /// underlying foreground samples were doing other work in parallel.
+/// A displayable slice of a `MicSession` — either the whole session (no
+/// calendar overlap) or the leftover before/after a calendar event. Multiple
+/// segments can share the same underlying `MicSession` (and therefore the same
+/// attribution), but render as separate rows so a meeting overrun shows up as
+/// its own ad-hoc call instead of being swallowed by the calendar block.
+struct CallSegment: Identifiable, Equatable, Hashable {
+    let session: MicSession
+    let startedAt: Date
+    /// `nil` only when this segment is the tail of an ongoing session.
+    let endedAt: Date?
+    let segmentIndex: Int
+
+    var id: String { "\(session.id)#\(segmentIndex)" }
+
+    var durationSeconds: Double? {
+        guard let endedAt else { return nil }
+        return max(0, endedAt.timeIntervalSince(startedAt))
+    }
+
+    struct TimeRange: Equatable {
+        let start: Date
+        let end: Date
+    }
+
+    /// Remove the wall-clock time covered by `events` from `[start, end)` and
+    /// return the non-overlapping leftovers. Segments shorter than
+    /// `minimumSeconds` are dropped to avoid noise from mic flicker right at a
+    /// meeting boundary.
+    static func subtractEvents(from start: Date,
+                               to end: Date,
+                               events: [CalendarEvent],
+                               minimumSeconds: TimeInterval) -> [TimeRange] {
+        guard end > start else { return [] }
+        let clamped: [TimeRange] = events.compactMap { e in
+            let s = max(start, e.startAt)
+            let t = min(end, e.endAt)
+            return t > s ? TimeRange(start: s, end: t) : nil
+        }.sorted { $0.start < $1.start }
+
+        var merged: [TimeRange] = []
+        for r in clamped {
+            if let last = merged.last, last.end >= r.start {
+                merged[merged.count - 1] = TimeRange(start: last.start, end: max(last.end, r.end))
+            } else {
+                merged.append(r)
+            }
+        }
+
+        var remainders: [TimeRange] = []
+        var cursor = start
+        for m in merged {
+            if m.start > cursor {
+                remainders.append(TimeRange(start: cursor, end: m.start))
+            }
+            cursor = max(cursor, m.end)
+        }
+        if cursor < end {
+            remainders.append(TimeRange(start: cursor, end: end))
+        }
+        return remainders.filter { $0.end.timeIntervalSince($0.start) >= minimumSeconds }
+    }
+}
+
 struct TeamsCallsView: View {
     @EnvironmentObject private var state: AppState
     @State private var scope: DateScope = .lastDays(7)
-    @State private var sessions: [MicSession] = []
+    @State private var segments: [CallSegment] = []
     @State private var customers: [Customer] = []
     @State private var projects: [Project] = []
     @State private var loadError: String?
-    @State private var attributing: MicSession?
-    /// How many sessions were hidden because they overlapped a calendar event.
-    /// Surfaced in the empty state so the user knows time isn't being silently lost.
+    @State private var attributing: CallSegment?
+    /// How many sessions were hidden because they were *fully* covered by
+    /// calendar events. Surfaced in the empty state so the user knows time
+    /// isn't being silently lost.
     @State private var hiddenByCalendarOverlap: Int = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
-            if sessions.isEmpty {
+            if segments.isEmpty {
                 empty
             } else {
                 ScrollView {
@@ -42,17 +106,17 @@ struct TeamsCallsView: View {
         .onAppear { reload() }
         .onChange(of: scope) { _, _ in reload() }
         .onChange(of: state.sampleCount) { _, _ in reload() }
-        .sheet(item: $attributing) { session in
+        .sheet(item: $attributing) { segment in
             CallDetailSheet(
-                session: session,
+                segment: segment,
                 customers: customers,
                 projects: projects,
                 database: state.database,
                 onSave: { customerID, projectID in
-                    save(session: session, customerID: customerID, projectID: projectID)
+                    save(session: segment.session, customerID: customerID, projectID: projectID)
                 },
                 onClear: {
-                    save(session: session, customerID: nil, projectID: nil)
+                    save(session: segment.session, customerID: nil, projectID: nil)
                 }
             )
         }
@@ -185,28 +249,29 @@ struct TeamsCallsView: View {
     }
 
     @ViewBuilder
-    private func row(_ s: MicSession) -> some View {
+    private func row(_ seg: CallSegment) -> some View {
+        let s = seg.session
         let customer = s.customerID.flatMap { id in customers.first(where: { $0.id == id }) }
         let project = s.projectID.flatMap { id in projects.first(where: { $0.id == id }) }
 
         Button {
-            attributing = s
+            attributing = seg
         } label: {
             HStack(spacing: 12) {
-                Image(systemName: icon(for: s))
+                Image(systemName: icon(for: seg))
                     .frame(width: 22)
-                    .foregroundStyle(color(for: s))
+                    .foregroundStyle(color(for: seg))
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(titleLine(for: s))
+                    Text(titleLine(for: seg))
                         .font(.body)
                         .lineLimit(1)
                     HStack(spacing: 6) {
-                        Text(timeRange(s))
+                        Text(timeRange(seg))
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                         Text("·").foregroundStyle(.tertiary)
-                        Text(durationLabel(s))
+                        Text(durationLabel(seg))
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                         if !appLabels(for: s).isEmpty {
@@ -227,7 +292,7 @@ struct TeamsCallsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                } else if s.endedAt != nil {
+                } else if seg.endedAt != nil {
                     Text("Unattributed")
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -248,9 +313,9 @@ struct TeamsCallsView: View {
         .buttonStyle(.plain)
     }
 
-    private func icon(for s: MicSession) -> String {
-        if s.endedAt == nil { return "mic.fill" }
-        let apps = s.voipApps
+    private func icon(for seg: CallSegment) -> String {
+        if seg.endedAt == nil { return "mic.fill" }
+        let apps = seg.session.voipApps
         if apps.contains(where: { $0.hasPrefix("com.microsoft.teams") }) { return "phone.fill" }
         if apps.contains(where: { $0.contains("zoom") }) { return "video.fill" }
         if apps.contains(where: { $0.contains("slack") }) { return "bubble.left.and.bubble.right.fill" }
@@ -261,12 +326,13 @@ struct TeamsCallsView: View {
         return "phone.fill"
     }
 
-    private func color(for s: MicSession) -> Color {
-        if s.endedAt == nil { return .red }
-        return s.voipApps.isEmpty ? .gray : .green
+    private func color(for seg: CallSegment) -> Color {
+        if seg.endedAt == nil { return .red }
+        return seg.session.voipApps.isEmpty ? .gray : .green
     }
 
-    private func titleLine(for s: MicSession) -> String {
+    private func titleLine(for seg: CallSegment) -> String {
+        let s = seg.session
         if let p = s.participant, !p.isEmpty { return p }
         let labels = appLabels(for: s)
         if labels.count == 1 { return labels[0] }
@@ -291,16 +357,16 @@ struct TeamsCallsView: View {
         return customer.name
     }
 
-    private func timeRange(_ s: MicSession) -> String {
+    private func timeRange(_ seg: CallSegment) -> String {
         let f = DateFormatter()
         f.dateFormat = "HH:mm"
-        let start = f.string(from: s.startedAt)
-        let end = s.endedAt.map { f.string(from: $0) } ?? "…"
+        let start = f.string(from: seg.startedAt)
+        let end = seg.endedAt.map { f.string(from: $0) } ?? "…"
         return "\(start)–\(end)"
     }
 
-    private func durationLabel(_ s: MicSession) -> String {
-        let secs = s.durationSeconds ?? Date().timeIntervalSince(s.startedAt)
+    private func durationLabel(_ seg: CallSegment) -> String {
+        let secs = seg.durationSeconds ?? Date().timeIntervalSince(seg.startedAt)
         let mins = Int((secs / 60).rounded())
         if mins < 1 { return "<1 min" }
         if mins < 60 { return "\(mins) min" }
@@ -309,10 +375,10 @@ struct TeamsCallsView: View {
         return m == 0 ? "\(h) h" : "\(h) h \(m) min"
     }
 
-    private var groupedByDay: [(Date, [MicSession])] {
+    private var groupedByDay: [(Date, [CallSegment])] {
         let cal = Calendar.current
-        let grouped = Dictionary(grouping: sessions) { cal.startOfDay(for: $0.startedAt) }
-        return grouped.keys.sorted(by: >).map { ($0, grouped[$0]!) }
+        let grouped = Dictionary(grouping: segments) { cal.startOfDay(for: $0.startedAt) }
+        return grouped.keys.sorted(by: >).map { ($0, grouped[$0]!.sorted { $0.startedAt < $1.startedAt }) }
     }
 
     private func dayHeader(_ date: Date) -> String {
@@ -327,25 +393,41 @@ struct TeamsCallsView: View {
     private func reload() {
         do {
             let raw = try state.database.micSessions(in: scope.interval)
-            // Booked time lives under Meetings. Hide any mic session that
-            // overlaps a calendar event so the same minute isn't shown twice.
+            // Booked time lives under Meetings. Subtract calendar events from
+            // each mic session so the overlap stays under Meetings while the
+            // pre/post tails (a forgotten-to-leave Teams call, a meeting that
+            // ran long) still surface here as their own ad-hoc Call rows.
             let events = try state.database.calendarEvents(in: scope.interval)
-            var filtered: [MicSession] = []
-            var hidden = 0
+            var emitted: [CallSegment] = []
+            var fullyHidden = 0
             for s in raw {
                 let sStart = s.startedAt
                 let sEnd = s.endedAt ?? Date()
-                let overlaps = events.contains { e in
-                    e.endAt > sStart && e.startAt < sEnd
+                guard sEnd > sStart else { continue }
+                let remainders = CallSegment.subtractEvents(
+                    from: sStart,
+                    to: sEnd,
+                    events: events,
+                    minimumSeconds: 30
+                )
+                if remainders.isEmpty {
+                    fullyHidden += 1
+                    continue
                 }
-                if overlaps {
-                    hidden += 1
-                } else {
-                    filtered.append(s)
+                for (i, r) in remainders.enumerated() {
+                    // Preserve the ongoing-session indicator only on the
+                    // tail segment that actually reaches the live cursor.
+                    let isLive = s.endedAt == nil && r.end == sEnd
+                    emitted.append(CallSegment(
+                        session: s,
+                        startedAt: r.start,
+                        endedAt: isLive ? nil : r.end,
+                        segmentIndex: i
+                    ))
                 }
             }
-            sessions = filtered
-            hiddenByCalendarOverlap = hidden
+            segments = emitted
+            hiddenByCalendarOverlap = fullyHidden
             customers = try state.database.allCustomers()
             projects = try state.database.allProjects()
         } catch {
@@ -368,7 +450,7 @@ struct TeamsCallsView: View {
 }
 
 private struct CallDetailSheet: View {
-    let session: MicSession
+    let segment: CallSegment
     let customers: [Customer]
     let projects: [Project]
     let database: AppDatabase
@@ -381,6 +463,8 @@ private struct CallDetailSheet: View {
     @State private var appBreakdown: [AppUsage] = []
     @State private var urlBreakdown: [URLUsage] = []
     @State private var loadError: String?
+
+    private var session: MicSession { segment.session }
 
 
     struct AppUsage: Identifiable, Hashable {
@@ -534,12 +618,13 @@ private struct CallDetailSheet: View {
     private var headerDetailLine: String {
         let f = DateFormatter()
         f.dateFormat = "EEE d MMM"
-        let date = f.string(from: session.startedAt)
+        let date = f.string(from: segment.startedAt)
         let tf = DateFormatter()
         tf.dateFormat = "HH:mm"
-        let start = tf.string(from: session.startedAt)
-        let end = session.endedAt.map { tf.string(from: $0) } ?? "…"
-        let mins = Int(((session.durationSeconds ?? 0) / 60).rounded())
+        let start = tf.string(from: segment.startedAt)
+        let end = segment.endedAt.map { tf.string(from: $0) } ?? "…"
+        let secs = segment.durationSeconds ?? Date().timeIntervalSince(segment.startedAt)
+        let mins = Int((secs / 60).rounded())
         return "\(date)  ·  \(start)–\(end)  ·  \(mins) min"
     }
 
@@ -555,11 +640,11 @@ private struct CallDetailSheet: View {
     }
 
     private func loadBreakdowns() {
-        // Use "now" as the end bound for ongoing sessions so users can still
+        // Use "now" as the end bound for ongoing segments so users can still
         // see what was in the foreground during a call in progress.
-        let endBound = session.endedAt ?? Date()
+        let endBound = segment.endedAt ?? Date()
         do {
-            let samples = try database.samplesOverlapping(start: session.startedAt, end: endBound)
+            let samples = try database.samplesOverlapping(start: segment.startedAt, end: endBound)
             let sampleInterval = Double(AppSettings.sampleIntervalSeconds)
 
             var appCounts: [String: (name: String, count: Int)] = [:]
