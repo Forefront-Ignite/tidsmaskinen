@@ -17,6 +17,7 @@ struct TimelineView: View {
     @State private var zoomAtPinchStart: CGFloat?
     @State private var showHidden: Bool = false
     @State private var hasHiddenSignals: Bool = false
+    @AppStorage(SettingsKey.timelineShowForeground) private var showForeground: Bool = false
 
     private let minZoom: CGFloat = 1.0
     private let maxZoom: CGFloat = 8.0
@@ -30,7 +31,12 @@ struct TimelineView: View {
     private let idleBarHeight: CGFloat = 8
     private let rowSpacing: CGFloat = 8
 
-    private let allTracks: [TimelineBlock.Track] = [.calendar, .foreground, .claudeCode]
+    private var allTracks: [TimelineBlock.Track] {
+        if showForeground {
+            return [.calendar, .foreground, .claudeCode]
+        }
+        return [.calendar, .claudeCode]
+    }
 
     private var dayInterval: DateInterval {
         let cal = Calendar.current
@@ -149,11 +155,25 @@ struct TimelineView: View {
             if let err = loadError {
                 Text(err).font(.caption).foregroundStyle(.red).lineLimit(1)
             }
+            foregroundLaneToggle
             showHiddenToggle
             zoomControls
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+    }
+
+    @ViewBuilder
+    private var foregroundLaneToggle: some View {
+        Button {
+            showForeground.toggle()
+        } label: {
+            Image(systemName: showForeground ? "macwindow.on.rectangle" : "macwindow")
+                .foregroundStyle(showForeground ? Color.accentColor : .secondary)
+        }
+        .help(showForeground
+              ? "Hide the foreground app lane"
+              : "Show the foreground app lane (per-app activity from your samples)")
     }
 
     @ViewBuilder

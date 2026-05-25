@@ -4,8 +4,10 @@ struct CustomersView: View {
     @EnvironmentObject private var state: AppState
     @State private var customers: [Customer] = []
     @State private var rules: [Rule] = []
+    @State private var customerProjects: [Project] = []
     @State private var selectedCustomerID: String?
     @State private var newCustomerName: String = ""
+    @State private var newProjectName: String = ""
     @State private var showingAddRule = false
     @State private var loadError: String?
 
@@ -110,66 +112,40 @@ struct CustomersView: View {
     private var customerDetail: some View {
         if let customerID = selectedCustomerID,
            let customer = customers.first(where: { $0.id == customerID }) {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 8) {
-                    Text(customer.name)
-                        .font(.title2.bold())
-                    if customer.isExternal {
-                        CommandCenterBadge()
-                            .help("Synced from Command Center. Name and projects are read-only here.")
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(Color(hex: customer.color) ?? .blue)
+                            .frame(width: 14, height: 14)
+                        Text(customer.name)
+                            .font(.title2.bold())
+                        if customer.isExternal {
+                            CommandCenterBadge()
+                                .help("Synced from Command Center. Name and projects are read-only here.")
+                        }
+                        Spacer()
+                        Button {
+                            showingAddRule = true
+                        } label: {
+                            Label("Add rule", systemImage: "plus")
+                        }
                     }
-                    Spacer()
-                    Button {
-                        showingAddRule = true
-                    } label: {
-                        Label("Add rule", systemImage: "plus")
-                    }
-                }
-                .padding()
+                    .padding()
 
-                Divider()
+                    Divider()
 
-                if rules.isEmpty {
-                    Spacer()
-                    Text("No rules yet. Click \"Add rule\" to map activity to \(customer.name).")
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity)
-                    Spacer()
-                } else {
-                    Table(rules) {
-                        TableColumn("Kind") { rule in
-                            Text(rule.kind.label)
-                        }
-                        .width(min: 160, ideal: 180)
+                    projectsSection(for: customer)
 
-                        TableColumn("Pattern") { rule in
-                            Text(rule.pattern)
-                                .font(.body.monospaced())
-                        }
-                        .width(min: 200, ideal: 320)
+                    Divider()
 
-                        TableColumn("Priority") { rule in
-                            Text("\(rule.priority)")
-                                .monospacedDigit()
-                        }
-                        .width(70)
-
-                        TableColumn("") { rule in
-                            Button(role: .destructive) {
-                                delete(rule)
-                            } label: {
-                                Image(systemName: "trash")
-                            }
-                            .buttonStyle(.borderless)
-                        }
-                        .width(40)
-                    }
+                    rulesSection(for: customer)
                 }
             }
             .sheet(isPresented: $showingAddRule) {
                 AddRuleSheet(
                     customerID: customer.id,
-                    availableProjects: (try? state.database.projects(forCustomer: customer.id)) ?? []
+                    availableProjects: customerProjects
                 ) { rule in
                     do {
                         try state.database.upsert(rule)
@@ -188,17 +164,148 @@ struct CustomersView: View {
         }
     }
 
+    @ViewBuilder
+    private func projectsSection(for customer: Customer) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("Projects")
+                    .font(.headline)
+                Text("(\(customerProjects.count))")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            if customerProjects.isEmpty {
+                Text(customer.isExternal
+                     ? "No projects synced from Command Center yet."
+                     : "No projects yet. Add one below to attribute work at the project level.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(spacing: 4) {
+                    ForEach(customerProjects) { project in
+                        projectRow(project, customerIsExternal: customer.isExternal)
+                    }
+                }
+            }
+
+            if !customer.isExternal {
+                HStack {
+                    TextField("New project name", text: $newProjectName)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { addProject(under: customer) }
+                    Button("Add project") { addProject(under: customer) }
+                        .disabled(newProjectName.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+        }
+        .padding()
+    }
+
+    @ViewBuilder
+    private func projectRow(_ project: Project, customerIsExternal: Bool) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Color(hex: project.color) ?? .blue)
+                .frame(width: 8, height: 8)
+            Text(project.name)
+                .font(.body)
+            if project.isExternal {
+                CommandCenterBadge()
+            }
+            Spacer()
+            if !project.isExternal, !customerIsExternal {
+                Button(role: .destructive) {
+                    delete(project)
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .help("Delete project — any rules pointing to it become customer-level.")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.controlBackgroundColor)))
+    }
+
+    @ViewBuilder
+    private func rulesSection(for customer: Customer) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("Rules")
+                    .font(.headline)
+                Text("(\(rules.count))")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            if rules.isEmpty {
+                Text("No rules yet. Click \"Add rule\" to map activity to \(customer.name).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Table(rules) {
+                    TableColumn("Kind") { rule in
+                        Text(rule.kind.label)
+                    }
+                    .width(min: 140, ideal: 160)
+
+                    TableColumn("Pattern") { rule in
+                        Text(rule.pattern)
+                            .font(.body.monospaced())
+                    }
+                    .width(min: 200, ideal: 320)
+
+                    TableColumn("Project") { rule in
+                        Text(projectName(for: rule.projectID) ?? "—")
+                            .foregroundStyle(rule.projectID == nil ? .secondary : .primary)
+                    }
+                    .width(min: 120, ideal: 160)
+
+                    TableColumn("Priority") { rule in
+                        Text("\(rule.priority)")
+                            .monospacedDigit()
+                    }
+                    .width(60)
+
+                    TableColumn("") { rule in
+                        Button(role: .destructive) {
+                            delete(rule)
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                    .width(40)
+                }
+                .frame(minHeight: 180)
+            }
+        }
+        .padding()
+    }
+
+    private func projectName(for id: String?) -> String? {
+        guard let id else { return nil }
+        return customerProjects.first { $0.id == id }?.name
+    }
+
     private func reload() {
         do {
             customers = try state.database.allCustomers()
             if let id = selectedCustomerID {
                 rules = try state.database.rules(forCustomer: id)
+                customerProjects = try state.database.projects(forCustomer: id)
             } else {
                 rules = []
+                customerProjects = []
             }
             if selectedCustomerID == nil, let first = customers.first {
                 selectedCustomerID = first.id
                 rules = try state.database.rules(forCustomer: first.id)
+                customerProjects = try state.database.projects(forCustomer: first.id)
             }
         } catch {
             loadError = error.localizedDescription
@@ -234,6 +341,27 @@ struct CustomersView: View {
     private func delete(_ rule: Rule) {
         do {
             try state.database.deleteRule(id: rule.id)
+            reload()
+        } catch {
+            loadError = error.localizedDescription
+        }
+    }
+
+    private func addProject(under customer: Customer) {
+        let name = newProjectName.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        do {
+            _ = try state.database.createLocalProject(customerID: customer.id, name: name)
+            newProjectName = ""
+            reload()
+        } catch {
+            loadError = error.localizedDescription
+        }
+    }
+
+    private func delete(_ project: Project) {
+        do {
+            try state.database.deleteProject(id: project.id)
             reload()
         } catch {
             loadError = error.localizedDescription

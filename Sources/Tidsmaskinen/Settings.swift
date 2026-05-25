@@ -15,6 +15,7 @@ enum SettingsKey {
     static let commandCenterEnabled = "commandCenterEnabled"
     static let commandCenterBaseURL = "commandCenterBaseURL"
     static let commandCenterLastSyncAt = "commandCenterLastSyncAt"
+    static let timelineShowForeground = "timelineShowForeground"
 }
 
 enum GraphPreset: String, CaseIterable, Identifiable {

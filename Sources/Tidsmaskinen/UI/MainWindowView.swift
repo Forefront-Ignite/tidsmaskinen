@@ -60,20 +60,22 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
     }
 
     enum Group: String, CaseIterable, Identifiable {
-        case reports, sources, system
+        case reports, sources, debug, system
         var id: String { rawValue }
         var title: String {
             switch self {
             case .reports: return "Reports"
             case .sources: return "Sources"
+            case .debug:   return "Debug"
             case .system:  return "System"
             }
         }
         var items: [SidebarItem] {
             switch self {
-            case .reports: return [.weeklyReport, .timeline, .calendar]
-            case .sources: return [.discover, .calls, .customers, .claudeSessions]
-            case .system:  return [.settings, .diagnostics, .samples]
+            case .reports: return [.weeklyReport, .timeline]
+            case .sources: return [.discover, .calls, .customers]
+            case .debug:   return [.calendar, .claudeSessions, .samples, .diagnostics]
+            case .system:  return [.settings]
             }
         }
     }

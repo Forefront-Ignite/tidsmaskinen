@@ -45,12 +45,12 @@ struct MenuBarView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
             }
-            VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 1) {
                 Text("Tidsmaskinen")
                     .font(.system(.headline, design: .rounded).weight(.semibold))
                 Text("Tracking since \(state.startedAt.formatted(date: .omitted, time: .shortened)) · \(state.sampleCount) samples")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(.caption)
+                    .foregroundStyle(.primary.opacity(0.65))
             }
             Spacer(minLength: 0)
         }
@@ -73,7 +73,7 @@ struct MenuBarView: View {
                 if let title = state.latestSample?.windowTitle, !title.isEmpty {
                     Text(title)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.primary.opacity(0.75))
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
@@ -86,12 +86,12 @@ struct MenuBarView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.primary.opacity(0.6))
                 }
                 if let s = state.latestSample {
                     Text("Last sample \(s.capturedAt.formatted(date: .omitted, time: .standard))")
                         .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.primary.opacity(0.55))
                 }
             }
             Spacer(minLength: 0)
@@ -175,8 +175,8 @@ struct MenuBarView: View {
                             Text("Sign in to sync your Outlook calendar")
                         }
                     }
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(.caption)
+                    .foregroundStyle(.primary.opacity(0.7))
                 }
                 Spacer(minLength: 0)
                 if state.isSignedIn {
@@ -218,20 +218,20 @@ struct MenuBarView: View {
                     Spacer()
                     if let last = state.calendarSync.lastSyncedAt {
                         Text(last.formatted(date: .omitted, time: .shortened))
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.tertiary)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.primary.opacity(0.6))
                     }
                 }
                 .font(.caption)
                 if let err = state.calendarSync.lastError {
                     Text(err)
-                        .font(.caption2)
+                        .font(.caption)
                         .foregroundStyle(.red)
                         .lineLimit(2)
                 } else if state.calendarSync.lastSyncedAt != nil {
                     Text("Last sync · \(state.calendarSync.lastFetchedCount) fetched, \(state.calendarSync.lastDeletedCount) removed")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .font(.caption)
+                        .foregroundStyle(.primary.opacity(0.55))
                 }
             }
         }
@@ -307,8 +307,6 @@ struct MenuBarView: View {
             tile(for: .timeline)
             tile(for: .discover)
             tile(for: .calls)
-            tile(for: .customers)
-            tile(for: .claudeSessions)
         }
     }
 
@@ -348,9 +346,8 @@ struct MenuBarView: View {
 
     private var footer: some View {
         HStack(spacing: 2) {
-            footerIcon("Raw samples", systemImage: "list.bullet.rectangle") { open(.samples) }
-            footerIcon("Diagnostics", systemImage: "stethoscope") { open(.diagnostics) }
             footerIcon("Settings", systemImage: "gearshape.fill") { open(.settings) }
+            footerIcon("Diagnostics", systemImage: "stethoscope") { open(.diagnostics) }
             if hasUpdateFeed {
                 footerIcon("Check for Updates", systemImage: "arrow.down.circle") {
                     state.updaterController.checkForUpdates(nil)
