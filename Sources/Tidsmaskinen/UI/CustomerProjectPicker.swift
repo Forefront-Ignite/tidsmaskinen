@@ -344,7 +344,7 @@ struct CustomerProjectPicker: View {
                     .opacity(isSelected ? 1 : 0)
                     .frame(width: 12)
                 Circle()
-                    .fill(Color(hex: customer.color) ?? .blue)
+                    .fill(Color(hex: customer.displayColor) ?? .blue)
                     .frame(width: 8, height: 8)
                 Text(customer.name)
                     .foregroundStyle(.primary)

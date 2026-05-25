@@ -492,7 +492,7 @@ struct DiscoverView: View {
                 if attribution.customer != nil {
                     HStack(spacing: 4) {
                         Circle()
-                            .fill(Color(hex: attribution.project?.color ?? attribution.customer?.color) ?? .blue)
+                            .fill(Color(hex: attribution.project?.displayColor ?? attribution.customer?.displayColor) ?? .blue)
                             .frame(width: 8, height: 8)
                         Text(attributionLabel(attribution))
                             .font(.caption)
@@ -689,7 +689,7 @@ struct DiscoverView: View {
                     if let attribution, let customer = attribution.customer {
                         Text("·").foregroundStyle(.tertiary)
                         Circle()
-                            .fill(Color(hex: attribution.project?.color ?? customer.color) ?? .blue)
+                            .fill(Color(hex: attribution.project?.displayColor ?? customer.displayColor) ?? .blue)
                             .frame(width: 8, height: 8)
                         Text(attributionLabel(attribution))
                             .font(.caption)
@@ -744,7 +744,7 @@ struct DiscoverView: View {
                     if let customer = attribution.customer {
                         Text("·").foregroundStyle(.tertiary)
                         Circle()
-                            .fill(Color(hex: attribution.project?.color ?? customer.color) ?? .blue)
+                            .fill(Color(hex: attribution.project?.displayColor ?? customer.displayColor) ?? .blue)
                             .frame(width: 8, height: 8)
                         Text(attributionLabel(attribution))
                             .font(.caption)

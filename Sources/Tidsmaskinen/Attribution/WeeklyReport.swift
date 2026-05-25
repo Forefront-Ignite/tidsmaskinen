@@ -411,9 +411,9 @@ struct WeeklyReport {
         let customerID = parts[0]
         guard let customer = matcher.customersByID[customerID] else { return (id, nil) }
         if parts.count > 1, let project = matcher.projectsByID[parts[1]] {
-            return ("\(customer.name) · \(project.name)", project.color ?? customer.color)
+            return ("\(customer.name) · \(project.name)", project.displayColor)
         }
-        return (customer.name, customer.color)
+        return (customer.name, customer.displayColor)
     }
 
     private static func contributorInfo(forSample sample: ActivitySample, rule: Rule?) -> ContributorInfo {

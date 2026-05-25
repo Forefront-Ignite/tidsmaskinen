@@ -73,7 +73,7 @@ struct CustomersView: View {
                 ForEach(customers) { customer in
                     HStack(spacing: 6) {
                         Circle()
-                            .fill(Color(hex: customer.color) ?? .blue)
+                            .fill(Color(hex: customer.displayColor) ?? .blue)
                             .frame(width: 10, height: 10)
                         Text(customer.name)
                         if customer.isExternal {
@@ -116,7 +116,7 @@ struct CustomersView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     HStack(spacing: 8) {
                         Circle()
-                            .fill(Color(hex: customer.color) ?? .blue)
+                            .fill(Color(hex: customer.displayColor) ?? .blue)
                             .frame(width: 14, height: 14)
                         Text(customer.name)
                             .font(.title2.bold())
@@ -207,7 +207,7 @@ struct CustomersView: View {
     private func projectRow(_ project: Project, customerIsExternal: Bool) -> some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(Color(hex: project.color) ?? .blue)
+                .fill(Color(hex: project.displayColor) ?? .blue)
                 .frame(width: 8, height: 8)
             Text(project.name)
                 .font(.body)
