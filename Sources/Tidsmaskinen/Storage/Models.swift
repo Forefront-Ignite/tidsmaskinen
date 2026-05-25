@@ -279,6 +279,12 @@ struct CalendarEvent: Codable, FetchableRecord, MutablePersistableRecord, Identi
                                 micSessions: [MicSession],
                                 now: Date = Date()) -> [CalendarEvent] {
         guard !events.isEmpty, !micSessions.isEmpty else { return events }
+        // A mic session must overlap the event by at least this many seconds
+        // to count as real participation. Without this, an unrelated mic
+        // session that ends a few seconds into the next meeting (e.g. a
+        // 9:49-10:00 Slack huddle ending 30s after a 10:00 meeting starts)
+        // gets absorbed whole into that meeting.
+        let minOverlapSeconds: TimeInterval = 120
         var extended = events.sorted { $0.startAt < $1.startAt }
         for i in extended.indices {
             let originalStart = extended[i].startAt
@@ -291,7 +297,9 @@ struct CalendarEvent: Codable, FetchableRecord, MutablePersistableRecord, Identi
             var newEnd = originalEnd
             for mic in micSessions {
                 let micEnd = mic.endedAt ?? now
-                guard micEnd > originalStart && mic.startedAt < originalEnd else { continue }
+                let overlapStart = max(mic.startedAt, originalStart)
+                let overlapEnd = min(micEnd, originalEnd)
+                guard overlapEnd.timeIntervalSince(overlapStart) >= minOverlapSeconds else { continue }
                 if mic.startedAt < originalStart {
                     newStart = min(newStart, max(mic.startedAt, prevEnd))
                 }
