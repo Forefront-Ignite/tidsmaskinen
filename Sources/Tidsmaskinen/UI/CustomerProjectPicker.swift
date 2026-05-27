@@ -25,6 +25,10 @@ struct CustomerProjectPicker: View {
     /// Allow clearing back to the empty state via a row at the top of the list.
     var allowsClear: Bool = true
 
+    /// Open the popover automatically the first time the picker appears. Used
+    /// by attribution sheets so the user lands directly on the search field.
+    var autoOpen: Bool = false
+
     // Sync footer (mirrors SearchableEntityPicker).
     var canSync: Bool = false
     var isSyncing: Bool = false
@@ -34,6 +38,7 @@ struct CustomerProjectPicker: View {
     @Binding var error: String?
 
     @State private var isPresented = false
+    @State private var didAutoOpen = false
     @State private var query: String = ""
     @FocusState private var searchFocused: Bool
     @State private var creatingCustomer = false
@@ -65,6 +70,17 @@ struct CustomerProjectPicker: View {
         .buttonStyle(.plain)
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
             popoverBody
+                .onAppear {
+                    // Focus on the next runloop tick — SwiftUI installs the
+                    // popover view hierarchy slightly after this onAppear fires,
+                    // and `searchFocused = true` posted synchronously gets
+                    // dropped because the TextField isn't in the responder
+                    // chain yet.
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 50_000_000)
+                        searchFocused = true
+                    }
+                }
         }
         .onChange(of: isPresented) { _, newValue in
             if newValue {
@@ -73,12 +89,20 @@ struct CustomerProjectPicker: View {
                 creatingProjectUnder = nil
                 newCustomerName = ""
                 newProjectName = ""
-                DispatchQueue.main.async { searchFocused = true }
             }
         }
         .onAppear {
             localCustomers = customers
             localProjects = projects
+            if autoOpen, !didAutoOpen {
+                didAutoOpen = true
+                // Delay one runloop — opening the popover before the picker's
+                // own button is laid out anchors the popover off-screen.
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                    isPresented = true
+                }
+            }
         }
         .onChange(of: customers) { _, newValue in
             localCustomers = newValue

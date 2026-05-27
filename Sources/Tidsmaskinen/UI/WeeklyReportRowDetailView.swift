@@ -4,6 +4,10 @@ struct WeeklyReportRowDetailView: View {
     let breakdown: WeeklyReport.Breakdown
     let weekDays: [Date]
     let rowColor: Color
+    /// Invoked when the user clicks a Meeting contributor row. The weekly
+    /// report view opens an `AssignmentSheet` and decides whether to write a
+    /// series-level or per-event attribution.
+    var onAssignMeetingContributor: ((WeeklyReport.Breakdown.Contributor) -> Void)? = nil
     private let collapsedLimit = 5
     @State private var showAllContributors = false
 
@@ -100,28 +104,7 @@ struct WeeklyReportRowDetailView: View {
             } else {
                 VStack(alignment: .leading, spacing: 3) {
                     ForEach(shown) { c in
-                        HStack(spacing: 8) {
-                            Image(systemName: c.systemImage)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .frame(width: 14)
-                            Text(c.label)
-                                .font(.caption)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Spacer(minLength: 8)
-                            Text(c.kindLabel)
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 1)
-                                .background(
-                                    Capsule().fill(Color.primary.opacity(0.06))
-                                )
-                            Text(WeeklyReport.formatHours(c.hours).ifEmpty("0.00"))
-                                .font(.caption.monospacedDigit())
-                                .frame(minWidth: 50, alignment: .trailing)
-                        }
+                        contributorRow(c)
                     }
                     if visible.count > collapsedLimit {
                         Button {
@@ -148,6 +131,47 @@ struct WeeklyReportRowDetailView: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func contributorRow(_ c: WeeklyReport.Breakdown.Contributor) -> some View {
+        let actionable = c.isMeeting && onAssignMeetingContributor != nil
+        HStack(spacing: 8) {
+            Image(systemName: c.systemImage)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(width: 14)
+            Text(c.label)
+                .font(.caption)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 8)
+            Text(c.kindLabel)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(
+                    Capsule().fill(Color.primary.opacity(0.06))
+                )
+            Text(WeeklyReport.formatHours(c.hours).ifEmpty("0.00"))
+                .font(.caption.monospacedDigit())
+                .frame(minWidth: 50, alignment: .trailing)
+            if actionable {
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 10)
+            }
+        }
+        .padding(.vertical, 2)
+        .padding(.horizontal, 4)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard actionable else { return }
+            onAssignMeetingContributor?(c)
+        }
+        .help(actionable ? "Re-attribute this meeting" : "")
     }
 
     private func dayHeader(_ date: Date) -> String {

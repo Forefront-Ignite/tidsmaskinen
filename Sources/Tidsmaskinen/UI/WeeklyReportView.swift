@@ -13,6 +13,10 @@ struct WeeklyReportView: View {
     @State private var copied: Bool = false
     @State private var expandedRowID: String?
     @State private var reloadTask: Task<Void, Never>?
+    @State private var contributorAssignTarget: MeetingContributorTarget?
+    @State private var customers: [Customer] = []
+    @State private var projects: [Project] = []
+    @State private var saveError: String?
 
     private let calendar = Calendar.weekStartingMonday()
 
@@ -41,6 +45,28 @@ struct WeeklyReportView: View {
         .onChange(of: weekStart) { _, _ in reload(immediate: true) }
         .onChange(of: state.sampleCount) { _, _ in reload(immediate: false) }
         .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload(immediate: true) }
+        .sheet(item: $contributorAssignTarget) { target in
+            AssignmentSheet(
+                title: "Attribute meeting",
+                subtitle: assignmentSubtitle(for: target),
+                customers: customers,
+                projects: projects,
+                onCreateCustomer: { name in try state.database.createLocalCustomer(name: name) },
+                onCreateProject: { customerID, name in try state.database.createLocalProject(customerID: customerID, name: name) },
+                onSave: { customerID, projectID in
+                    saveMeetingContributor(target, customerID: customerID, projectID: projectID)
+                },
+                initialCustomerID: target.initialCustomerID,
+                initialProjectID: target.initialProjectID
+            )
+        }
+        .alert("Couldn't save attribution", isPresented: saveErrorBinding) {
+            Button("OK") { saveError = nil }
+        } message: { Text(saveError ?? "") }
+    }
+
+    private var saveErrorBinding: Binding<Bool> {
+        Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })
     }
 
     @ViewBuilder
@@ -124,7 +150,13 @@ struct WeeklyReportView: View {
                         WeeklyReportRowDetailView(
                             breakdown: breakdown,
                             weekDays: days,
-                            rowColor: Color(hex: row.color) ?? .blue
+                            rowColor: Color(hex: row.color) ?? .blue,
+                            onAssignMeetingContributor: { contributor in
+                                openContributorAssignSheet(
+                                    contributor,
+                                    fromRowID: row.id
+                                )
+                            }
                         )
                         .padding(.bottom, 6)
                     }
@@ -262,7 +294,7 @@ struct WeeklyReportView: View {
                 if Task.isCancelled { return }
             }
             do {
-                let computed = try await Task.detached(priority: .userInitiated) {
+                let computed = try await Task.detached(priority: .userInitiated) { () -> ReloadPayload in
                     let samples = try database.samples(in: weekValue)
                     let rawEvents = try database.calendarEvents(in: weekValue)
                     let micSessions = try database.micSessions(in: weekValue)
@@ -270,7 +302,7 @@ struct WeeklyReportView: View {
                     let sessions = try database.sessions(in: weekValue)
                     let claudeDeltas = try database.claudeActiveDeltas(in: weekValue)
                     let matcher = try RuleMatcher.load(from: database)
-                    return WeeklyReport.compute(
+                    let report = WeeklyReport.compute(
                         week: weekValue,
                         samples: samples,
                         events: events,
@@ -280,9 +312,14 @@ struct WeeklyReportView: View {
                         matcher: matcher,
                         sampleIntervalSeconds: sampleInterval
                     )
+                    let customers = try database.allCustomers()
+                    let projects = try database.allProjects()
+                    return ReloadPayload(report: report, customers: customers, projects: projects)
                 }.value
                 if Task.isCancelled { return }
-                self.report = computed
+                self.report = computed.report
+                self.customers = computed.customers
+                self.projects = computed.projects
                 self.loadError = nil
             } catch {
                 if Task.isCancelled { return }
@@ -297,6 +334,84 @@ struct WeeklyReportView: View {
         }
     }
 
+    // MARK: - Meeting reattribution
+
+    /// Sheet payload identifying the meeting occurrences to reattribute. When
+    /// every contributing event lives under a single recurring series, the
+    /// sheet writes a series-level rule (so future occurrences inherit the
+    /// attribution too). One-offs and mixed-source sets fall back to per-event
+    /// overrides on each contributing event ID.
+    fileprivate struct MeetingContributorTarget: Identifiable {
+        let id: String   // contributor.id; stable per (row, contributor)
+        let label: String
+        let eventIDs: [String]
+        let seriesMasterIDs: [String]
+        let initialCustomerID: String
+        let initialProjectID: String
+
+        var canApplyToSeries: Bool { seriesMasterIDs.count == 1 }
+        var seriesMasterID: String? { seriesMasterIDs.first }
+    }
+
+    private func openContributorAssignSheet(
+        _ contributor: WeeklyReport.Breakdown.Contributor,
+        fromRowID rowID: String
+    ) {
+        guard contributor.isMeeting else { return }
+        let (initialCustomerID, initialProjectID) = parseRowID(rowID)
+        contributorAssignTarget = MeetingContributorTarget(
+            id: "\(rowID)::\(contributor.id)",
+            label: contributor.label,
+            eventIDs: contributor.meetingEventIDs,
+            seriesMasterIDs: contributor.meetingSeriesIDs,
+            initialCustomerID: initialCustomerID,
+            initialProjectID: initialProjectID
+        )
+    }
+
+    private func parseRowID(_ rowID: String) -> (String, String) {
+        if rowID == WeeklyReport.unattributedID { return ("", "") }
+        let parts = rowID.split(separator: "/", maxSplits: 1).map(String.init)
+        let customerID = parts[0]
+        let projectID = parts.count > 1 ? parts[1] : ""
+        return (customerID, projectID)
+    }
+
+    private func assignmentSubtitle(for target: MeetingContributorTarget) -> String {
+        if target.canApplyToSeries {
+            return "\(target.label) · applies to the entire series"
+        }
+        let count = target.eventIDs.count
+        let suffix = count == 1 ? "occurrence this week" : "occurrences this week"
+        return "\(target.label) · \(count) \(suffix)"
+    }
+
+    private func saveMeetingContributor(_ target: MeetingContributorTarget,
+                                        customerID: String,
+                                        projectID: String?) {
+        do {
+            if let seriesID = target.seriesMasterID, target.canApplyToSeries {
+                try state.database.setMeetingSeriesAttribution(
+                    seriesID: seriesID,
+                    customerID: customerID,
+                    projectID: projectID,
+                    isIgnored: false
+                )
+            } else {
+                for eventID in target.eventIDs {
+                    try state.database.setCalendarEventAttribution(
+                        eventID: eventID,
+                        customerID: customerID,
+                        projectID: projectID
+                    )
+                }
+            }
+            reload(immediate: true)
+        } catch {
+            saveError = error.localizedDescription
+        }
+    }
+
     private func copyTSV(_ report: WeeklyReport) {
         let tsv = report.tsv(weekDays: days)
         let pb = NSPasteboard.general
@@ -307,6 +422,12 @@ struct WeeklyReportView: View {
             copied = false
         }
     }
+}
+
+private struct ReloadPayload {
+    let report: WeeklyReport
+    let customers: [Customer]
+    let projects: [Project]
 }
 
 private extension String {

@@ -98,14 +98,20 @@ struct WeeklyReport {
 
         let contribSeconds = engine.perBucketContribSeconds[rowID] ?? [:]
         let contribInfos = engine.perBucketContribInfo[rowID] ?? [:]
+        let eventIDsByContrib = engine.perBucketContribMeetingEventIDs[rowID] ?? [:]
+        let seriesIDsByContrib = engine.perBucketContribMeetingSeriesIDs[rowID] ?? [:]
         let contributors: [Breakdown.Contributor] = contribSeconds.compactMap { (id, secs) -> Breakdown.Contributor? in
             guard let info = contribInfos[id], secs > 0 else { return nil }
+            let eventIDs = (eventIDsByContrib[id] ?? []).sorted()
+            let seriesIDs = (seriesIDsByContrib[id] ?? []).sorted()
             return Breakdown.Contributor(
                 id: id,
                 label: info.label,
                 kindLabel: info.kindLabel,
                 systemImage: info.systemImage,
-                seconds: secs
+                seconds: secs,
+                meetingEventIDs: eventIDs,
+                meetingSeriesIDs: seriesIDs
             )
         }
         .sorted { lhs, rhs in
@@ -201,7 +207,15 @@ struct WeeklyReport {
             let kindLabel: String
             let systemImage: String
             let seconds: Double
+            /// Calendar event IDs that fed this contributor (meetings only).
+            /// Lets the UI re-attribute a contributor row back to its underlying
+            /// occurrences without re-querying the database.
+            let meetingEventIDs: [String]
+            /// Unique `seriesMasterID`s among the contributing events. Empty
+            /// when no event in the row was part of a recurring series.
+            let meetingSeriesIDs: [String]
             var hours: Double { seconds / 3600.0 }
+            var isMeeting: Bool { !meetingEventIDs.isEmpty }
         }
 
         let rowID: String
@@ -241,6 +255,11 @@ struct WeeklyReport {
         let label: String
         let kindLabel: String
         let systemImage: String
+        /// Calendar-event-specific payload. Set only for `.events` records; the
+        /// dedup engine accumulates the IDs to power "re-attribute this
+        /// contributor" actions in the weekly report drill-down.
+        let eventID: String?
+        let seriesMasterID: String?
     }
 
     /// Priority order when overlapping sources cover the same second of wall
@@ -341,6 +360,11 @@ struct WeeklyReport {
         var perBucketPerSource: [String: [Breakdown.SourceKind: [Double]]] = [:]
         var perBucketContribSeconds: [String: [String: Double]] = [:]
         var perBucketContribInfo: [String: [String: ContributorInfo]] = [:]
+        /// Calendar-event payload accumulated per `(bucket, contributor)`. Used
+        /// to surface the underlying events on a meeting contributor row so the
+        /// UI can reattribute them in one click.
+        var perBucketContribMeetingEventIDs: [String: [String: Set<String>]] = [:]
+        var perBucketContribMeetingSeriesIDs: [String: [String: Set<String>]] = [:]
 
         init(week: DateInterval) {
             let cal = Calendar.weekStartingMonday()
@@ -387,6 +411,17 @@ struct WeeklyReport {
                 var infoByID = perBucketContribInfo[record.bucketID] ?? [:]
                 if infoByID[info.id] == nil { infoByID[info.id] = info }
                 perBucketContribInfo[record.bucketID] = infoByID
+
+                if let eventID = info.eventID {
+                    var byContrib = perBucketContribMeetingEventIDs[record.bucketID] ?? [:]
+                    byContrib[info.id, default: []].insert(eventID)
+                    perBucketContribMeetingEventIDs[record.bucketID] = byContrib
+                }
+                if let seriesID = info.seriesMasterID {
+                    var byContrib = perBucketContribMeetingSeriesIDs[record.bucketID] ?? [:]
+                    byContrib[info.id, default: []].insert(seriesID)
+                    perBucketContribMeetingSeriesIDs[record.bucketID] = byContrib
+                }
             }
 
             // Mark covered.
@@ -428,7 +463,9 @@ struct WeeklyReport {
                         id: "git:\(slug)",
                         label: slug,
                         kindLabel: "Git repo",
-                        systemImage: "chevron.left.forwardslash.chevron.right"
+                        systemImage: "chevron.left.forwardslash.chevron.right",
+                        eventID: nil,
+                        seriesMasterID: nil
                     )
                 }
             case .urlPath, .urlHost:
@@ -437,7 +474,9 @@ struct WeeklyReport {
                         id: "host:\(host)",
                         label: host,
                         kindLabel: "Browser",
-                        systemImage: "globe"
+                        systemImage: "globe",
+                        eventID: nil,
+                        seriesMasterID: nil
                     )
                 }
             case .windowTitle:
@@ -446,7 +485,9 @@ struct WeeklyReport {
                         id: "title:\(title)",
                         label: title,
                         kindLabel: "Window title",
-                        systemImage: "macwindow"
+                        systemImage: "macwindow",
+                        eventID: nil,
+                        seriesMasterID: nil
                     )
                 }
             case .appBundleID:
@@ -460,7 +501,9 @@ struct WeeklyReport {
             id: "app:\(id)",
             label: label,
             kindLabel: "App",
-            systemImage: "app.fill"
+            systemImage: "app.fill",
+            eventID: nil,
+            seriesMasterID: nil
         )
     }
 
@@ -471,7 +514,9 @@ struct WeeklyReport {
             id: "event:\(display)",
             label: display,
             kindLabel: "Meeting",
-            systemImage: "calendar"
+            systemImage: "calendar",
+            eventID: event.id,
+            seriesMasterID: event.seriesMasterID
         )
     }
 
@@ -481,7 +526,9 @@ struct WeeklyReport {
                 id: "claude:\(slug)",
                 label: slug,
                 kindLabel: "Claude · repo",
-                systemImage: "wand.and.stars"
+                systemImage: "wand.and.stars",
+                eventID: nil,
+                seriesMasterID: nil
             )
         }
         if let path = session.gitRepoPath {
@@ -490,7 +537,9 @@ struct WeeklyReport {
                 id: "claude:\(path)",
                 label: name,
                 kindLabel: "Claude · repo",
-                systemImage: "wand.and.stars"
+                systemImage: "wand.and.stars",
+                eventID: nil,
+                seriesMasterID: nil
             )
         }
         if let cwd = session.cwd {
@@ -499,14 +548,18 @@ struct WeeklyReport {
                 id: "claude:cwd:\(cwd)",
                 label: name,
                 kindLabel: "Claude · cwd",
-                systemImage: "wand.and.stars"
+                systemImage: "wand.and.stars",
+                eventID: nil,
+                seriesMasterID: nil
             )
         }
         return ContributorInfo(
             id: "claude:session:\(session.id)",
             label: "Claude session",
             kindLabel: "Claude",
-            systemImage: "wand.and.stars"
+            systemImage: "wand.and.stars",
+            eventID: nil,
+            seriesMasterID: nil
         )
     }
 }

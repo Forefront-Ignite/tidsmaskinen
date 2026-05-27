@@ -20,6 +20,9 @@ struct AttributionPickerSection: View {
     var emptyCustomerLabel: String = "Choose…"
     /// Whether to render the "Customer · Project" caption above the picker.
     var showsLabel: Bool = true
+    /// Open the picker popover automatically the first time the section
+    /// appears. Used by attribution sheets so the user can search immediately.
+    var autoOpen: Bool = false
     /// Optional error text rendered below the picker. Updated when inline
     /// creation throws.
     @Binding var error: String?
@@ -39,6 +42,7 @@ struct AttributionPickerSection: View {
                 onCreateCustomer: onCreateCustomer,
                 onCreateProject: onCreateProject,
                 emptyLabel: emptyCustomerLabel,
+                autoOpen: autoOpen,
                 canSync: AppSettings.commandCenterEnabled && state.commandCenterHasToken,
                 isSyncing: state.commandCenterIsSyncing,
                 lastSyncedAt: state.commandCenterLastSyncAt,

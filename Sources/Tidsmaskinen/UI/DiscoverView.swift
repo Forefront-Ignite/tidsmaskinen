@@ -50,7 +50,7 @@ struct DiscoverView: View {
         }
         .onChange(of: state.sampleCount) { _, _ in reload() }
         .sheet(item: $assignTarget) { target in
-            AssignSheet(
+            AssignmentSheet(
                 title: "Assign signal",
                 subtitle: target.value,
                 customers: customers,
@@ -63,7 +63,7 @@ struct DiscoverView: View {
             )
         }
         .sheet(item: $seriesAssignTarget) { target in
-            AssignSheet(
+            AssignmentSheet(
                 title: "Attribute meeting series",
                 subtitle: target.sampleSubject,
                 customers: customers,
@@ -76,7 +76,7 @@ struct DiscoverView: View {
             )
         }
         .sheet(item: $eventAssignTarget) { target in
-            AssignSheet(
+            AssignmentSheet(
                 title: "Attribute meeting",
                 subtitle: target.subject.isEmpty ? "(no subject)" : target.subject,
                 customers: customers,
@@ -1022,62 +1022,3 @@ struct DiscoverView: View {
     }
 }
 
-private struct AssignSheet: View {
-    let title: String
-    let subtitle: String
-    let customers: [Customer]
-    let projects: [Project]
-    let onCreateCustomer: (String) throws -> Customer
-    let onCreateProject: (String, String) throws -> Project
-    let onSave: (String, String?) -> Void
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var selectedCustomerID: String = ""
-    @State private var selectedProjectID: String = ""
-    @State private var error: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.title2.bold())
-                Text(subtitle)
-                    .font(.body.monospaced())
-                    .foregroundStyle(.secondary)
-            }
-
-            Divider()
-
-            AttributionPickerSection(
-                customers: customers,
-                projects: projects,
-                selectedCustomerID: $selectedCustomerID,
-                selectedProjectID: $selectedProjectID,
-                onCreateCustomer: onCreateCustomer,
-                onCreateProject: onCreateProject,
-                error: $error
-            )
-
-            if let error {
-                Text(error).font(.caption).foregroundStyle(.red)
-            }
-
-            Spacer()
-
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }
-                Button("Save") { save() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(selectedCustomerID.isEmpty)
-            }
-        }
-        .padding(20)
-        .frame(width: 480)
-    }
-
-    private func save() {
-        guard !selectedCustomerID.isEmpty else { return }
-        onSave(selectedCustomerID, selectedProjectID.isEmpty ? nil : selectedProjectID)
-        dismiss()
-    }
-}
