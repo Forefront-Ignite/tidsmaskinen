@@ -54,14 +54,18 @@ enum TimelineBuilder {
         let claudeCode: [TimelineBlock]
     }
 
-    /// Build all three tracks for a given day.
+    /// Build all three tracks for a given day. When `includeIgnoredEvents` is
+    /// false (the default), ignored calendar events are dropped entirely;
+    /// when true, they're emitted so the Timeline can render them faded so
+    /// the user can recover from an accidental ignore.
     static func build(day: DateInterval,
                       samples: [ActivitySample],
                       events: [CalendarEvent],
                       sessions: [ClaudeSession],
                       matcher: RuleMatcher,
                       sampleIntervalSeconds: Int,
-                      claudeIdleThresholdSeconds: TimeInterval) -> DayBundle {
+                      claudeIdleThresholdSeconds: TimeInterval,
+                      includeIgnoredEvents: Bool = false) -> DayBundle {
 
         // ---- Calendar ----
         let calendarBlocks: [TimelineBlock] = events.compactMap { event -> TimelineBlock? in
@@ -69,8 +73,7 @@ enum TimelineBuilder {
             let clippedEnd = min(event.endAt, day.end)
             guard clippedEnd > clippedStart else { return nil }
             let eventAttribution = matcher.attribute(event: event)
-            // Ignored events are not drawn on the timeline at all.
-            if eventAttribution.isIgnored { return nil }
+            if eventAttribution.isIgnored && !includeIgnoredEvents { return nil }
             let override = (event.customerID != nil)
             return TimelineBlock(
                 id: "evt-\(event.id)",

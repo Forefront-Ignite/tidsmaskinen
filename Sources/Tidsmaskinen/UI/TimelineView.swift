@@ -17,7 +17,24 @@ struct TimelineView: View {
     @State private var zoomAtPinchStart: CGFloat?
     @State private var showHidden: Bool = false
     @State private var hasHiddenSignals: Bool = false
+    @State private var hasIgnoredMeetings: Bool = false
+    @State private var pendingUndo: PendingUndo?
+    @State private var pendingUndoDismiss: Task<Void, Never>?
+    @State private var undoError: String?
     @AppStorage(SettingsKey.timelineShowForeground) private var showForeground: Bool = false
+
+    /// Combined gate for the "show hidden items" eye toggle. The toggle is
+    /// disabled when there's nothing to reveal — neither hidden apps/hosts
+    /// (foreground filter) nor ignored meetings on the calendar track.
+    private var hasHiddenContent: Bool { hasHiddenSignals || hasIgnoredMeetings }
+
+    /// In-flight undo entry. Kept transient — auto-dismisses after a few seconds.
+    struct PendingUndo: Equatable {
+        let scope: MeetingIgnoreEvent.Scope
+        let subject: String
+        /// Stable ID so SwiftUI animates an update when a newer undo replaces an older one.
+        let id = UUID()
+    }
 
     private let minZoom: CGFloat = 1.0
     private let maxZoom: CGFloat = 8.0
@@ -107,6 +124,7 @@ struct TimelineView: View {
                 }
             }
         }
+        .overlay(alignment: .bottom) { undoToast }
         .onAppear {
             reload()
             let t = Timer(timeInterval: 8, repeats: true) { _ in
@@ -124,9 +142,16 @@ struct TimelineView: View {
         .onDisappear {
             refreshTimer?.invalidate(); refreshTimer = nil
             nowTimer?.invalidate(); nowTimer = nil
+            pendingUndoDismiss?.cancel(); pendingUndoDismiss = nil
         }
-        .onChange(of: day) { _, _ in reload() }
+        .onChange(of: day) { _, _ in
+            reload()
+            pendingUndoDismiss?.cancel()
+            pendingUndo = nil
+            undoError = nil
+        }
         .onChange(of: showHidden) { _, _ in reload() }
+        .onChange(of: pendingUndo) { _, _ in undoError = nil }
         .onChange(of: state.sampleCount) { _, _ in reload() }
         .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload() }
     }
@@ -184,8 +209,10 @@ struct TimelineView: View {
             Image(systemName: showHidden ? "eye" : "eye.slash")
                 .foregroundStyle(showHidden ? Color.accentColor : .secondary)
         }
-        .help(showHidden ? "Hide hidden apps/hosts again" : "Show hidden apps/hosts")
-        .disabled(!hasHiddenSignals)
+        .help(showHidden
+              ? "Hide hidden apps, hosts and ignored meetings"
+              : "Show hidden apps, hosts and ignored meetings")
+        .disabled(!hasHiddenContent)
     }
 
     @ViewBuilder
@@ -551,6 +578,7 @@ struct TimelineView: View {
                               style: borderStrokeStyle(for: block))
         )
         .shadow(color: tint.opacity(0.18), radius: 1.5, x: 0, y: 0.5)
+        .opacity(isIgnoredMeetingBlock(block) ? 0.6 : 1.0)
         .contentShape(Rectangle())
         .onTapGesture { selectedBlock = block }
         .help(tooltip(for: block))
@@ -564,7 +592,10 @@ struct TimelineView: View {
                                    selectedBlock = nil
                                    reload()
                                },
-                               onCancel: { selectedBlock = nil })
+                               onCancel: { selectedBlock = nil },
+                               onIgnored: { event in
+                                   stageUndo(event)
+                               })
         }
     }
 
@@ -599,7 +630,7 @@ struct TimelineView: View {
                     }
                 }
                 Spacer(minLength: 0)
-                if block.hasManualOverride, width >= 90 {
+                if block.hasManualOverride, !isIgnoredMeetingBlock(block), width >= 90 {
                     Image(systemName: "pin.fill")
                         .font(.caption2)
                         .opacity(0.8)
@@ -623,7 +654,7 @@ struct TimelineView: View {
                 glyph("macwindow")
             }
         case .calendar:
-            glyph("calendar")
+            glyph(isIgnoredMeetingBlock(block) ? "eye.slash" : "calendar")
         case .claudeCode:
             glyph("sparkles")
         }
@@ -663,7 +694,11 @@ struct TimelineView: View {
         f.dateFormat = "HH:mm"
         let range = "\(f.string(from: block.startedAt))–\(f.string(from: block.endedAt))"
         let attr: String
-        if let c = block.attribution.customer {
+        if isIgnoredMeetingBlock(block) {
+            attr = block.eventAttribution == .ignored(source: .series)
+                ? "Ignored (series) — click to restore"
+                : "Ignored — click to restore"
+        } else if let c = block.attribution.customer {
             let base = block.attribution.project.map { "\(c.name) · \($0.name)" } ?? c.name
             if block.track == .claudeCode {
                 attr = block.hasManualOverride ? "\(base) (override)" : "\(base) (via repo rule)"
@@ -687,13 +722,23 @@ struct TimelineView: View {
         block.track == .claudeCode && block.attribution.customer == nil
     }
 
+    /// Calendar block whose event/series is currently ignored. Only emitted
+    /// when the eye toggle is on (see `TimelineBuilder.build`).
+    private func isIgnoredMeetingBlock(_ block: TimelineBlock) -> Bool {
+        block.eventAttribution?.isIgnored == true
+    }
+
     private func borderColor(for block: TimelineBlock, tint: Color) -> Color {
+        if isIgnoredMeetingBlock(block) { return Color.secondary.opacity(0.7) }
         if block.hasManualOverride { return Color.white.opacity(0.85) }
         if isUnmatchedClaudeBlock(block) { return Color.orange.opacity(0.7) }
         return tint.opacity(0.55)
     }
 
     private func borderStrokeStyle(for block: TimelineBlock) -> StrokeStyle {
+        if isIgnoredMeetingBlock(block) {
+            return StrokeStyle(lineWidth: 1.0, dash: [3, 3])
+        }
         if block.hasManualOverride {
             return StrokeStyle(lineWidth: 1.5)
         }
@@ -719,6 +764,7 @@ struct TimelineView: View {
     }
 
     private func color(for block: TimelineBlock) -> Color {
+        if isIgnoredMeetingBlock(block) { return .gray }
         if let project = block.attribution.project, let c = Color(hex: project.displayColor) { return c }
         if let customer = block.attribution.customer, let c = Color(hex: customer.displayColor) { return c }
         return block.attribution.customer != nil ? .blue : trackTint(block.track).opacity(0.85)
@@ -734,7 +780,14 @@ struct TimelineView: View {
             customers = try state.database.allCustomers()
             projects = try state.database.allProjects()
             let rules = try state.database.allRules()
-            let matcher = RuleMatcher.make(customers: customers, projects: projects, rules: rules)
+            let allSeries = try state.database.allMeetingSeriesAttributions()
+            let matcher = RuleMatcher.make(
+                customers: customers,
+                projects: projects,
+                rules: rules,
+                series: allSeries
+            )
+            hasIgnoredMeetings = events.contains { matcher.attribute(event: $0).isIgnored }
             let hidden = try state.database.allHiddenSignals()
             hasHiddenSignals = !hidden.isEmpty
             let samples: [ActivitySample]
@@ -756,13 +809,123 @@ struct TimelineView: View {
                 sessions: sessions,
                 matcher: matcher,
                 sampleIntervalSeconds: AppSettings.sampleIntervalSeconds,
-                claudeIdleThresholdSeconds: TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60)
+                claudeIdleThresholdSeconds: TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60),
+                includeIgnoredEvents: showHidden
             )
             loadError = nil
         } catch {
             loadError = error.localizedDescription
         }
     }
+
+    // MARK: - Undo toast
+
+    private func stageUndo(_ event: MeetingIgnoreEvent) {
+        let entry = PendingUndo(scope: event.scope, subject: event.subject)
+        pendingUndo = entry
+        pendingUndoDismiss?.cancel()
+        pendingUndoDismiss = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeInOut(duration: 0.2)) {
+                if pendingUndo?.id == entry.id { pendingUndo = nil }
+            }
+        }
+    }
+
+    private func performUndo() {
+        guard let undo = pendingUndo else { return }
+        do {
+            switch undo.scope {
+            case .event(let id):
+                try state.database.setCalendarEventIgnored(eventID: id, isIgnored: false)
+            case .series(let id):
+                try state.database.setMeetingSeriesAttribution(
+                    seriesID: id,
+                    customerID: nil,
+                    projectID: nil,
+                    isIgnored: false
+                )
+            }
+            pendingUndoDismiss?.cancel()
+            withAnimation(.easeInOut(duration: 0.2)) { pendingUndo = nil }
+            reload()
+        } catch {
+            undoError = error.localizedDescription
+        }
+    }
+
+    @ViewBuilder
+    private var undoToast: some View {
+        if let undo = pendingUndo {
+            HStack(spacing: 12) {
+                Image(systemName: "eye.slash.fill").foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(toastTitle(for: undo))
+                        .font(.callout.weight(.medium))
+                    if let undoError {
+                        Text(undoError).font(.caption2).foregroundStyle(.red).lineLimit(1)
+                    } else {
+                        Text(toastSubtitle(for: undo))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 8)
+                Button("Undo") { performUndo() }
+                    .keyboardShortcut("z", modifiers: .command)
+                Button {
+                    pendingUndoDismiss?.cancel()
+                    withAnimation(.easeInOut(duration: 0.2)) { pendingUndo = nil }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Dismiss")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.1))
+            )
+            .shadow(color: .black.opacity(0.18), radius: 8, y: 2)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 12)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .id(undo.id)
+        }
+    }
+
+    private func toastTitle(for undo: PendingUndo) -> String {
+        let subject = undo.subject.isEmpty ? "Meeting" : undo.subject
+        switch undo.scope {
+        case .event: return "Ignored “\(subject)”"
+        case .series: return "Ignored every “\(subject)”"
+        }
+    }
+
+    private func toastSubtitle(for undo: PendingUndo) -> String {
+        switch undo.scope {
+        case .event: return "Excluded from the weekly report."
+        case .series: return "Every occurrence excluded from the weekly report."
+        }
+    }
+}
+
+/// Identifies what was just ignored so the Timeline can surface an undo
+/// toast that knows exactly which row to flip back.
+struct MeetingIgnoreEvent: Equatable {
+    enum Scope: Equatable {
+        case event(eventID: String)
+        case series(seriesID: String)
+    }
+    let scope: Scope
+    /// Subject used in the toast copy.
+    let subject: String
 }
 
 private struct ReattributePopover: View {
@@ -772,14 +935,34 @@ private struct ReattributePopover: View {
     let state: AppState
     let onSaved: () -> Void
     let onCancel: () -> Void
+    /// Fires after a successful ignore so the Timeline can stage an undo
+    /// toast. Restore actions don't fire this — restore *is* the undo.
+    let onIgnored: (MeetingIgnoreEvent) -> Void
 
     @State private var selectedCustomerID: String = ""
     @State private var selectedProjectID: String = ""
     @State private var error: String?
+    @State private var confirmingSeriesIgnore: Bool = false
 
     private var isCalendarBlock: Bool { block.track == .calendar }
     private var isClaudeBlock: Bool { block.track == .claudeCode }
     private var hasSeries: Bool { block.seriesMasterID != nil }
+
+    /// `true` for any kind of ignored calendar block (event-level or series-level).
+    private var isIgnored: Bool { block.eventAttribution?.isIgnored == true }
+    private var isEventScopeIgnore: Bool {
+        if case .ignored(.event) = block.eventAttribution { return true }
+        return false
+    }
+    private var isSeriesScopeIgnore: Bool {
+        if case .ignored(.series) = block.eventAttribution { return true }
+        return false
+    }
+
+    /// The picker is meaningless for per-event ignored blocks — `event.isIgnored`
+    /// beats `event.customerID` in `RuleMatcher.attribute(event:)`, so any
+    /// attribution you set wouldn't take effect until you restored first.
+    private var showsPicker: Bool { !isEventScopeIgnore }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -793,16 +976,18 @@ private struct ReattributePopover: View {
 
             Divider()
 
-            AttributionPickerSection(
-                customers: customers,
-                projects: projects,
-                selectedCustomerID: $selectedCustomerID,
-                selectedProjectID: $selectedProjectID,
-                onCreateCustomer: { name in try state.database.createLocalCustomer(name: name) },
-                onCreateProject: { customerID, name in try state.database.createLocalProject(customerID: customerID, name: name) },
-                emptyCustomerLabel: emptyCustomerLabel,
-                error: $error
-            )
+            if showsPicker {
+                AttributionPickerSection(
+                    customers: customers,
+                    projects: projects,
+                    selectedCustomerID: $selectedCustomerID,
+                    selectedProjectID: $selectedProjectID,
+                    onCreateCustomer: { name in try state.database.createLocalCustomer(name: name) },
+                    onCreateProject: { customerID, name in try state.database.createLocalProject(customerID: customerID, name: name) },
+                    emptyCustomerLabel: emptyCustomerLabel,
+                    error: $error
+                )
+            }
 
             if let error {
                 Text(error).font(.caption).foregroundStyle(.red)
@@ -906,12 +1091,19 @@ private struct ReattributePopover: View {
                 primary: "Attributed via the series rule.",
                 secondary: "Counted as \(displayName(customer: customer, project: project)) in the weekly report. Pick a customer below only to override this specific occurrence."
             )
-        case .ignored:
+        case .ignored(.event):
             attributionBanner(
                 systemImage: "eye.slash.fill",
                 tint: .gray,
                 primary: "This meeting is ignored.",
-                secondary: "Time is excluded from the weekly report. Manage in Discover → Ignored meetings."
+                secondary: "Time is excluded from the weekly report. Use Restore this meeting to bring it back."
+            )
+        case .ignored(.series):
+            attributionBanner(
+                systemImage: "eye.slash.fill",
+                tint: .gray,
+                primary: "This series is ignored.",
+                secondary: "Every occurrence is excluded from the weekly report. Restore series to bring all of them back, or pick a customer below to include just this occurrence."
             )
         case .unattributed, .none:
             attributionBanner(
@@ -968,26 +1160,49 @@ private struct ReattributePopover: View {
 
     @ViewBuilder
     private var calendarFooter: some View {
-        VStack(spacing: 8) {
-            HStack {
-                Button("Cancel") { onCancel() }
-                Spacer()
-                Menu("Ignore…") {
-                    Button("Ignore this meeting") { ignoreEvent() }
-                    if hasSeries {
-                        Button("Ignore series") { ignoreSeries() }
-                    }
-                }
-                .menuStyle(.button)
-                .controlSize(.small)
-                .fixedSize()
-                Button("Clear override", role: .destructive) {
-                    applyEvent(customerID: nil, projectID: nil)
-                }
-                .disabled(!block.hasManualOverride)
+        VStack(alignment: .leading, spacing: 10) {
+            primaryActionRow
+            if hasSecondaryRow {
+                secondaryActionRow
             }
-            HStack {
-                Spacer()
+        }
+        .confirmationDialog(
+            "Ignore the entire \(seriesConfirmTitle) series?",
+            isPresented: $confirmingSeriesIgnore,
+            titleVisibility: .visible
+        ) {
+            Button("Ignore series", role: .destructive) { ignoreSeries() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Every occurrence will be excluded from the weekly report. Undo from the Timeline toast, or restore later from Discover → Ignored meetings.")
+        }
+    }
+
+    /// Subject used in the confirmation dialog title — `(no subject)` would
+    /// read oddly there.
+    private var seriesConfirmTitle: String {
+        block.title.isEmpty ? "this" : "\(block.title)"
+    }
+
+    @ViewBuilder
+    private var primaryActionRow: some View {
+        HStack {
+            Button("Cancel") { onCancel() }
+            Spacer()
+            if isEventScopeIgnore {
+                Button("Restore this meeting") { restoreEvent() }
+                    .keyboardShortcut(.defaultAction)
+            } else if isSeriesScopeIgnore {
+                Button("Save for this meeting") {
+                    applyEvent(
+                        customerID: selectedCustomerID.isEmpty ? nil : selectedCustomerID,
+                        projectID: selectedProjectID.isEmpty ? nil : selectedProjectID
+                    )
+                }
+                .disabled(selectedCustomerID.isEmpty)
+                .keyboardShortcut(.defaultAction)
+                .help("Override the series ignore for just this occurrence.")
+            } else {
                 if hasSeries {
                     Button("Apply to series") {
                         applySeries(
@@ -1007,6 +1222,41 @@ private struct ReattributePopover: View {
                 .keyboardShortcut(.defaultAction)
             }
         }
+    }
+
+    /// True when the secondary row would render at least one action.
+    private var hasSecondaryRow: Bool {
+        if isEventScopeIgnore { return false }
+        if isSeriesScopeIgnore { return true } // always has "Restore series"
+        // Non-ignored: ignore + clear override possibilities
+        if block.hasManualOverride { return true }
+        return true // "Ignore this meeting" is always offered
+    }
+
+    @ViewBuilder
+    private var secondaryActionRow: some View {
+        HStack(spacing: 8) {
+            if isSeriesScopeIgnore {
+                Button("Restore series") { restoreSeries() }
+            } else {
+                Button("Ignore this meeting") { ignoreEvent() }
+                if hasSeries {
+                    Text("·").foregroundStyle(.tertiary)
+                    Button("Ignore series") { confirmingSeriesIgnore = true }
+                }
+                if block.hasManualOverride {
+                    Text("·").foregroundStyle(.tertiary)
+                    Button("Clear override") {
+                        applyEvent(customerID: nil, projectID: nil)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .font(.caption)
+        .tint(.red)
     }
 
     // MARK: - Persistence
@@ -1056,6 +1306,7 @@ private struct ReattributePopover: View {
         guard case .calendarEvent(let id) = block.source else { return }
         do {
             try state.database.setCalendarEventIgnored(eventID: id, isIgnored: true)
+            onIgnored(MeetingIgnoreEvent(scope: .event(eventID: id), subject: block.title))
             onSaved()
         } catch let e {
             error = e.localizedDescription
@@ -1070,6 +1321,34 @@ private struct ReattributePopover: View {
                 customerID: nil,
                 projectID: nil,
                 isIgnored: true
+            )
+            onIgnored(MeetingIgnoreEvent(scope: .series(seriesID: seriesID), subject: block.title))
+            onSaved()
+        } catch let e {
+            error = e.localizedDescription
+        }
+    }
+
+    private func restoreEvent() {
+        guard case .calendarEvent(let id) = block.source else { return }
+        do {
+            try state.database.setCalendarEventIgnored(eventID: id, isIgnored: false)
+            onSaved()
+        } catch let e {
+            error = e.localizedDescription
+        }
+    }
+
+    private func restoreSeries() {
+        guard let seriesID = block.seriesMasterID else { return }
+        do {
+            // Mirrors DiscoverView.unignoreMeeting: clear the row entirely so
+            // the series falls back to "no series attribution".
+            try state.database.setMeetingSeriesAttribution(
+                seriesID: seriesID,
+                customerID: nil,
+                projectID: nil,
+                isIgnored: false
             )
             onSaved()
         } catch let e {
