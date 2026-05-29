@@ -132,26 +132,16 @@ struct TeamsCallsView: View {
     @ViewBuilder
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Calls").font(.title3.bold())
-                    Text("Microphone-active sessions, regardless of which app was frontmost. Tagged with whichever VoIP apps were running at the time.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+            HStack(alignment: .top) {
+                Text("Microphone-active sessions, regardless of which app was frontmost. Tagged with whichever VoIP apps were running at the time.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 440, alignment: .leading)
                 Spacer()
-                Picker("", selection: rangeModeBinding) {
-                    Text("7 days").tag(7)
-                    Text("14 days").tag(14)
-                    Text("30 days").tag(30)
-                    Text("Day").tag(-1)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 280)
+                RangeScopePicker(scope: $scope)
             }
             if scope.isDay {
-                dayControls
+                ScopeDayNavigator(scope: $scope)
             }
         }
         .padding(.horizontal)
@@ -159,93 +149,16 @@ struct TeamsCallsView: View {
     }
 
     @ViewBuilder
-    private var dayControls: some View {
-        HStack(spacing: 8) {
-            Button {
-                if case .day(let d) = scope,
-                   let prev = Calendar.current.date(byAdding: .day, value: -1, to: d) {
-                    scope = .day(prev)
-                }
-            } label: { Image(systemName: "chevron.left") }
-
-            Text(dayLabel)
-                .font(.body.bold())
-                .frame(minWidth: 180, alignment: .leading)
-
-            Button {
-                if case .day(let d) = scope,
-                   let next = Calendar.current.date(byAdding: .day, value: 1, to: d) {
-                    scope = .day(next)
-                }
-            } label: { Image(systemName: "chevron.right") }
-            .disabled(isCurrentDayToday)
-
-            Button("Today") {
-                scope = .day(Calendar.current.startOfDay(for: Date()))
-            }
-            .disabled(isCurrentDayToday)
-            Spacer()
-        }
-    }
-
-    private var rangeModeBinding: Binding<Int> {
-        Binding(
-            get: {
-                switch scope {
-                case .lastDays(let n): return n
-                case .day: return -1
-                }
-            },
-            set: { newValue in
-                if newValue == -1 {
-                    if case .day = scope { return }
-                    scope = .day(Calendar.current.startOfDay(for: Date()))
-                } else {
-                    scope = .lastDays(newValue)
-                }
-            }
-        )
-    }
-
-    private var dayLabel: String {
-        guard case .day(let d) = scope else { return "" }
-        let cal = Calendar.current
-        if cal.isDateInToday(d) { return "Today" }
-        if cal.isDateInYesterday(d) { return "Yesterday" }
-        let f = DateFormatter()
-        f.dateFormat = "EEE d MMM"
-        return f.string(from: d)
-    }
-
-    private var isCurrentDayToday: Bool {
-        guard case .day(let d) = scope else { return false }
-        return Calendar.current.isDateInToday(d)
-    }
-
-    @ViewBuilder
     private var empty: some View {
-        VStack(spacing: 8) {
-            Spacer()
-            Image(systemName: "mic.slash")
-                .font(.system(size: 32))
-                .foregroundStyle(.secondary)
-            Text("No impromptu calls in this range.")
-                .foregroundStyle(.secondary)
+        ContentUnavailableView {
+            Label("No impromptu calls in this range", systemImage: "mic.slash")
+        } description: {
             if hiddenByCalendarOverlap > 0 {
                 Text("\(hiddenByCalendarOverlap) mic session\(hiddenByCalendarOverlap == 1 ? "" : "s") overlapping a calendar event \(hiddenByCalendarOverlap == 1 ? "is" : "are") shown under Meetings instead.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
             } else {
                 Text("New ad-hoc calls will appear here. Scheduled meetings live under Meetings.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
             }
-            Spacer()
         }
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, 32)
     }
 
     @ViewBuilder
@@ -293,11 +206,10 @@ struct TeamsCallsView: View {
                             .foregroundStyle(.secondary)
                     }
                 } else if seg.endedAt != nil {
-                    Text("Unattributed")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                    UnattributedTag()
                 } else {
-                    Text("Ongoing")
+                    Label("Ongoing", systemImage: "dot.radiowaves.left.and.right")
+                        .labelStyle(.titleAndIcon)
                         .font(.caption)
                         .foregroundStyle(.green)
                 }
@@ -539,7 +451,7 @@ private struct CallDetailSheet: View {
                 selectedProjectID: $selectedProjectID,
                 onCreateCustomer: { name in try database.createLocalCustomer(name: name) },
                 onCreateProject: { customerID, name in try database.createLocalProject(customerID: customerID, name: name) },
-                emptyCustomerLabel: "Unassigned",
+                emptyCustomerLabel: "Unattributed",
                 error: Binding(get: { loadError }, set: { loadError = $0 })
             )
         }

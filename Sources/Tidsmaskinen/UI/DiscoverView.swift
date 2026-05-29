@@ -51,7 +51,7 @@ struct DiscoverView: View {
         .onChange(of: state.sampleCount) { _, _ in reload() }
         .sheet(item: $assignTarget) { target in
             AssignmentSheet(
-                title: "Assign signal",
+                title: "Attribute signal",
                 subtitle: target.value,
                 customers: customers,
                 projects: projects,
@@ -100,13 +100,16 @@ struct DiscoverView: View {
     @ViewBuilder
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Where your time is going").font(.title3.bold())
+            HStack(alignment: .top) {
+                Text("Where your time is going — attribute apps, sites, repos and meetings to a customer.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 440, alignment: .leading)
                 Spacer()
-                rangePicker
+                RangeScopePicker(scope: $scope)
             }
             if scope.isDay {
-                dayControls
+                ScopeDayNavigator(scope: $scope)
             }
             filterBar
         }
@@ -115,87 +118,10 @@ struct DiscoverView: View {
     }
 
     @ViewBuilder
-    private var rangePicker: some View {
-        Picker("", selection: rangeModeBinding) {
-            Text("7 days").tag(7)
-            Text("14 days").tag(14)
-            Text("30 days").tag(30)
-            Text("Day").tag(-1)
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .frame(width: 280)
-    }
-
-    @ViewBuilder
-    private var dayControls: some View {
-        HStack(spacing: 8) {
-            Button {
-                if case .day(let d) = scope,
-                   let prev = Calendar.current.date(byAdding: .day, value: -1, to: d) {
-                    scope = .day(prev)
-                }
-            } label: { Image(systemName: "chevron.left") }
-
-            Text(dayLabel)
-                .font(.body.bold())
-                .frame(minWidth: 180, alignment: .leading)
-
-            Button {
-                if case .day(let d) = scope,
-                   let next = Calendar.current.date(byAdding: .day, value: 1, to: d) {
-                    scope = .day(next)
-                }
-            } label: { Image(systemName: "chevron.right") }
-            .disabled(isCurrentDayToday)
-
-            Button("Today") {
-                scope = .day(Calendar.current.startOfDay(for: Date()))
-            }
-            .disabled(isCurrentDayToday)
-            Spacer()
-        }
-    }
-
-    private var rangeModeBinding: Binding<Int> {
-        Binding(
-            get: {
-                switch scope {
-                case .lastDays(let n): return n
-                case .day: return -1
-                }
-            },
-            set: { newValue in
-                if newValue == -1 {
-                    if case .day = scope { return }
-                    scope = .day(Calendar.current.startOfDay(for: Date()))
-                } else {
-                    scope = .lastDays(newValue)
-                }
-            }
-        )
-    }
-
-    private var dayLabel: String {
-        guard case .day(let d) = scope else { return "" }
-        let cal = Calendar.current
-        if cal.isDateInToday(d) { return "Today" }
-        if cal.isDateInYesterday(d) { return "Yesterday" }
-        let f = DateFormatter()
-        f.dateFormat = "EEE d MMM"
-        return f.string(from: d)
-    }
-
-    private var isCurrentDayToday: Bool {
-        guard case .day(let d) = scope else { return false }
-        return Calendar.current.isDateInToday(d)
-    }
-
-    @ViewBuilder
     private var filterBar: some View {
         HStack(spacing: 12) {
             Toggle(isOn: $unassignedOnly) {
-                Text("Unassigned only").font(.caption)
+                Text("Unattributed only").font(.caption)
             }
             .toggleStyle(.checkbox)
 
@@ -361,16 +287,11 @@ struct DiscoverView: View {
 
     @ViewBuilder
     private var empty: some View {
-        VStack(spacing: 8) {
-            Spacer()
-            Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 32))
-                .foregroundStyle(.secondary)
-            Text("No activity recorded yet in this range.")
-                .foregroundStyle(.secondary)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity)
+        ContentUnavailableView(
+            "No activity recorded yet in this range",
+            systemImage: "clock.arrow.circlepath",
+            description: Text("As you work, apps, browser hosts, git repos and meetings show up here to attribute.")
+        )
     }
 
     @ViewBuilder
@@ -501,9 +422,7 @@ struct DiscoverView: View {
                 } else if !isHiddenRow,
                           !indented || item.kind == .urlPath,
                           !(item.kind == .urlHost && fullyCoveredHosts.contains(item.value)) {
-                    Text("Unassigned")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                    UnattributedTag()
                 }
             }
             Spacer()
@@ -530,7 +449,7 @@ struct DiscoverView: View {
                     .controlSize(.small)
                     .help("Hide this \(item.kind == .appBundleID ? "app" : "host") from Discover and Timeline")
                 }
-                Button(attribution.customer == nil ? "Assign…" : "Change…") {
+                Button(attribution.customer == nil ? "Attribute…" : "Change…") {
                     assignTarget = item
                 }
                 .buttonStyle(.bordered)
@@ -584,7 +503,7 @@ struct DiscoverView: View {
     }
 
     private func attributionLabel(_ a: AttributionResult) -> String {
-        guard let c = a.customer else { return "Unassigned" }
+        guard let c = a.customer else { return "Unattributed" }
         if let p = a.project { return "\(c.name) · \(p.name)" }
         return c.name
     }
@@ -696,9 +615,7 @@ struct DiscoverView: View {
                             .foregroundStyle(.secondary)
                     } else {
                         Text("·").foregroundStyle(.tertiary)
-                        Text("Unassigned")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
+                        UnattributedTag()
                     }
                 }
             }
@@ -751,9 +668,7 @@ struct DiscoverView: View {
                             .foregroundStyle(.secondary)
                     } else {
                         Text("·").foregroundStyle(.tertiary)
-                        Text("Unassigned")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
+                        UnattributedTag()
                     }
                 }
             }

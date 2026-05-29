@@ -10,6 +10,7 @@ struct CustomersView: View {
     @State private var newProjectName: String = ""
     @State private var showingAddRule = false
     @State private var loadError: String?
+    @State private var customerPendingDeletion: Customer?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -23,7 +24,6 @@ struct CustomersView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .navigationTitle("Customers & Rules")
         .onAppear {
             reload()
             // Debounced refresh: only nudge a sync if the last one is stale.
@@ -41,6 +41,24 @@ struct CustomersView: View {
         } message: {
             Text(loadError ?? "")
         }
+        .confirmationDialog(
+            "Delete “\(customerPendingDeletion?.name ?? "")”?",
+            isPresented: deleteConfirmationBinding,
+            titleVisibility: .visible
+        ) {
+            Button("Delete customer", role: .destructive) {
+                if let c = customerPendingDeletion { delete(c) }
+                customerPendingDeletion = nil
+            }
+            Button("Cancel", role: .cancel) { customerPendingDeletion = nil }
+        } message: {
+            Text("Its local projects and rules are removed too. This can't be undone.")
+        }
+    }
+
+    private var deleteConfirmationBinding: Binding<Bool> {
+        Binding(get: { customerPendingDeletion != nil },
+                set: { if !$0 { customerPendingDeletion = nil } })
     }
 
     @ViewBuilder
@@ -71,14 +89,8 @@ struct CustomersView: View {
         VStack(alignment: .leading, spacing: 0) {
             List(selection: $selectedCustomerID) {
                 ForEach(customers) { customer in
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(Color(hex: customer.displayColor) ?? .blue)
-                            .frame(width: 10, height: 10)
-                        Text(customer.name)
-                        if customer.isExternal {
-                            CommandCenterBadge()
-                        }
+                    CustomerSidebarRow(customer: customer) {
+                        customerPendingDeletion = customer
                     }
                     .tag(customer.id)
                     .contextMenu {
@@ -87,7 +99,7 @@ struct CustomersView: View {
                                 .foregroundStyle(.secondary)
                         } else {
                             Button("Delete", role: .destructive) {
-                                delete(customer)
+                                customerPendingDeletion = customer
                             }
                         }
                     }
@@ -369,6 +381,38 @@ struct CustomersView: View {
     }
 }
 
+/// One customer in the sidebar list. Reveals a delete button on hover for
+/// local customers (Command Center customers are read-only). The context menu
+/// remains as a secondary path; both route through a confirmation dialog.
+private struct CustomerSidebarRow: View {
+    let customer: Customer
+    let onRequestDelete: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(Color(hex: customer.displayColor) ?? .blue)
+                .frame(width: 10, height: 10)
+            Text(customer.name)
+            if customer.isExternal {
+                CommandCenterBadge()
+            }
+            Spacer(minLength: 0)
+            if !customer.isExternal, hover {
+                Button(role: .destructive, action: onRequestDelete) {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help("Delete customer")
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { hover = $0 }
+    }
+}
+
 private struct AddRuleSheet: View {
     let customerID: String
     let availableProjects: [Project]
@@ -469,6 +513,24 @@ private struct AddRuleSheet: View {
         case .appBundleID:
             return "App bundle identifier of the frontmost app. Wildcards supported."
         }
+    }
+}
+
+/// Consistent marker for time that hasn't been attributed to a customer yet.
+/// Pairs an icon with the label so the state isn't carried by color alone
+/// (orange text is invisible to many colorblind users). Used in Discover,
+/// Calls, and anywhere a row can be unattributed.
+struct UnattributedTag: View {
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "questionmark.circle")
+                .font(.caption2)
+            Text("Unattributed")
+                .font(.caption)
+        }
+        .foregroundStyle(.orange)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Unattributed")
     }
 }
 
