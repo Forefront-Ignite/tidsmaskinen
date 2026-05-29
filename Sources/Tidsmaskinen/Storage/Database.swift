@@ -21,6 +21,18 @@ struct AppDatabase {
         return db
     }
 
+#if DEBUG
+    /// A fully-migrated in-memory database for unit tests. No file is created.
+    static func inMemoryForTesting() throws -> AppDatabase {
+        var config = Configuration()
+        config.foreignKeysEnabled = true
+        let queue = try DatabaseQueue(configuration: config)
+        let db = AppDatabase(dbQueue: queue)
+        try db.migrate()
+        return db
+    }
+#endif
+
     static func databaseURL() throws -> URL {
         let appSupport = try FileManager.default.url(
             for: .applicationSupportDirectory,

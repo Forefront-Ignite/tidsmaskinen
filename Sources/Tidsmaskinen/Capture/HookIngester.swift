@@ -168,7 +168,9 @@ final class HookIngester {
         let transcript_path: String?
     }
 
-    private func handleLine(_ line: String) {
+    // Internal (not private) so unit tests can drive ingestion directly without the
+    // file watcher / sleep observer that `start()` wires up.
+    func handleLine(_ line: String) {
         guard let data = line.data(using: .utf8) else { return }
         guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data) else { return }
         guard let sessionID = envelope.payload?.session_id else { return }
@@ -178,13 +180,21 @@ final class HookIngester {
 
         do {
             let existing = try database.session(id: sessionID)
-            // Sessions are closed either by an explicit SessionEnd or by sleep-finalization.
-            // Late events for a closed session (e.g. Claude Code emitting SessionEnd after wake)
-            // would otherwise add a second 5-min ghost gap on top of what sleep-finalize already
-            // recorded. Drop them — Claude Code generates a fresh session_id per CLI invocation,
-            // so a closed ID never legitimately resurrects.
-            if let existing, existing.endedAt != nil {
-                return
+            // A closed session can legitimately resurrect: a long-lived `claude` session that
+            // survived an overnight sleep was closed by sleep-finalization, but the user may keep
+            // working in it the next morning under the same session_id. Genuine continuation
+            // events (SessionStart / UserPromptSubmit) must reopen it. Terminating events
+            // (Stop / SessionEnd) for a closed session, however, are stale — Claude Code emitting
+            // SessionEnd after wake would re-bill a second ghost idle gap on top of what
+            // sleep-finalize already recorded — so those are still dropped.
+            let wasClosed = existing?.endedAt != nil
+            if wasClosed {
+                switch envelope.eventType {
+                case "SessionStart", "UserPromptSubmit":
+                    break // resurrect below
+                default:
+                    return
+                }
             }
             var session = existing ?? ClaudeSession(
                 id: sessionID,
@@ -226,12 +236,18 @@ final class HookIngester {
             }
             var gainedSeconds: Double = 0
             if isActivityEvent {
-                if let last = session.lastActivityAt {
+                // On resurrection the gap is the entire sleep span; billing it (even capped at
+                // idleThreshold) is exactly the ghost gap we want to avoid. Treat the resurrecting
+                // event as a fresh activity start instead.
+                if let last = session.lastActivityAt, !wasClosed {
                     let gap = max(0, ts.timeIntervalSince(last))
                     gainedSeconds = min(gap, idleThreshold)
                     session.activeSeconds += gainedSeconds
                 }
                 session.lastActivityAt = ts
+            }
+            if wasClosed {
+                session.endedAt = nil // reopen — the user is continuing this session
             }
 
             switch envelope.eventType {

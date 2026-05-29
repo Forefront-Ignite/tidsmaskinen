@@ -30,6 +30,11 @@ let package = Package(
         .executableTarget(
             name: "tm-hook",
             path: "Sources/tm-hook"
+        ),
+        .testTarget(
+            name: "TidsmaskinenTests",
+            dependencies: ["Tidsmaskinen"],
+            path: "Tests/TidsmaskinenTests"
         )
     ]
 )
