@@ -21,6 +21,31 @@ struct TidsmaskinenApp: App {
         }
         .defaultSize(width: 1100, height: 680)
         .windowResizability(.contentMinSize)
+        .commands {
+            // Wire the standard ⌘, slot to open the main window on the Settings
+            // section. This app has no Settings scene (Settings is a sidebar
+            // item), so without this the system shortcut would do nothing once
+            // a window is key.
+            CommandGroup(replacing: .appSettings) {
+                SettingsCommand(state: state)
+            }
+        }
+    }
+}
+
+/// "Settings…" menu command (⌘,) that opens the main window focused on the
+/// Settings section. Lives in a view so it can read the `openWindow` action.
+private struct SettingsCommand: View {
+    @Environment(\.openWindow) private var openWindow
+    let state: AppState
+
+    var body: some View {
+        Button("Settings…") {
+            state.selectedSection = .settings
+            openWindow(id: WindowID.main)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        .keyboardShortcut(",", modifiers: .command)
     }
 }
 

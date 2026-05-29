@@ -374,7 +374,7 @@ struct DiscoverView: View {
             }
         } else {
             HStack(spacing: 6) {
-                ProgressView().scaleEffect(0.5)
+                ProgressView().controlSize(.small)
                 Text("Loading paths…").font(.caption).foregroundStyle(.secondary)
             }
             .padding(.horizontal, 10)
