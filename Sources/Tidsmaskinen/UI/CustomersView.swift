@@ -512,6 +512,8 @@ private struct AddRuleSheet: View {
             return "Substring (case-insensitive) found in the frontmost window title."
         case .appBundleID:
             return "App bundle identifier of the frontmost app. Wildcards supported."
+        case .slackChannel:
+            return "Slack channel name (no #), e.g. `nfc-internal`. Attributes both foreground time in that channel and huddles started there. Wildcards supported, e.g. `nfc-*`."
         }
     }
 }

@@ -114,6 +114,27 @@ enum Probes {
         return title as? String
     }
 
+    /// Titles of *all* windows of the given process — not just the focused one.
+    /// Unlike `windowTitle(pid:)`, this works even when the app is in the
+    /// background, which is how we read a Slack huddle / Teams call window while
+    /// the user is heads-down in another app. Returns [] without Accessibility.
+    static func allWindowTitles(pid: pid_t) -> [String] {
+        guard isAccessibilityTrusted(promptIfNeeded: false) else { return [] }
+        let app = AXUIElementCreateApplication(pid)
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let windows = windowsRef as? [AXUIElement] else { return [] }
+        var titles: [String] = []
+        for window in windows {
+            var titleRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef) == .success,
+               let title = titleRef as? String, !title.isEmpty {
+                titles.append(title)
+            }
+        }
+        return titles
+    }
+
     static func windowDocumentPath(pid: pid_t) -> String? {
         guard isAccessibilityTrusted(promptIfNeeded: false) else { return nil }
         let app = AXUIElementCreateApplication(pid)
