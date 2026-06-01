@@ -288,6 +288,32 @@ struct AppDatabase {
                   AND (voipAppsCSV IS NULL OR voipAppsCSV NOT LIKE '%teams%')
                 """)
         }
+        migrator.registerMigration("v15_recompute_slack_channel_huddle_only") { db in
+            // v13 backfilled slackChannel by also falling back to the most-viewed
+            // channel-navigation window, which mislabeled DM huddles (and other
+            // non-channel mic activity) with whatever channel was glanced at —
+            // e.g. a 1:1 huddle tagged "feed". Recompute every Slack session with
+            // the stricter `bestSlackChannel` (Huddle:<channel> titles only),
+            // nulling the ones that were never channel huddles.
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT id, startedAt, endedAt FROM mic_sessions
+                WHERE voipAppsCSV LIKE '%slack%'
+                """)
+            for row in rows {
+                let id: String = row["id"]
+                let start: Date = row["startedAt"]
+                let end: Date = row["endedAt"] ?? start
+                let titles = try String.fetchAll(db, sql: """
+                    SELECT windowTitle FROM activity_samples
+                    WHERE appBundleID LIKE '%slack%' AND windowTitle IS NOT NULL
+                      AND capturedAt >= ? AND capturedAt <= ?
+                    """, arguments: [start, end])
+                let channel = MicSession.bestSlackChannel(fromTitles: titles)
+                try db.execute(
+                    sql: "UPDATE mic_sessions SET slackChannel = ? WHERE id = ?",
+                    arguments: [channel, id])
+            }
+        }
         try migrator.migrate(dbQueue)
     }
 

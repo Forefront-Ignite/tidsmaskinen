@@ -456,23 +456,21 @@ struct MicSession: Codable, FetchableRecord, MutablePersistableRecord, Identifia
         return nil
     }
 
-    /// Picks the most likely channel for a session from all Slack window titles
-    /// seen during it. A live `Huddle:` title is the strongest signal of which
-    /// channel the call belonged to, so those win over plain channel-browsing
-    /// windows; ties break on frequency.
+    /// The channel a huddle belonged to, taken **only** from `Huddle: <channel>`
+    /// titles. Plain channel-navigation windows (`<channel> (Channel) …`) are
+    /// deliberately ignored: a channel you merely clicked into during a call is
+    /// not the call's channel. Returns nil for DM huddles (`Huddle: @person`)
+    /// and for any session with no channel-huddle title at all — those simply
+    /// aren't channel huddles, and guessing from navigation produces false
+    /// attributions. Ties break on frequency.
     static func bestSlackChannel(fromTitles titles: [String]) -> String? {
         var huddle: [String: Int] = [:]
-        var channel: [String: Int] = [:]
         for raw in titles {
-            guard let name = parseSlackChannel(fromTitle: raw) else { continue }
-            if raw.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("Huddle:") {
-                huddle[name, default: 0] += 1
-            } else {
-                channel[name, default: 0] += 1
-            }
+            let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard t.hasPrefix("Huddle:"), let name = parseSlackChannel(fromTitle: t) else { continue }
+            huddle[name, default: 0] += 1
         }
-        if let best = huddle.max(by: { $0.value < $1.value }) { return best.key }
-        return channel.max(by: { $0.value < $1.value })?.key
+        return huddle.max(by: { $0.value < $1.value })?.key
     }
 
     /// Extracts the most-frequent participant name from Teams window titles,
