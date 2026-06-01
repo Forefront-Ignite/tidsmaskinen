@@ -143,10 +143,8 @@ final class MicMonitor {
         if let id = currentSessionID, let start = currentSessionStart {
             let end = Date()
             let finalApps = Array(currentSessionRecorderBundles).sorted()
-            let participant = MicSession.parseTeamsParticipant(fromTitles: sessionTeamsTitles)
-                ?? inferParticipant(in: start, end: end, db: database)
-            let slackChannel = MicSession.bestSlackChannel(fromTitles: sessionSlackTitles)
-                ?? inferSlackChannel(in: start, end: end, db: database)
+            let (participant, slackChannel) = inferContext(
+                recorderBundles: currentSessionRecorderBundles, start: start, end: end, db: database)
             try? database.endMicSession(id: id, endedAt: end, participant: participant, slackChannel: slackChannel, voipApps: finalApps)
             let s = MicSession(id: id, startedAt: start, endedAt: end,
                                voipAppsCSV: finalApps.isEmpty ? nil : finalApps.joined(separator: ","),
@@ -238,13 +236,9 @@ final class MicMonitor {
         guard let id = currentSessionID, let start = currentSessionStart else { return }
         let db = database
         let end = Date()
-        // Live AX-read titles win; foreground samples are the fallback for when
-        // Accessibility is off or no Slack/Teams window was readable.
-        let participant = MicSession.parseTeamsParticipant(fromTitles: sessionTeamsTitles)
-            ?? inferParticipant(in: start, end: end, db: db)
-        let slackChannel = MicSession.bestSlackChannel(fromTitles: sessionSlackTitles)
-            ?? inferSlackChannel(in: start, end: end, db: db)
         let finalApps = Array(currentSessionRecorderBundles).sorted()
+        let (participant, slackChannel) = inferContext(
+            recorderBundles: currentSessionRecorderBundles, start: start, end: end, db: db)
         do {
             try db.endMicSession(id: id, endedAt: end, participant: participant, slackChannel: slackChannel, voipApps: finalApps)
             let s = MicSession(id: id, startedAt: start, endedAt: end,
@@ -279,6 +273,23 @@ final class MicMonitor {
         }
         for pid in slackPIDs { sessionSlackTitles.append(contentsOf: Probes.allWindowTitles(pid: pid)) }
         for pid in teamsPIDs { sessionTeamsTitles.append(contentsOf: Probes.allWindowTitles(pid: pid)) }
+    }
+
+    /// Resolves the session's Teams participant and Slack channel. Live AX-read
+    /// titles win; foreground samples are the fallback — but only for an app
+    /// that *actually held the mic* (`recorderBundles`). Without that gate,
+    /// foreground Teams activity during a Slack huddle gets misattributed as the
+    /// call's participant (and vice-versa) — the title would then read e.g. a
+    /// Teams channel name on what was really a Slack huddle.
+    private func inferContext(recorderBundles: Set<String>, start: Date, end: Date, db: AppDatabase)
+        -> (participant: String?, slackChannel: String?) {
+        let teamsRecorded = recorderBundles.contains { $0.contains("teams") }
+        let slackRecorded = recorderBundles.contains { $0.contains("slack") }
+        let participant = MicSession.parseTeamsParticipant(fromTitles: sessionTeamsTitles)
+            ?? (teamsRecorded ? inferParticipant(in: start, end: end, db: db) : nil)
+        let slackChannel = MicSession.bestSlackChannel(fromTitles: sessionSlackTitles)
+            ?? (slackRecorded ? inferSlackChannel(in: start, end: end, db: db) : nil)
+        return (participant, slackChannel)
     }
 
     // MARK: - CoreAudio probe

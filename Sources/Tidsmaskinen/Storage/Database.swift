@@ -275,6 +275,19 @@ struct AppDatabase {
                 }
             }
         }
+        migrator.registerMigration("v14_clear_misattributed_participants") { db in
+            // `participant` is only ever inferred from Teams window titles, so a
+            // participant on a session where Teams never held the mic is
+            // cross-contamination from foreground Teams activity during a Slack
+            // huddle (old, ungated inference). Clear those; the Slack channel
+            // (if any) then surfaces as the row title instead.
+            try db.execute(sql: """
+                UPDATE mic_sessions
+                SET participant = NULL
+                WHERE participant IS NOT NULL
+                  AND (voipAppsCSV IS NULL OR voipAppsCSV NOT LIKE '%teams%')
+                """)
+        }
         try migrator.migrate(dbQueue)
     }
 
