@@ -79,8 +79,8 @@ struct SettingsView: View {
                     }
                 }
                 Toggle("Keep recording during meetings even when idle", isOn: $trackIdleDuringMeetings)
-                Toggle("Verify attendance via meeting-app activity (Zoom/Teams/Webex/Meet)", isOn: $verifyAttendance)
-                Text("Only events matching the RSVP filter are imported. Verification adds a badge but does not exclude events.")
+                Toggle("Verify attendance from meeting-app activity", isOn: $verifyAttendance)
+                Text("Only events matching the RSVP filter are imported. Verification checks Zoom/Teams/Webex/Meet activity and adds a badge — it doesn't exclude events.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Stepper(value: $autoSyncMinutes, in: 0...60, step: 1) {
@@ -95,7 +95,7 @@ struct SettingsView: View {
             }
 
             Section("Attribution") {
-                Toggle("Parallel attribution (count meeting + foreground separately)", isOn: $parallelAttribution)
+                Toggle("Parallel attribution", isOn: $parallelAttribution)
                 Text("Off: only one customer billed per minute. On: a meeting and concurrent coding both attribute to their own customers.")
                     .font(.caption)
                     .foregroundStyle(.secondary)

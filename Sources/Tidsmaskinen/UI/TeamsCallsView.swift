@@ -75,6 +75,7 @@ struct TeamsCallsView: View {
     @State private var segments: [CallSegment] = []
     @State private var customers: [Customer] = []
     @State private var projects: [Project] = []
+    @State private var matcher: RuleMatcher?
     @State private var loadError: String?
     @State private var attributing: CallSegment?
     /// How many sessions were hidden because they were *fully* covered by
@@ -107,11 +108,15 @@ struct TeamsCallsView: View {
         .onChange(of: scope) { _, _ in reload() }
         .onChange(of: state.sampleCount) { _, _ in reload() }
         .sheet(item: $attributing) { segment in
+            let attribution = effective(for: segment.session)
             CallDetailSheet(
                 segment: segment,
                 customers: customers,
                 projects: projects,
                 database: state.database,
+                prefillCustomerID: attribution.customer?.id ?? "",
+                prefillProjectID: attribution.project?.id ?? "",
+                autoMatched: attribution.fromRule,
                 onSave: { customerID, projectID in
                     save(session: segment.session, customerID: customerID, projectID: projectID)
                 },
@@ -132,26 +137,16 @@ struct TeamsCallsView: View {
     @ViewBuilder
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Calls").font(.title3.bold())
-                    Text("Microphone-active sessions, regardless of which app was frontmost. Tagged with whichever VoIP apps were running at the time.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+            HStack(alignment: .top) {
+                Text("Microphone-active sessions, regardless of which app was frontmost. Tagged with whichever VoIP apps were running at the time.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 440, alignment: .leading)
                 Spacer()
-                Picker("", selection: rangeModeBinding) {
-                    Text("7 days").tag(7)
-                    Text("14 days").tag(14)
-                    Text("30 days").tag(30)
-                    Text("Day").tag(-1)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 280)
+                RangeScopePicker(scope: $scope)
             }
             if scope.isDay {
-                dayControls
+                ScopeDayNavigator(scope: $scope)
             }
         }
         .padding(.horizontal)
@@ -159,100 +154,24 @@ struct TeamsCallsView: View {
     }
 
     @ViewBuilder
-    private var dayControls: some View {
-        HStack(spacing: 8) {
-            Button {
-                if case .day(let d) = scope,
-                   let prev = Calendar.current.date(byAdding: .day, value: -1, to: d) {
-                    scope = .day(prev)
-                }
-            } label: { Image(systemName: "chevron.left") }
-
-            Text(dayLabel)
-                .font(.body.bold())
-                .frame(minWidth: 180, alignment: .leading)
-
-            Button {
-                if case .day(let d) = scope,
-                   let next = Calendar.current.date(byAdding: .day, value: 1, to: d) {
-                    scope = .day(next)
-                }
-            } label: { Image(systemName: "chevron.right") }
-            .disabled(isCurrentDayToday)
-
-            Button("Today") {
-                scope = .day(Calendar.current.startOfDay(for: Date()))
-            }
-            .disabled(isCurrentDayToday)
-            Spacer()
-        }
-    }
-
-    private var rangeModeBinding: Binding<Int> {
-        Binding(
-            get: {
-                switch scope {
-                case .lastDays(let n): return n
-                case .day: return -1
-                }
-            },
-            set: { newValue in
-                if newValue == -1 {
-                    if case .day = scope { return }
-                    scope = .day(Calendar.current.startOfDay(for: Date()))
-                } else {
-                    scope = .lastDays(newValue)
-                }
-            }
-        )
-    }
-
-    private var dayLabel: String {
-        guard case .day(let d) = scope else { return "" }
-        let cal = Calendar.current
-        if cal.isDateInToday(d) { return "Today" }
-        if cal.isDateInYesterday(d) { return "Yesterday" }
-        let f = DateFormatter()
-        f.dateFormat = "EEE d MMM"
-        return f.string(from: d)
-    }
-
-    private var isCurrentDayToday: Bool {
-        guard case .day(let d) = scope else { return false }
-        return Calendar.current.isDateInToday(d)
-    }
-
-    @ViewBuilder
     private var empty: some View {
-        VStack(spacing: 8) {
-            Spacer()
-            Image(systemName: "mic.slash")
-                .font(.system(size: 32))
-                .foregroundStyle(.secondary)
-            Text("No impromptu calls in this range.")
-                .foregroundStyle(.secondary)
+        ContentUnavailableView {
+            Label("No impromptu calls in this range", systemImage: "mic.slash")
+        } description: {
             if hiddenByCalendarOverlap > 0 {
                 Text("\(hiddenByCalendarOverlap) mic session\(hiddenByCalendarOverlap == 1 ? "" : "s") overlapping a calendar event \(hiddenByCalendarOverlap == 1 ? "is" : "are") shown under Meetings instead.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
             } else {
                 Text("New ad-hoc calls will appear here. Scheduled meetings live under Meetings.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
             }
-            Spacer()
         }
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, 32)
     }
 
     @ViewBuilder
     private func row(_ seg: CallSegment) -> some View {
         let s = seg.session
-        let customer = s.customerID.flatMap { id in customers.first(where: { $0.id == id }) }
-        let project = s.projectID.flatMap { id in projects.first(where: { $0.id == id }) }
+        let attribution = effective(for: s)
+        let customer = attribution.customer
+        let project = attribution.project
 
         Button {
             attributing = seg
@@ -285,6 +204,12 @@ struct TeamsCallsView: View {
                 Spacer()
                 if let c = customer {
                     HStack(spacing: 4) {
+                        if attribution.fromRule {
+                            Image(systemName: "wand.and.stars")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                                .help("Auto-matched from a Slack channel rule")
+                        }
                         Circle()
                             .fill(Color(hex: project?.displayColor ?? c.displayColor) ?? .blue)
                             .frame(width: 8, height: 8)
@@ -293,11 +218,10 @@ struct TeamsCallsView: View {
                             .foregroundStyle(.secondary)
                     }
                 } else if seg.endedAt != nil {
-                    Text("Unattributed")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                    UnattributedTag()
                 } else {
-                    Text("Ongoing")
+                    Label("Ongoing", systemImage: "dot.radiowaves.left.and.right")
+                        .labelStyle(.titleAndIcon)
                         .font(.caption)
                         .foregroundStyle(.green)
                 }
@@ -334,6 +258,7 @@ struct TeamsCallsView: View {
     private func titleLine(for seg: CallSegment) -> String {
         let s = seg.session
         if let p = s.participant, !p.isEmpty { return p }
+        if let ch = s.slackChannel, !ch.isEmpty { return "#\(ch)" }
         let labels = appLabels(for: s)
         if labels.count == 1 { return labels[0] }
         if !labels.isEmpty { return labels.joined(separator: " / ") }
@@ -431,9 +356,22 @@ struct TeamsCallsView: View {
             hiddenByCalendarOverlap = fullyHidden
             customers = try state.database.allCustomers()
             projects = try state.database.allProjects()
+            matcher = try RuleMatcher.load(from: state.database)
         } catch {
             loadError = error.localizedDescription
         }
+    }
+
+    /// Resolved attribution for a session: a manual save wins, otherwise a
+    /// `slackChannel` rule auto-attributes the huddle. `fromRule` is true only
+    /// for the rule-derived case, so the row can hint that it wasn't pinned.
+    private func effective(for s: MicSession) -> (customer: Customer?, project: Project?, fromRule: Bool) {
+        guard let result = matcher?.attribute(micSession: s) else {
+            let c = s.customerID.flatMap { id in customers.first { $0.id == id } }
+            let p = s.projectID.flatMap { id in projects.first { $0.id == id } }
+            return (c, p, false)
+        }
+        return (result.customer, result.project, result.matchingRule != nil)
     }
 
     private func save(session: MicSession, customerID: String?, projectID: String?) {
@@ -455,6 +393,11 @@ private struct CallDetailSheet: View {
     let customers: [Customer]
     let projects: [Project]
     let database: AppDatabase
+    let prefillCustomerID: String
+    let prefillProjectID: String
+    /// True when the prefill came from a Slack-channel rule rather than a saved
+    /// override — drives the "Save to pin it" hint.
+    let autoMatched: Bool
     let onSave: (String?, String?) -> Void
     let onClear: () -> Void
 
@@ -502,8 +445,8 @@ private struct CallDetailSheet: View {
         .padding(20)
         .frame(width: 520, height: 540)
         .onAppear {
-            selectedCustomerID = session.customerID ?? ""
-            selectedProjectID = session.projectID ?? ""
+            selectedCustomerID = prefillCustomerID
+            selectedProjectID = prefillProjectID
             loadBreakdowns()
         }
         .alert("Error", isPresented: errorBinding) {
@@ -518,7 +461,7 @@ private struct CallDetailSheet: View {
     @ViewBuilder
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(session.participant ?? "Microphone activity").font(.title2.bold())
+            Text(headerTitle).font(.title2.bold())
             Text(headerDetailLine).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             if !appLabels.isEmpty {
                 Text("Running: \(appLabels.joined(separator: ", "))")
@@ -531,7 +474,14 @@ private struct CallDetailSheet: View {
     @ViewBuilder
     private var attributionSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Attribution").font(.subheadline.bold())
+            HStack(spacing: 6) {
+                Text("Attribution").font(.subheadline.bold())
+                if autoMatched, session.customerID == nil, let ch = session.slackChannel {
+                    Label("Auto-matched from #\(ch) — Save to pin it", systemImage: "wand.and.stars")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             AttributionPickerSection(
                 customers: customers,
                 projects: projects,
@@ -539,7 +489,7 @@ private struct CallDetailSheet: View {
                 selectedProjectID: $selectedProjectID,
                 onCreateCustomer: { name in try database.createLocalCustomer(name: name) },
                 onCreateProject: { customerID, name in try database.createLocalProject(customerID: customerID, name: name) },
-                emptyCustomerLabel: "Unassigned",
+                emptyCustomerLabel: "Unattributed",
                 error: Binding(get: { loadError }, set: { loadError = $0 })
             )
         }
@@ -614,6 +564,12 @@ private struct CallDetailSheet: View {
             .keyboardShortcut(.defaultAction)
             .disabled(selectedCustomerID.isEmpty)
         }
+    }
+
+    private var headerTitle: String {
+        if let p = session.participant, !p.isEmpty { return p }
+        if let ch = session.slackChannel, !ch.isEmpty { return "#\(ch)" }
+        return "Microphone activity"
     }
 
     private var headerDetailLine: String {

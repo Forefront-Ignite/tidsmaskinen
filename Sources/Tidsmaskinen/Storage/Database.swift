@@ -248,6 +248,33 @@ struct AppDatabase {
             // Remove rows from the discontinued .emailDomain rule kind.
             try db.execute(sql: "DELETE FROM rules WHERE kind = 'emailDomain'")
         }
+        migrator.registerMigration("v13_mic_session_slack_channel") { db in
+            try db.alter(table: "mic_sessions") { t in
+                t.add(column: "slackChannel", .text)
+            }
+            // Backfill existing Slack mic sessions from the window titles we
+            // already captured during them, so historical huddles can be
+            // auto-attributed by a slackChannel rule right away.
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT id, startedAt, endedAt FROM mic_sessions
+                WHERE voipAppsCSV LIKE '%slack%'
+                """)
+            for row in rows {
+                let id: String = row["id"]
+                let start: Date = row["startedAt"]
+                let end: Date = row["endedAt"] ?? start
+                let titles = try String.fetchAll(db, sql: """
+                    SELECT windowTitle FROM activity_samples
+                    WHERE appBundleID LIKE '%slack%' AND windowTitle IS NOT NULL
+                      AND capturedAt >= ? AND capturedAt <= ?
+                    """, arguments: [start, end])
+                if let channel = MicSession.bestSlackChannel(fromTitles: titles) {
+                    try db.execute(
+                        sql: "UPDATE mic_sessions SET slackChannel = ? WHERE id = ?",
+                        arguments: [channel, id])
+                }
+            }
+        }
         try migrator.migrate(dbQueue)
     }
 
@@ -321,6 +348,7 @@ struct AppDatabase {
             endedAt: nil,
             voipAppsCSV: csv,
             participant: nil,
+            slackChannel: nil,
             customerID: nil,
             projectID: nil,
             createdAt: now,
@@ -332,7 +360,7 @@ struct AppDatabase {
         return id
     }
 
-    func endMicSession(id: String, endedAt: Date, participant: String?, voipApps: [String]?) throws {
+    func endMicSession(id: String, endedAt: Date, participant: String?, slackChannel: String?, voipApps: [String]?) throws {
         _ = try dbQueue.write { db in
             if let voipApps {
                 let csv = voipApps.isEmpty ? nil : voipApps.joined(separator: ",")
@@ -341,6 +369,7 @@ struct AppDatabase {
                     .updateAll(db,
                                MicSession.Columns.endedAt.set(to: endedAt),
                                MicSession.Columns.participant.set(to: participant),
+                               MicSession.Columns.slackChannel.set(to: slackChannel),
                                MicSession.Columns.voipAppsCSV.set(to: csv),
                                MicSession.Columns.updatedAt.set(to: Date()))
             } else {
@@ -349,6 +378,7 @@ struct AppDatabase {
                     .updateAll(db,
                                MicSession.Columns.endedAt.set(to: endedAt),
                                MicSession.Columns.participant.set(to: participant),
+                               MicSession.Columns.slackChannel.set(to: slackChannel),
                                MicSession.Columns.updatedAt.set(to: Date()))
             }
         }

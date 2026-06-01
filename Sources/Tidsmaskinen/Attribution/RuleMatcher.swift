@@ -105,6 +105,16 @@ struct RuleMatcher {
            let r = match(kind: .urlHost, against: host) {
             return result(for: r)
         }
+        // Slack channel rules: parse the channel out of the Slack window title
+        // and match it before the generic window-title rules, so e.g.
+        // `nfc-internal → NCF` attributes foreground Slack time too (not just
+        // huddles in the Calls tab).
+        if let bundle = sample.appBundleID?.lowercased(), bundle.contains("slack"),
+           let title = sample.windowTitle,
+           let channel = MicSession.parseSlackChannel(fromTitle: title),
+           let r = match(kind: .slackChannel, against: channel) {
+            return result(for: r)
+        }
         if let title = sample.windowTitle,
            let r = match(kind: .windowTitle, against: title) {
             return result(for: r)
@@ -141,6 +151,23 @@ struct RuleMatcher {
                let r = match(kind: .gitRemoteHost, against: host) {
                 return result(for: r)
             }
+        }
+        return .unattributed
+    }
+
+    /// Attribute a mic session (Calls tab). Manual override
+    /// (session.customerID/projectID) wins; otherwise match the inferred Slack
+    /// channel against `slackChannel` rules. The result's `matchingRule` is
+    /// non-nil exactly when the attribution came from a rule rather than a
+    /// manual save, which the UI uses to label auto-matched rows.
+    func attribute(micSession s: MicSession) -> AttributionResult {
+        if let cid = s.customerID, let customer = customersByID[cid] {
+            let project = s.projectID.flatMap { projectsByID[$0] }
+            return AttributionResult(customer: customer, project: project, matchingRule: nil)
+        }
+        if let channel = s.slackChannel,
+           let r = match(kind: .slackChannel, against: channel) {
+            return result(for: r)
         }
         return .unattributed
     }

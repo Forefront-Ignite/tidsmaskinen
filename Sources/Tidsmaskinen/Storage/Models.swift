@@ -122,6 +122,7 @@ struct Rule: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, E
         case urlPath
         case windowTitle
         case appBundleID
+        case slackChannel
 
         var id: String { rawValue }
 
@@ -133,6 +134,7 @@ struct Rule: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, E
             case .urlPath:       return "Browser URL path"
             case .windowTitle:   return "Window title contains"
             case .appBundleID:   return "App bundle ID"
+            case .slackChannel:  return "Slack channel"
             }
         }
 
@@ -144,6 +146,7 @@ struct Rule: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, E
             case .urlPath:       return "github.com/forefront/*"
             case .windowTitle:   return "Acme staging"
             case .appBundleID:   return "com.acme.app"
+            case .slackChannel:  return "nfc-internal"
             }
         }
 
@@ -395,6 +398,11 @@ struct MicSession: Codable, FetchableRecord, MutablePersistableRecord, Identifia
     var endedAt: Date?
     var voipAppsCSV: String?
     var participant: String?
+    /// Slack channel inferred from the frontmost Slack window titles captured
+    /// during the session (e.g. `nfc-internal`). Lets a `slackChannel` rule
+    /// auto-attribute huddles in the Calls tab. `nil` for non-Slack sessions
+    /// or huddles in DMs.
+    var slackChannel: String?
     var customerID: String?
     var projectID: String?
     var createdAt: Date
@@ -408,6 +416,7 @@ struct MicSession: Codable, FetchableRecord, MutablePersistableRecord, Identifia
         static let endedAt = Column(CodingKeys.endedAt)
         static let voipAppsCSV = Column(CodingKeys.voipAppsCSV)
         static let participant = Column(CodingKeys.participant)
+        static let slackChannel = Column(CodingKeys.slackChannel)
         static let customerID = Column(CodingKeys.customerID)
         static let projectID = Column(CodingKeys.projectID)
         static let updatedAt = Column(CodingKeys.updatedAt)
@@ -420,5 +429,71 @@ struct MicSession: Codable, FetchableRecord, MutablePersistableRecord, Identifia
     var durationSeconds: Double? {
         guard let endedAt else { return nil }
         return max(0, endedAt.timeIntervalSince(startedAt))
+    }
+
+    /// Extracts the Slack channel name from a single Slack window title.
+    /// Recognizes the two shapes Slack uses:
+    ///   `nfc-internal (Channel) - Forefront Ignite - … - Slack`
+    ///   `Huddle: nfc-internal – Forefront Ignite – Slack 🎤`
+    /// Returns `nil` for DM windows/huddles (`@person`, `(DM)`) and anything
+    /// that isn't a recognizable channel title.
+    static func parseSlackChannel(fromTitle title: String) -> String? {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let r = t.range(of: " (Channel)") {
+            let name = String(t[..<r.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty ? nil : name
+        }
+        if t.hasPrefix("Huddle:") {
+            var rest = String(t.dropFirst("Huddle:".count))
+            // Cut at the first " <dash> " separator (Slack uses an en dash).
+            if let sep = rest.range(of: #"\s[–—-]\s"#, options: .regularExpression) {
+                rest = String(rest[..<sep.lowerBound])
+            }
+            rest = rest.trimmingCharacters(in: .whitespacesAndNewlines)
+            if rest.isEmpty || rest.hasPrefix("@") { return nil } // DM huddle
+            return rest
+        }
+        return nil
+    }
+
+    /// Picks the most likely channel for a session from all Slack window titles
+    /// seen during it. A live `Huddle:` title is the strongest signal of which
+    /// channel the call belonged to, so those win over plain channel-browsing
+    /// windows; ties break on frequency.
+    static func bestSlackChannel(fromTitles titles: [String]) -> String? {
+        var huddle: [String: Int] = [:]
+        var channel: [String: Int] = [:]
+        for raw in titles {
+            guard let name = parseSlackChannel(fromTitle: raw) else { continue }
+            if raw.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("Huddle:") {
+                huddle[name, default: 0] += 1
+            } else {
+                channel[name, default: 0] += 1
+            }
+        }
+        if let best = huddle.max(by: { $0.value < $1.value }) { return best.key }
+        return channel.max(by: { $0.value < $1.value })?.key
+    }
+
+    /// Extracts the most-frequent participant name from Teams window titles,
+    /// which look like `<Name> | <Org> | <email> | Microsoft Teams`. Picks the
+    /// first segment per title that isn't "Chat", "Microsoft Teams", an email,
+    /// or empty. Returns nil when no usable title was seen.
+    static func parseTeamsParticipant(fromTitles titles: [String]) -> String? {
+        var counts: [String: Int] = [:]
+        for title in titles {
+            let parts = title.split(separator: "|").map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }
+            for p in parts {
+                let lower = p.lowercased()
+                if lower == "chat" || lower == "microsoft teams" { continue }
+                if p.contains("@") { continue }
+                if p.isEmpty { continue }
+                counts[p, default: 0] += 1
+                break
+            }
+        }
+        return counts.max { $0.value < $1.value }.map { $0.key }
     }
 }

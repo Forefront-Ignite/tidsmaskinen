@@ -15,6 +15,7 @@ struct TimelineView: View {
     @State private var loadError: String?
     @State private var zoom: CGFloat = 1.0
     @State private var zoomAtPinchStart: CGFloat?
+    @State private var showLegend: Bool = false
     @State private var showHidden: Bool = false
     @State private var hasHiddenSignals: Bool = false
     @State private var hasIgnoredMeetings: Bool = false
@@ -161,27 +162,25 @@ struct TimelineView: View {
     @ViewBuilder
     private var header: some View {
         HStack(spacing: 12) {
-            Button {
-                day = Calendar.current.date(byAdding: .day, value: -1, to: day) ?? day
-            } label: { Image(systemName: "chevron.left") }
-
-            Text(dayLabel)
-                .font(.title3.bold())
-                .frame(minWidth: 200, alignment: .leading)
-
-            Button {
-                day = Calendar.current.date(byAdding: .day, value: 1, to: day) ?? day
-            } label: { Image(systemName: "chevron.right") }
-
-            Button("Today") {
-                day = Calendar.current.startOfDay(for: Date())
-            }
+            // Timeline keeps "next day" enabled (unlike Discover/Calls) so you
+            // can look ahead at booked meetings on future days.
+            DateNavigator(
+                title: dayLabel,
+                nowLabel: "Today",
+                prevHelp: "Previous day",
+                nextHelp: "Next day",
+                nowDisabled: isToday,
+                onPrev: { day = Calendar.current.date(byAdding: .day, value: -1, to: day) ?? day },
+                onNext: { day = Calendar.current.date(byAdding: .day, value: 1, to: day) ?? day },
+                onNow: { day = Calendar.current.startOfDay(for: Date()) }
+            )
             Spacer()
             if let err = loadError {
                 Text(err).font(.caption).foregroundStyle(.red).lineLimit(1)
             }
             foregroundLaneToggle
             showHiddenToggle
+            legendButton
             zoomControls
         }
         .padding(.horizontal, 12)
@@ -246,10 +245,112 @@ struct TimelineView: View {
         }
     }
 
+    // MARK: - Legend
+
+    @ViewBuilder
+    private var legendButton: some View {
+        Button {
+            showLegend.toggle()
+        } label: {
+            Image(systemName: "info.circle")
+                .foregroundStyle(showLegend ? Color.accentColor : .secondary)
+        }
+        .help("What the colors and borders mean")
+        .accessibilityLabel("Timeline legend")
+        .popover(isPresented: $showLegend, arrowEdge: .bottom) {
+            legendPopover
+        }
+    }
+
+    @ViewBuilder
+    private var legendPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Legend").font(.headline)
+            legendRow(
+                blockSwatch(fill: .blue, border: .blue.opacity(0.55)),
+                "Attributed block",
+                "Filled with the customer or project color."
+            )
+            legendRow(
+                blockSwatch(fill: .blue, border: .white.opacity(0.85), lineWidth: 1.5, pin: true),
+                "Manual override",
+                "White outline and a pin — you set this block by hand."
+            )
+            legendRow(
+                blockSwatch(fill: .pink.opacity(0.85), border: .orange.opacity(0.7), dash: true),
+                "Unmatched session",
+                "Dashed orange — no rule matched. Attribute it in Discover or by clicking it."
+            )
+            legendRow(
+                blockSwatch(fill: .gray, border: .secondary.opacity(0.7), dash: true, opacity: 0.6),
+                "Ignored meeting",
+                "Dashed grey and faded — excluded from the report. Shown only with the eye toggle on."
+            )
+            legendRow(idleSwatch, "Idle", "Thin bar along the bottom — no input during this stretch.")
+            legendRow(nowSwatch, "Now", "Red line marks the current time (today only).")
+        }
+        .padding(16)
+        .frame(width: 360)
+    }
+
+    private func legendRow(_ swatch: some View, _ title: String, _ detail: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            swatch.frame(width: 36, height: 20)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.caption.bold())
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func blockSwatch(fill: Color,
+                             border: Color,
+                             dash: Bool = false,
+                             lineWidth: CGFloat = 0.5,
+                             pin: Bool = false,
+                             opacity: Double = 1.0) -> some View {
+        RoundedRectangle(cornerRadius: 4, style: .continuous)
+            .fill(LinearGradient(colors: [fill.opacity(0.95), fill.opacity(0.75)],
+                                 startPoint: .top, endPoint: .bottom))
+            .overlay(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .strokeBorder(border, style: StrokeStyle(lineWidth: lineWidth, dash: dash ? [3, 3] : []))
+            )
+            .overlay(alignment: .trailing) {
+                if pin {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 7))
+                        .foregroundStyle(.white)
+                        .padding(.trailing, 2)
+                }
+            }
+            .opacity(opacity)
+    }
+
+    private var idleSwatch: some View {
+        ZStack(alignment: .bottom) {
+            Color.clear
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(Color.secondary.opacity(0.35))
+                .frame(height: 6)
+        }
+    }
+
+    private var nowSwatch: some View {
+        ZStack {
+            Color.clear
+            Rectangle()
+                .fill(Color.red.opacity(0.85))
+                .frame(width: 1.5)
+        }
+    }
+
     private var dayLabel: String {
-        let f = DateFormatter()
-        f.dateFormat = "EEE d MMM yyyy"
-        return f.string(from: day)
+        DateFormatting.dayMonthWeekdayYear.string(from: day)
     }
 
     // MARK: - Label column (sticky)
@@ -1036,7 +1137,7 @@ private struct ReattributePopover: View {
         if isClaudeBlock, !block.hasManualOverride {
             return "(use rule)"
         }
-        return "Unassigned"
+        return "Unattributed"
     }
 
     // MARK: - Banners

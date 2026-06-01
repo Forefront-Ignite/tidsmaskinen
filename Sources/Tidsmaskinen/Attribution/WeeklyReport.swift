@@ -490,6 +490,18 @@ struct WeeklyReport {
                         seriesMasterID: nil
                     )
                 }
+            case .slackChannel:
+                if let title = sample.windowTitle,
+                   let channel = MicSession.parseSlackChannel(fromTitle: title) {
+                    return ContributorInfo(
+                        id: "slack:\(channel)",
+                        label: "#\(channel)",
+                        kindLabel: "Slack channel",
+                        systemImage: "bubble.left.and.bubble.right",
+                        eventID: nil,
+                        seriesMasterID: nil
+                    )
+                }
             case .appBundleID:
                 break
             }

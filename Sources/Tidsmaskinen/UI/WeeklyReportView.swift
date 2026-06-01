@@ -72,22 +72,17 @@ struct WeeklyReportView: View {
     @ViewBuilder
     private var header: some View {
         HStack(spacing: 14) {
-            Button {
-                weekStart = calendar.date(byAdding: .day, value: -7, to: weekStart) ?? weekStart
-            } label: {
-                Image(systemName: "chevron.left")
-            }
-            Text(weekTitle)
-                .font(.title3.bold())
-                .frame(minWidth: 220, alignment: .leading)
-            Button {
-                weekStart = calendar.date(byAdding: .day, value: 7, to: weekStart) ?? weekStart
-            } label: {
-                Image(systemName: "chevron.right")
-            }
-            Button("This week") {
-                weekStart = calendar.currentWeekInterval().start
-            }
+            DateNavigator(
+                title: weekTitle,
+                nowLabel: "This week",
+                prevHelp: "Previous week",
+                nextHelp: "Next week",
+                titleMinWidth: 220,
+                nowDisabled: weekStart == calendar.currentWeekInterval().start,
+                onPrev: { weekStart = calendar.date(byAdding: .day, value: -7, to: weekStart) ?? weekStart },
+                onNext: { weekStart = calendar.date(byAdding: .day, value: 7, to: weekStart) ?? weekStart },
+                onNow: { weekStart = calendar.currentWeekInterval().start }
+            )
             Spacer()
             if let report {
                 VStack(alignment: .trailing, spacing: 2) {
@@ -111,12 +106,8 @@ struct WeeklyReportView: View {
     }
 
     private var weekTitle: String {
-        let f = DateFormatter()
-        f.dateFormat = "d MMM"
         let endDate = calendar.date(byAdding: .day, value: 6, to: weekStart) ?? weekStart
-        let yearF = DateFormatter()
-        yearF.dateFormat = "yyyy"
-        return "\(f.string(from: weekStart)) – \(f.string(from: endDate)) \(yearF.string(from: weekStart))"
+        return "\(DateFormatting.dayMonth.string(from: weekStart)) – \(DateFormatting.dayMonth.string(from: endDate)) \(DateFormatting.year.string(from: weekStart))"
     }
 
     // Hand-rolled column layout. Conditional `GridRow`s inside `ForEach`
@@ -132,38 +123,52 @@ struct WeeklyReportView: View {
 
     @ViewBuilder
     private func gridTable(report: WeeklyReport) -> some View {
+        // Header (day columns) and the grand-total row are pinned via section
+        // header/footer so they stay legible while a long report scrolls — both
+        // live inside the same ScrollView as the rows, so their fixed columns
+        // line up regardless of scroll-bar width.
         ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 0) {
-                headerRow
-                Divider().padding(.vertical, 4)
-
-                if report.rows.isEmpty {
-                    Text("No activity this week.")
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, Self.cellHPadding)
-                        .padding(.vertical, Self.cellVPadding)
-                }
-
-                ForEach(report.rows) { row in
-                    dataRow(row)
-                    if expandedRowID == row.id, let breakdown = report.breakdownsByRowID[row.id] {
-                        WeeklyReportRowDetailView(
-                            breakdown: breakdown,
-                            weekDays: days,
-                            rowColor: Color(hex: row.color) ?? .blue,
-                            onAssignMeetingContributor: { contributor in
-                                openContributorAssignSheet(
-                                    contributor,
-                                    fromRowID: row.id
-                                )
-                            }
-                        )
-                        .padding(.bottom, 6)
+            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders, .sectionFooters]) {
+                Section {
+                    if report.rows.isEmpty {
+                        Text("No activity this week.")
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, Self.cellHPadding)
+                            .padding(.vertical, Self.cellVPadding)
                     }
-                }
 
-                Divider().padding(.vertical, 4)
-                totalRow(report: report)
+                    ForEach(report.rows) { row in
+                        dataRow(row)
+                        if expandedRowID == row.id, let breakdown = report.breakdownsByRowID[row.id] {
+                            WeeklyReportRowDetailView(
+                                breakdown: breakdown,
+                                weekDays: days,
+                                rowColor: Color(hex: row.color) ?? .blue,
+                                onAssignMeetingContributor: { contributor in
+                                    openContributorAssignSheet(
+                                        contributor,
+                                        fromRowID: row.id
+                                    )
+                                }
+                            )
+                            .padding(.bottom, 6)
+                        }
+                    }
+                } header: {
+                    VStack(spacing: 0) {
+                        headerRow
+                        Divider().padding(.top, 4)
+                    }
+                    .padding(.bottom, 4)
+                    .background(.bar)
+                } footer: {
+                    VStack(spacing: 0) {
+                        Divider().padding(.bottom, 4)
+                        totalRow(report: report)
+                    }
+                    .padding(.top, 4)
+                    .background(.bar)
+                }
             }
             .padding()
         }
@@ -197,41 +202,48 @@ struct WeeklyReportView: View {
 
     @ViewBuilder
     private func dataRow(_ row: WeeklyReport.Row) -> some View {
-        HStack(spacing: 0) {
-            HStack(spacing: 6) {
-                Image(systemName: expandedRowID == row.id ? "chevron.down" : "chevron.right")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 10)
-                Circle()
-                    .fill(Color(hex: row.color) ?? .blue)
-                    .frame(width: 10, height: 10)
-                Text(row.label)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, Self.cellHPadding)
-            .padding(.vertical, Self.cellVPadding)
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            ForEach(0..<7, id: \.self) { i in
-                Text(WeeklyReport.formatHours(row.perDayHours[i]))
-                    .monospacedDigit()
-                    .foregroundStyle(row.perDayHours[i] == 0 ? Color.secondary : Color.primary)
-                    .padding(.horizontal, Self.cellHPadding)
-                    .padding(.vertical, Self.cellVPadding)
-                    .frame(width: Self.dateColumnWidth, alignment: .trailing)
-            }
-            Text(WeeklyReport.formatHours(row.totalHours))
-                .monospacedDigit()
-                .bold()
+        // A Button (not a bare tap gesture) so the row is keyboard-focusable
+        // and reads as an expandable control to VoiceOver.
+        Button {
+            toggleExpansion(row.id)
+        } label: {
+            HStack(spacing: 0) {
+                HStack(spacing: 6) {
+                    Image(systemName: expandedRowID == row.id ? "chevron.down" : "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 10)
+                    Circle()
+                        .fill(Color(hex: row.color) ?? .blue)
+                        .frame(width: 10, height: 10)
+                    Text(row.label)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                }
                 .padding(.horizontal, Self.cellHPadding)
                 .padding(.vertical, Self.cellVPadding)
-                .frame(width: Self.totalColumnWidth, alignment: .trailing)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                ForEach(0..<7, id: \.self) { i in
+                    Text(WeeklyReport.formatHours(row.perDayHours[i]))
+                        .monospacedDigit()
+                        .foregroundStyle(row.perDayHours[i] == 0 ? Color.secondary : Color.primary)
+                        .padding(.horizontal, Self.cellHPadding)
+                        .padding(.vertical, Self.cellVPadding)
+                        .frame(width: Self.dateColumnWidth, alignment: .trailing)
+                }
+                Text(WeeklyReport.formatHours(row.totalHours))
+                    .monospacedDigit()
+                    .bold()
+                    .padding(.horizontal, Self.cellHPadding)
+                    .padding(.vertical, Self.cellVPadding)
+                    .frame(width: Self.totalColumnWidth, alignment: .trailing)
+            }
+            .contentShape(Rectangle())
         }
-        .contentShape(Rectangle())
-        .onTapGesture { toggleExpansion(row.id) }
+        .buttonStyle(.plain)
+        .accessibilityHint(expandedRowID == row.id ? "Collapse daily breakdown" : "Expand daily breakdown")
     }
 
     @ViewBuilder
@@ -260,9 +272,7 @@ struct WeeklyReportView: View {
     }
 
     private func dayHeader(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "EEE d/M"
-        return f.string(from: date)
+        DateFormatting.weekdayDayShortMonth.string(from: date)
     }
 
     /// Schedule a reload. `immediate` reloads run as soon as possible (week

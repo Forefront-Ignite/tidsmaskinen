@@ -59,6 +59,13 @@ final class MicMonitor {
     private var currentSessionStart: Date?
     private var currentSessionRecorderBundles: Set<String> = []
 
+    /// Window titles read directly off the Slack/Teams process via the
+    /// Accessibility API on each poll while the mic is hot — independent of
+    /// which app is frontmost. These are the primary source for the session's
+    /// Slack channel / Teams participant; foreground samples are the fallback.
+    private var sessionSlackTitles: [String] = []
+    private var sessionTeamsTitles: [String] = []
+
     /// When `isRunningInput` briefly goes false mid-call (camera toggle, BT
     /// headset switch, app audio-pipeline restart) we don't close the session
     /// immediately — we wait for this grace window to expire with no recorder.
@@ -136,10 +143,14 @@ final class MicMonitor {
         if let id = currentSessionID, let start = currentSessionStart {
             let end = Date()
             let finalApps = Array(currentSessionRecorderBundles).sorted()
-            try? database.endMicSession(id: id, endedAt: end, participant: nil, voipApps: finalApps)
+            let participant = MicSession.parseTeamsParticipant(fromTitles: sessionTeamsTitles)
+                ?? inferParticipant(in: start, end: end, db: database)
+            let slackChannel = MicSession.bestSlackChannel(fromTitles: sessionSlackTitles)
+                ?? inferSlackChannel(in: start, end: end, db: database)
+            try? database.endMicSession(id: id, endedAt: end, participant: participant, slackChannel: slackChannel, voipApps: finalApps)
             let s = MicSession(id: id, startedAt: start, endedAt: end,
                                voipAppsCSV: finalApps.isEmpty ? nil : finalApps.joined(separator: ","),
-                               participant: nil,
+                               participant: participant, slackChannel: slackChannel,
                                customerID: nil, projectID: nil,
                                createdAt: start, updatedAt: end)
             onSessionEnd?(s)
@@ -147,6 +158,8 @@ final class MicMonitor {
         currentSessionID = nil
         currentSessionStart = nil
         currentSessionRecorderBundles = []
+        sessionSlackTitles = []
+        sessionTeamsTitles = []
         isRecording = false
     }
 
@@ -175,6 +188,10 @@ final class MicMonitor {
                 beginSession(with: recorders)
                 isRecording = true
             }
+            // Snapshot the call's window context live, regardless of frontmost
+            // app, so a huddle/call attributes even while the user works
+            // elsewhere.
+            accumulateCallContext(from: recorders)
         } else {
             // Mic is currently off according to process-level signal.
             guard isRecording else { return }
@@ -200,13 +217,16 @@ final class MicMonitor {
         let initialBundles = recorders.compactMap { $0.bundleID }
         let apps = initialBundles.isEmpty ? runningVoipBundleIDs() : initialBundles
         currentSessionRecorderBundles = Set(apps)
+        sessionSlackTitles = []
+        sessionTeamsTitles = []
         do {
             let id = try db.startMicSession(at: start, voipApps: apps)
             currentSessionID = id
             currentSessionStart = start
             let s = MicSession(id: id, startedAt: start, endedAt: nil,
                                voipAppsCSV: apps.isEmpty ? nil : apps.joined(separator: ","),
-                               participant: nil, customerID: nil, projectID: nil,
+                               participant: nil, slackChannel: nil,
+                               customerID: nil, projectID: nil,
                                createdAt: start, updatedAt: start)
             onSessionStart?(s)
         } catch {
@@ -218,13 +238,19 @@ final class MicMonitor {
         guard let id = currentSessionID, let start = currentSessionStart else { return }
         let db = database
         let end = Date()
-        let participant = inferParticipant(in: start, end: end, db: db)
+        // Live AX-read titles win; foreground samples are the fallback for when
+        // Accessibility is off or no Slack/Teams window was readable.
+        let participant = MicSession.parseTeamsParticipant(fromTitles: sessionTeamsTitles)
+            ?? inferParticipant(in: start, end: end, db: db)
+        let slackChannel = MicSession.bestSlackChannel(fromTitles: sessionSlackTitles)
+            ?? inferSlackChannel(in: start, end: end, db: db)
         let finalApps = Array(currentSessionRecorderBundles).sorted()
         do {
-            try db.endMicSession(id: id, endedAt: end, participant: participant, voipApps: finalApps)
+            try db.endMicSession(id: id, endedAt: end, participant: participant, slackChannel: slackChannel, voipApps: finalApps)
             let s = MicSession(id: id, startedAt: start, endedAt: end,
                                voipAppsCSV: finalApps.isEmpty ? nil : finalApps.joined(separator: ","),
-                               participant: participant, customerID: nil, projectID: nil,
+                               participant: participant, slackChannel: slackChannel,
+                               customerID: nil, projectID: nil,
                                createdAt: start, updatedAt: end)
             onSessionEnd?(s)
         } catch {
@@ -233,6 +259,26 @@ final class MicMonitor {
         currentSessionID = nil
         currentSessionStart = nil
         currentSessionRecorderBundles = []
+        sessionSlackTitles = []
+        sessionTeamsTitles = []
+    }
+
+    /// Reads the live window titles of the Slack/Teams process(es) currently
+    /// holding the mic and appends them to the session buffers. Uses the
+    /// owning-app PID we already resolved, so it works even when the call app
+    /// is in the background. No-op without Accessibility (returns empty).
+    /// Dedupes owning PIDs per poll so a main app + its helper don't
+    /// double-count.
+    private func accumulateCallContext(from recorders: [Recorder]) {
+        var slackPIDs: Set<pid_t> = []
+        var teamsPIDs: Set<pid_t> = []
+        for r in recorders {
+            guard let bid = r.bundleID else { continue }
+            if bid.contains("slack") { slackPIDs.insert(r.ownerPID) }
+            else if bid.contains("teams") { teamsPIDs.insert(r.ownerPID) }
+        }
+        for pid in slackPIDs { sessionSlackTitles.append(contentsOf: Probes.allWindowTitles(pid: pid)) }
+        for pid in teamsPIDs { sessionTeamsTitles.append(contentsOf: Probes.allWindowTitles(pid: pid)) }
     }
 
     // MARK: - CoreAudio probe
@@ -305,6 +351,11 @@ final class MicMonitor {
     /// One process that's currently reading from an audio input device.
     struct Recorder: Hashable {
         let pid: pid_t
+        /// PID of the user-facing owning app (the GUI process that owns the
+        /// windows), resolved by walking the parent chain. Falls back to `pid`
+        /// when no owner could be resolved. This is the PID to hand to the
+        /// Accessibility API to read the call's window titles.
+        let ownerPID: pid_t
         let bundleID: String?
         let appName: String?
     }
@@ -357,10 +408,11 @@ final class MicMonitor {
             // we walk up the parent chain to find the owning .app.
             if let owner = Self.resolveOwningApp(forPID: pid) {
                 recorders.append(Recorder(pid: pid,
+                                          ownerPID: owner.processIdentifier,
                                           bundleID: owner.bundleIdentifier?.lowercased(),
                                           appName: owner.localizedName))
             } else {
-                recorders.append(Recorder(pid: pid, bundleID: nil, appName: "PID \(pid)"))
+                recorders.append(Recorder(pid: pid, ownerPID: pid, bundleID: nil, appName: "PID \(pid)"))
             }
         }
         return recorders
@@ -475,30 +527,30 @@ final class MicMonitor {
         return Array(Set(found)).sorted()
     }
 
-    /// Best-effort participant guess from frontmost-app samples during the
-    /// session window. We look at Teams window titles (they typically contain
-    /// `<Name> | <Org> | <email> | Microsoft Teams`) and extract the first
-    /// non-Chat segment.
+    /// Fallback participant guess from frontmost-app samples during the session
+    /// window, used only when the live AX read found no Teams window. Parsing
+    /// is shared with the AX path via `MicSession.parseTeamsParticipant`.
     private func inferParticipant(in start: Date, end: Date, db: AppDatabase) -> String? {
         let teamsBundles: Set<String> = ["com.microsoft.teams", "com.microsoft.teams2"]
         guard let samples = try? db.samplesOverlapping(start: start, end: end) else { return nil }
-        var counts: [String: Int] = [:]
-        for s in samples {
-            guard let bid = s.appBundleID?.lowercased(), teamsBundles.contains(bid),
-                  let title = s.windowTitle else { continue }
-            let parts = title.split(separator: "|").map {
-                $0.trimmingCharacters(in: .whitespaces)
-            }
-            for p in parts {
-                let lower = p.lowercased()
-                if lower == "chat" || lower == "microsoft teams" { continue }
-                if p.contains("@") { continue }
-                if p.isEmpty { continue }
-                counts[p, default: 0] += 1
-                break
-            }
+        let titles = samples.compactMap { s -> String? in
+            guard let bid = s.appBundleID?.lowercased(), teamsBundles.contains(bid) else { return nil }
+            return s.windowTitle
         }
-        return counts.max { $0.value < $1.value }.map { $0.key }
+        return MicSession.parseTeamsParticipant(fromTitles: titles)
+    }
+
+    /// Fallback Slack channel guess from the frontmost Slack window titles
+    /// captured in foreground samples during the session, used only when the
+    /// live AX read found nothing. A huddle title (`Huddle: nfc-internal …`)
+    /// pins the channel; falls back to the most-viewed channel window.
+    private func inferSlackChannel(in start: Date, end: Date, db: AppDatabase) -> String? {
+        guard let samples = try? db.samplesOverlapping(start: start, end: end) else { return nil }
+        let titles = samples.compactMap { s -> String? in
+            guard let bid = s.appBundleID?.lowercased(), bid.contains("slack") else { return nil }
+            return s.windowTitle
+        }
+        return MicSession.bestSlackChannel(fromTitles: titles)
     }
 
     static func displayName(forBundleID bid: String) -> String? {
