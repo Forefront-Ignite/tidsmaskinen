@@ -341,6 +341,39 @@ struct AppDatabase {
                 }
             }
         }
+        migrator.registerMigration("v17_backfill_worktree_remotes") { db in
+            // gitOriginURL used to fail on git worktrees (`.git` is a file), so
+            // worktree work captured a repo path but no remote and couldn't be
+            // attributed by gitRepoSlug rules. Now that the resolver follows the
+            // worktree → commondir → config chain, recompute the remote for rows
+            // that have a repo path, no remote, and whose worktree still exists
+            // on disk. Recovers the lost (often large) chunks of attributed time.
+            let sessions = try Row.fetchAll(db, sql: """
+                SELECT id, gitRepoPath FROM claude_sessions
+                WHERE gitRepoPath IS NOT NULL AND gitRemoteURL IS NULL
+                """)
+            for row in sessions {
+                let id: String = row["id"]
+                let repoPath: String = row["gitRepoPath"]
+                if let url = Probes.gitOriginURL(repoRoot: repoPath) {
+                    try db.execute(
+                        sql: "UPDATE claude_sessions SET gitRemoteURL = ? WHERE id = ?",
+                        arguments: [url, id])
+                }
+            }
+            // Samples share repo paths heavily — resolve each distinct path once.
+            let paths = try String.fetchAll(db, sql: """
+                SELECT DISTINCT gitRepoPath FROM activity_samples
+                WHERE gitRepoPath IS NOT NULL AND gitRemoteURL IS NULL
+                """)
+            for repoPath in paths {
+                if let url = Probes.gitOriginURL(repoRoot: repoPath) {
+                    try db.execute(
+                        sql: "UPDATE activity_samples SET gitRemoteURL = ? WHERE gitRepoPath = ? AND gitRemoteURL IS NULL",
+                        arguments: [url, repoPath])
+                }
+            }
+        }
         try migrator.migrate(dbQueue)
     }
 

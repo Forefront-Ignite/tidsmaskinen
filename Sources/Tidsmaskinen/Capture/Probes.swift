@@ -258,9 +258,48 @@ enum Probes {
         return nil
     }
 
+    /// Path to the git config that holds remotes. Handles a normal repo
+    /// (`.git` is a directory → `.git/config`) *and* a linked worktree
+    /// (`.git` is a file `gitdir: …/.git/worktrees/<name>`, whose shared
+    /// remotes live in the main repo's config, found via the `commondir`
+    /// pointer). Without the worktree branch, work done in a `git worktree`
+    /// captured a repo path but no remote, so it couldn't be attributed.
+    static func gitCommonConfigPath(repoRoot: String) -> String? {
+        let fm = FileManager.default
+        let gitPath = (repoRoot as NSString).appendingPathComponent(".git")
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: gitPath, isDirectory: &isDir) else { return nil }
+        if isDir.boolValue {
+            return (gitPath as NSString).appendingPathComponent("config")
+        }
+        // `.git` is a file: "gitdir: <path-to-this-worktree's-gitdir>".
+        guard let pointer = try? String(contentsOfFile: gitPath, encoding: .utf8) else { return nil }
+        let firstLine = pointer.split(separator: "\n").first.map(String.init) ?? pointer
+        guard firstLine.hasPrefix("gitdir:") else { return nil }
+        let rawGitDir = String(firstLine.dropFirst("gitdir:".count)).trimmingCharacters(in: .whitespaces)
+        guard !rawGitDir.isEmpty else { return nil }
+        let gitDir = absolutePath(rawGitDir, relativeTo: repoRoot)
+        // The shared config lives in the common dir; `commondir` points to it
+        // (usually "../.." → the main repo's .git). Fall back to the gitdir.
+        var commonDir = gitDir
+        let commonDirFile = (gitDir as NSString).appendingPathComponent("commondir")
+        if let rawCommon = try? String(contentsOfFile: commonDirFile, encoding: .utf8) {
+            let rel = rawCommon.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !rel.isEmpty { commonDir = absolutePath(rel, relativeTo: gitDir) }
+        }
+        return (commonDir as NSString).appendingPathComponent("config")
+    }
+
+    /// Resolves `path` against `base` (resolving `..`); returns it unchanged if
+    /// already absolute.
+    private static func absolutePath(_ path: String, relativeTo base: String) -> String {
+        if path.hasPrefix("/") { return URL(fileURLWithPath: path).standardizedFileURL.path }
+        return URL(fileURLWithPath: base).appendingPathComponent(path).standardizedFileURL.path
+    }
+
     static func gitOriginURL(repoRoot: String) -> String? {
-        let configPath = (repoRoot as NSString).appendingPathComponent(".git/config")
-        guard let text = try? String(contentsOfFile: configPath, encoding: .utf8) else { return nil }
+        guard let configPath = gitCommonConfigPath(repoRoot: repoRoot),
+              let text = try? String(contentsOfFile: configPath, encoding: .utf8) else { return nil }
         var inOrigin = false
         for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let line = raw.trimmingCharacters(in: .whitespaces)
