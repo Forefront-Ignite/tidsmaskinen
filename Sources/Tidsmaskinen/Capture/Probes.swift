@@ -135,6 +135,47 @@ enum Probes {
         return titles
     }
 
+    /// Depth/breadth-bounded dump of a process's Accessibility tree — role plus
+    /// any human-readable title/description/value per node. Used by the
+    /// Diagnostics "call UI probe" to see whether e.g. Slack exposes huddle
+    /// participant names. Bounded because Electron (Slack/Teams) trees are huge
+    /// and querying them forces the app into full accessibility mode.
+    static func dumpAXTree(pid: pid_t, maxDepth: Int = 16, maxNodes: Int = 8000) -> String {
+        guard isAccessibilityTrusted(promptIfNeeded: false) else {
+            return "Accessibility not granted — can't read the AX tree."
+        }
+        var out = ""
+        var nodeCount = 0
+        func stringAttr(_ el: AXUIElement, _ key: String) -> String? {
+            var ref: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(el, key as CFString, &ref) == .success else { return nil }
+            if let s = ref as? String { return s }
+            if let n = ref as? NSNumber { return n.stringValue }
+            return nil
+        }
+        func walk(_ el: AXUIElement, depth: Int) {
+            guard nodeCount < maxNodes else { return }
+            nodeCount += 1
+            let role = stringAttr(el, kAXRoleAttribute as String) ?? "?"
+            var parts = [role]
+            for (label, key) in [("title", kAXTitleAttribute), ("desc", kAXDescriptionAttribute), ("value", kAXValueAttribute)] as [(String, String)] {
+                if let v = stringAttr(el, key as String), !v.isEmpty, v.count <= 160 {
+                    parts.append("\(label)=\(v)")
+                }
+            }
+            out += String(repeating: "  ", count: depth) + parts.joined(separator: "  ·  ") + "\n"
+            guard depth < maxDepth else { return }
+            var childrenRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+               let children = childrenRef as? [AXUIElement] {
+                for child in children { walk(child, depth: depth + 1) }
+            }
+        }
+        walk(AXUIElementCreateApplication(pid), depth: 0)
+        out += "\n— \(nodeCount) node(s), depth ≤ \(maxDepth) —\n"
+        return out
+    }
+
     static func windowDocumentPath(pid: pid_t) -> String? {
         guard isAccessibilityTrusted(promptIfNeeded: false) else { return nil }
         let app = AXUIElementCreateApplication(pid)

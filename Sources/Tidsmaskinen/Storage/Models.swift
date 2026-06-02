@@ -473,6 +473,32 @@ struct MicSession: Codable, FetchableRecord, MutablePersistableRecord, Identifia
         return huddle.max(by: { $0.value < $1.value })?.key
     }
 
+    /// Extracts the other person from a 1:1 Slack huddle title
+    /// (`Huddle: @Victor Vadelius – …` → `Victor Vadelius`). Returns nil for
+    /// channel huddles (`Huddle: nfc-internal`) and non-huddle titles — only DM
+    /// huddles name a person.
+    static func parseSlackHuddlePerson(fromTitle title: String) -> String? {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.hasPrefix("Huddle:") else { return nil }
+        var rest = String(t.dropFirst("Huddle:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let sep = rest.range(of: #"\s[–—-]\s"#, options: .regularExpression) {
+            rest = String(rest[..<sep.lowerBound])
+        }
+        rest = rest.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard rest.hasPrefix("@") else { return nil } // DM huddles only
+        let name = String(rest.dropFirst()).trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? nil : name
+    }
+
+    /// Most-frequent 1:1 huddle counterpart across the session's Slack titles.
+    static func bestSlackHuddlePerson(fromTitles titles: [String]) -> String? {
+        var counts: [String: Int] = [:]
+        for raw in titles {
+            if let name = parseSlackHuddlePerson(fromTitle: raw) { counts[name, default: 0] += 1 }
+        }
+        return counts.max(by: { $0.value < $1.value })?.key
+    }
+
     /// Extracts the most-frequent participant name from Teams window titles,
     /// which look like `<Name> | <Org> | <email> | Microsoft Teams`. Picks the
     /// first segment per title that isn't "Chat", "Microsoft Teams", an email,

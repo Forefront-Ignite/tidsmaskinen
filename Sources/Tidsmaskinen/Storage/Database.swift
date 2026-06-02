@@ -314,6 +314,33 @@ struct AppDatabase {
                     arguments: [channel, id])
             }
         }
+        migrator.registerMigration("v16_backfill_slack_dm_huddle_participant") { db in
+            // Name 1:1 Slack huddles after the other person, from the captured
+            // "Huddle: @Name" titles. Only pure-Slack sessions with no
+            // participant and no channel huddle (slackChannel) — Teams sessions
+            // keep their meeting subject, channel huddles keep their channel,
+            // and v14 already cleared the old misattributed participants.
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT id, startedAt, endedAt FROM mic_sessions
+                WHERE voipAppsCSV LIKE '%slack%' AND voipAppsCSV NOT LIKE '%teams%'
+                  AND participant IS NULL AND slackChannel IS NULL
+                """)
+            for row in rows {
+                let id: String = row["id"]
+                let start: Date = row["startedAt"]
+                let end: Date = row["endedAt"] ?? start
+                let titles = try String.fetchAll(db, sql: """
+                    SELECT windowTitle FROM activity_samples
+                    WHERE appBundleID LIKE '%slack%' AND windowTitle IS NOT NULL
+                      AND capturedAt >= ? AND capturedAt <= ?
+                    """, arguments: [start, end])
+                if let person = MicSession.bestSlackHuddlePerson(fromTitles: titles) {
+                    try db.execute(
+                        sql: "UPDATE mic_sessions SET participant = ? WHERE id = ?",
+                        arguments: [person, id])
+                }
+            }
+        }
         try migrator.migrate(dbQueue)
     }
 

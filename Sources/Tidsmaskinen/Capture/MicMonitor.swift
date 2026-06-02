@@ -285,10 +285,19 @@ final class MicMonitor {
         -> (participant: String?, slackChannel: String?) {
         let teamsRecorded = recorderBundles.contains { $0.contains("teams") }
         let slackRecorded = recorderBundles.contains { $0.contains("slack") }
-        let participant = MicSession.parseTeamsParticipant(fromTitles: sessionTeamsTitles)
-            ?? (teamsRecorded ? inferParticipant(in: start, end: end, db: db) : nil)
         let slackChannel = MicSession.bestSlackChannel(fromTitles: sessionSlackTitles)
             ?? (slackRecorded ? inferSlackChannel(in: start, end: end, db: db) : nil)
+        // Participant is "who the call was with": a Teams meeting subject, or —
+        // for a 1:1 Slack huddle — the other person. Teams wins if both held the
+        // mic. A 1:1 person only names the call when it wasn't a channel huddle
+        // (a channel huddle is identified by its channel instead).
+        let teamsParticipant = MicSession.parseTeamsParticipant(fromTitles: sessionTeamsTitles)
+            ?? (teamsRecorded ? inferParticipant(in: start, end: end, db: db) : nil)
+        let slackPerson = slackChannel == nil
+            ? (MicSession.bestSlackHuddlePerson(fromTitles: sessionSlackTitles)
+                ?? (slackRecorded ? inferSlackHuddlePerson(in: start, end: end, db: db) : nil))
+            : nil
+        let participant = teamsParticipant ?? slackPerson
         return (participant, slackChannel)
     }
 
@@ -562,6 +571,17 @@ final class MicMonitor {
             return s.windowTitle
         }
         return MicSession.bestSlackChannel(fromTitles: titles)
+    }
+
+    /// Fallback 1:1 Slack huddle counterpart from foreground samples, used only
+    /// when the live AX read found nothing.
+    private func inferSlackHuddlePerson(in start: Date, end: Date, db: AppDatabase) -> String? {
+        guard let samples = try? db.samplesOverlapping(start: start, end: end) else { return nil }
+        let titles = samples.compactMap { s -> String? in
+            guard let bid = s.appBundleID?.lowercased(), bid.contains("slack") else { return nil }
+            return s.windowTitle
+        }
+        return MicSession.bestSlackHuddlePerson(fromTitles: titles)
     }
 
     static func displayName(forBundleID bid: String) -> String? {
