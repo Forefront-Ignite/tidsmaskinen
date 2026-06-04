@@ -163,4 +163,11 @@ enum DateFormatting {
         f.dateFormat = "EEE d/M"
         return f
     }()
+
+    /// e.g. "Mon" — short weekday for chart axes.
+    static let weekdayShort: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE"
+        return f
+    }()
 }

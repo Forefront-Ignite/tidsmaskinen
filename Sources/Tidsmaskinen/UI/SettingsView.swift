@@ -1,5 +1,38 @@
 import SwiftUI
 
+/// Categories for the two-pane Settings layout (macOS System Settings style).
+enum SettingsCategory: String, CaseIterable, Identifiable {
+    case general, tracking, calendar, integrations, ignored
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .general:      return "General"
+        case .tracking:     return "Tracking"
+        case .calendar:     return "Calendar"
+        case .integrations: return "Integrations"
+        case .ignored:      return "Ignored"
+        }
+    }
+    var detail: String {
+        switch self {
+        case .general:      return "Appearance, startup and updates"
+        case .tracking:     return "How activity is sampled"
+        case .calendar:     return "Meeting import & Microsoft account"
+        case .integrations: return "Command Center & Claude Code"
+        case .ignored:      return "Hosts and apps you’ve muted"
+        }
+    }
+    var icon: String {
+        switch self {
+        case .general:      return "slider.horizontal.3"
+        case .tracking:     return "calendar.day.timeline.left"
+        case .calendar:     return "calendar"
+        case .integrations: return "puzzlepiece.extension"
+        case .ignored:      return "eye.slash"
+        }
+    }
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var state: AppState
     @AppStorage(SettingsKey.sampleIntervalSeconds) private var sampleInterval: Int = 15
@@ -14,144 +47,258 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.claudeIdleThresholdMinutes) private var claudeIdleMinutes: Int = 5
     @AppStorage(SettingsKey.commandCenterEnabled) private var commandCenterEnabled: Bool = true
     @AppStorage(SettingsKey.commandCenterBaseURL) private var commandCenterBaseURL: String = ""
+    @AppStorage(SettingsKey.appearance) private var appearanceRaw: String = AppTheme.system.rawValue
     @State private var launchAtLogin: Bool = LoginItemManager.isEnabled
     @State private var loginItemError: String?
     @State private var commandCenterTokenInput: String = ""
     @State private var commandCenterCustomerCount: Int = 0
     @State private var commandCenterProjectCount: Int = 0
 
+    private var appearanceBinding: Binding<AppTheme> {
+        Binding(
+            get: { AppTheme(rawValue: appearanceRaw) ?? .system },
+            set: { appearanceRaw = $0.rawValue }
+        )
+    }
+
+    @State private var category: SettingsCategory = .general
+    @State private var hiddenSignals: [HiddenSignal] = []
+
     var body: some View {
-        Form {
-            if hasUpdateFeed {
-                Section("Updates") {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Tidsmaskinen \(appVersionLabel)")
-                                .font(.body)
-                            Text("Auto-checks daily. Click below to check now.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button {
-                            state.updaterController.checkForUpdates(nil)
-                        } label: {
-                            Label("Check for Updates", systemImage: "arrow.down.circle")
-                        }
-                    }
-                }
+        HSplitView {
+            categoryRail
+                .frame(minWidth: 210, idealWidth: 230, maxWidth: 280)
+            Form {
+                paneContent
             }
+            .formStyle(.grouped)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(minWidth: 720, minHeight: 560)
+        .onAppear { refreshCommandCenterCounts(); reloadHidden() }
+        .onChange(of: state.commandCenterLastSyncAt) { _, _ in refreshCommandCenterCounts() }
+        .onChange(of: category) { _, _ in reloadHidden() }
+    }
 
-            Section("Startup") {
-                Toggle("Open at login", isOn: launchAtLoginBinding)
-                Text(LoginItemManager.statusDescription)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if let err = loginItemError {
-                    Text(err)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
-            }
+    // MARK: - Two-pane scaffold
 
-            Section("Sampling") {
-                Stepper(value: $sampleInterval, in: 5...300, step: 5) {
-                    LabeledContent("Sample interval") {
-                        Text("\(sampleInterval) s")
-                            .monospacedDigit()
+    @ViewBuilder
+    private var categoryRail: some View {
+        List(selection: $category) {
+            ForEach(SettingsCategory.allCases) { cat in
+                Label {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(cat.label)
+                        Text(cat.detail).font(.caption2).foregroundStyle(.secondary)
                     }
+                } icon: {
+                    Image(systemName: cat.icon).foregroundStyle(TM.accent)
                 }
-                Stepper(value: $idleThreshold, in: 60...1800, step: 30) {
-                    LabeledContent("Idle threshold") {
-                        Text(formatDuration(idleThreshold))
-                            .monospacedDigit()
-                    }
-                }
-                Text("Above this many seconds without input, samples are tagged as idle (still recorded but excluded from billable time by default).")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Meetings") {
-                Picker("RSVP filter", selection: rsvpFilterBinding) {
-                    ForEach(MeetingRSVPFilter.allCases) { filter in
-                        Text(filter.label).tag(filter)
-                    }
-                }
-                Toggle("Keep recording during meetings even when idle", isOn: $trackIdleDuringMeetings)
-                Toggle("Verify attendance from meeting-app activity", isOn: $verifyAttendance)
-                Text("Only events matching the RSVP filter are imported. Verification checks Zoom/Teams/Webex/Meet activity and adds a badge — it doesn't exclude events.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Stepper(value: $autoSyncMinutes, in: 0...60, step: 1) {
-                    LabeledContent("Auto-sync every") {
-                        Text(autoSyncMinutes == 0 ? "disabled" : "\(autoSyncMinutes) min")
-                            .monospacedDigit()
-                    }
-                }
-                Text("Set to 0 to disable auto-sync; you can still hit Sync now manually.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Attribution") {
-                Toggle("Parallel attribution", isOn: $parallelAttribution)
-                Text("Off: only one customer billed per minute. On: a meeting and concurrent coding both attribute to their own customers.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Claude Code") {
-                claudeCodeSection
-            }
-
-            Section("Command Center") {
-                commandCenterSection
-            }
-
-            Section("Microsoft Graph") {
-                Picker("Preset", selection: presetBinding) {
-                    ForEach(GraphPreset.allCases) { preset in
-                        Text(preset.label).tag(preset)
-                    }
-                }
-                LabeledContent("Client ID") {
-                    TextField("Application (client) ID", text: $graphClientID, prompt: Text(AppSettings.defaultGraphClientID))
-                        .textFieldStyle(.roundedBorder)
-                        .font(.body.monospaced())
-                        .frame(minWidth: 320)
-                        .disabled(presetBinding.wrappedValue != .custom)
-                }
-                LabeledContent("Tenant") {
-                    TextField("Tenant ID, domain, or 'common'", text: $graphTenantID, prompt: Text(AppSettings.defaultGraphTenantID))
-                        .textFieldStyle(.roundedBorder)
-                        .font(.body.monospaced())
-                        .frame(minWidth: 320)
-                        .disabled(presetBinding.wrappedValue != .custom)
-                }
-                Text("Forefront preset uses our shared Entra app registration with Calendars.Read + User.Read consent. Switch to Custom to paste your own Application (client) ID and tenant.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                HStack {
-                    Spacer()
-                    if state.isSignedIn {
-                        Button(role: .destructive) {
-                            Task { await state.signOut() }
-                        } label: {
-                            Text("Sign out (\(state.signedInPrincipal ?? ""))")
-                        }
-                    }
-                }
-                Text("Changing the preset, Client ID or Tenant invalidates the cached refresh token. Sign out and sign in again after editing.")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
+                .tag(cat)
+                .badge(cat == .ignored ? hiddenSignals.count : 0)
             }
         }
-        .formStyle(.grouped)
-        .frame(minWidth: 600, minHeight: 640)
-        .padding(.horizontal, 4)
-        .onAppear { refreshCommandCenterCounts() }
-        .onChange(of: state.commandCenterLastSyncAt) { _, _ in refreshCommandCenterCounts() }
+        .listStyle(.sidebar)
+    }
+
+    @ViewBuilder
+    private var paneContent: some View {
+        switch category {
+        case .general:      generalPane
+        case .tracking:     trackingPane
+        case .calendar:     calendarPane
+        case .integrations: integrationsPane
+        case .ignored:      ignoredPane
+        }
+    }
+
+    // MARK: - Panes
+
+    @ViewBuilder
+    private var generalPane: some View {
+        Section("Appearance") {
+            Picker("Theme", selection: appearanceBinding) {
+                ForEach(AppTheme.allCases) { theme in
+                    Label(theme.label, systemImage: theme.symbol).tag(theme)
+                }
+            }
+            .pickerStyle(.segmented)
+            Text("“Auto” follows your macOS appearance — applied to the window, menu bar and tray popover.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        if hasUpdateFeed {
+            Section("Updates") {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Tidsmaskinen \(appVersionLabel)")
+                            .font(.body)
+                        Text("Auto-checks daily. Click below to check now.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button {
+                        state.updaterController.checkForUpdates(nil)
+                    } label: {
+                        Label("Check for Updates", systemImage: "arrow.down.circle")
+                    }
+                }
+            }
+        }
+
+        Section("Startup") {
+            Toggle("Open at login", isOn: launchAtLoginBinding)
+            Text(LoginItemManager.statusDescription)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let err = loginItemError {
+                Text(err)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var trackingPane: some View {
+        Section("Sampling") {
+            Stepper(value: $sampleInterval, in: 5...300, step: 5) {
+                LabeledContent("Sample interval") {
+                    Text("\(sampleInterval) s")
+                        .monospacedDigit()
+                }
+            }
+            Stepper(value: $idleThreshold, in: 60...1800, step: 30) {
+                LabeledContent("Idle threshold") {
+                    Text(formatDuration(idleThreshold))
+                        .monospacedDigit()
+                }
+            }
+            Text("Above this many seconds without input, samples are tagged as idle (still recorded but excluded from billable time by default).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        Section("Attribution") {
+            Toggle("Parallel attribution", isOn: $parallelAttribution)
+            Text("Off: only one customer billed per minute. On: a meeting and concurrent coding both attribute to their own customers.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var calendarPane: some View {
+        Section("Meetings") {
+            Picker("RSVP filter", selection: rsvpFilterBinding) {
+                ForEach(MeetingRSVPFilter.allCases) { filter in
+                    Text(filter.label).tag(filter)
+                }
+            }
+            Toggle("Keep recording during meetings even when idle", isOn: $trackIdleDuringMeetings)
+            Toggle("Verify attendance from meeting-app activity", isOn: $verifyAttendance)
+            Text("Only events matching the RSVP filter are imported. Verification checks Zoom/Teams/Webex/Meet activity and adds a badge — it doesn't exclude events.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Stepper(value: $autoSyncMinutes, in: 0...60, step: 1) {
+                LabeledContent("Auto-sync every") {
+                    Text(autoSyncMinutes == 0 ? "disabled" : "\(autoSyncMinutes) min")
+                        .monospacedDigit()
+                }
+            }
+            Text("Set to 0 to disable auto-sync; you can still hit Sync now manually.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        Section("Microsoft account") {
+            Picker("Preset", selection: presetBinding) {
+                ForEach(GraphPreset.allCases) { preset in
+                    Text(preset.label).tag(preset)
+                }
+            }
+            LabeledContent("Client ID") {
+                TextField("Application (client) ID", text: $graphClientID, prompt: Text(AppSettings.defaultGraphClientID))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.body.monospaced())
+                    .frame(minWidth: 320)
+                    .disabled(presetBinding.wrappedValue != .custom)
+            }
+            LabeledContent("Tenant") {
+                TextField("Tenant ID, domain, or 'common'", text: $graphTenantID, prompt: Text(AppSettings.defaultGraphTenantID))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.body.monospaced())
+                    .frame(minWidth: 320)
+                    .disabled(presetBinding.wrappedValue != .custom)
+            }
+            Text("Forefront preset uses our shared Entra app registration with Calendars.Read + User.Read consent. Switch to Custom to paste your own Application (client) ID and tenant.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                if state.isSignedIn {
+                    Button(role: .destructive) {
+                        Task { await state.signOut() }
+                    } label: {
+                        Text("Sign out (\(state.signedInPrincipal ?? ""))")
+                    }
+                }
+            }
+            Text("Changing the preset, Client ID or Tenant invalidates the cached refresh token. Sign out and sign in again after editing.")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+        }
+    }
+
+    @ViewBuilder
+    private var integrationsPane: some View {
+        Section("Command Center") {
+            commandCenterSection
+        }
+        Section("Claude Code") {
+            claudeCodeSection
+        }
+    }
+
+    @ViewBuilder
+    private var ignoredPane: some View {
+        Section("Ignored items") {
+            if hiddenSignals.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Nothing ignored").font(.body.weight(.semibold))
+                    Text("In Review, choose “Ignore” on shared hosts (github.com, google.com) or anything that isn’t client work — it won’t be asked again. Ignored meetings are managed in Review and My day.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 6)
+            } else {
+                ForEach(hiddenSignals) { signal in
+                    HStack(spacing: 10) {
+                        Image(systemName: signal.kind == .appBundleID ? "app" : "globe")
+                            .foregroundStyle(.secondary)
+                        Text(signal.value).font(.body.monospaced()).lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        Button("Un-ignore") { unhide(signal) }
+                    }
+                }
+                Text("Ignored hosts and apps are excluded from Review and the Timeline.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func reloadHidden() {
+        hiddenSignals = (try? state.database.allHiddenSignals()) ?? []
+    }
+
+    private func unhide(_ signal: HiddenSignal) {
+        do {
+            try state.database.unhide(id: signal.id)
+            reloadHidden()
+        } catch {
+            // Non-fatal; surface nothing — the list simply won't change.
+        }
     }
 
     @ViewBuilder

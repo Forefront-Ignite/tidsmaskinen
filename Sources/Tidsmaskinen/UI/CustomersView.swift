@@ -125,34 +125,29 @@ struct CustomersView: View {
         if let customerID = selectedCustomerID,
            let customer = customers.first(where: { $0.id == customerID }) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(Color(hex: customer.displayColor) ?? .blue)
-                            .frame(width: 14, height: 14)
+                VStack(alignment: .leading, spacing: 22) {
+                    HStack(spacing: 12) {
+                        ColorDot(color: Color(hex: customer.displayColor) ?? .blue, size: 14)
                         Text(customer.name)
-                            .font(.title2.bold())
-                        if customer.isExternal {
-                            CommandCenterBadge()
-                                .help("Synced from Command Center. Name and projects are read-only here.")
-                        }
+                            .font(.system(size: 21, weight: .bold))
+                        SourceChip(isCommandCenter: customer.isExternal)
                         Spacer()
-                        Button {
-                            showingAddRule = true
-                        } label: {
-                            Label("Add rule", systemImage: "plus")
+                        if customer.isExternal {
+                            Label("Read-only · managed in Command Center", systemImage: "info.circle")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Button {
+                                showingAddRule = true
+                            } label: {
+                                Label("Add rule", systemImage: "plus")
+                            }
                         }
                     }
-                    .padding()
-
-                    Divider()
 
                     projectsSection(for: customer)
-
-                    Divider()
-
                     rulesSection(for: customer)
                 }
+                .padding(26)
             }
             .sheet(isPresented: $showingAddRule) {
                 AddRuleSheet(
@@ -178,15 +173,8 @@ struct CustomersView: View {
 
     @ViewBuilder
     private func projectsSection(for customer: Customer) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Text("Projects")
-                    .font(.headline)
-                Text("(\(customerProjects.count))")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
+        VStack(alignment: .leading, spacing: 11) {
+            sectionHeader("Projects", count: customerProjects.count)
 
             if customerProjects.isEmpty {
                 Text(customer.isExternal
@@ -195,11 +183,13 @@ struct CustomersView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                VStack(spacing: 4) {
-                    ForEach(customerProjects) { project in
+                VStack(spacing: 0) {
+                    ForEach(Array(customerProjects.enumerated()), id: \.element.id) { idx, project in
+                        if idx > 0 { Divider().opacity(0.4) }
                         projectRow(project, customerIsExternal: customer.isExternal)
                     }
                 }
+                .glassCard(radius: 14)
             }
 
             if !customer.isExternal {
@@ -212,20 +202,14 @@ struct CustomersView: View {
                 }
             }
         }
-        .padding()
     }
 
     @ViewBuilder
     private func projectRow(_ project: Project, customerIsExternal: Bool) -> some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(Color(hex: project.displayColor) ?? .blue)
-                .frame(width: 8, height: 8)
-            Text(project.name)
-                .font(.body)
-            if project.isExternal {
-                CommandCenterBadge()
-            }
+        HStack(spacing: 11) {
+            ColorDot(color: Color(hex: project.displayColor) ?? .blue, size: 9)
+            Text(project.name).font(.system(size: 14))
+            if project.isExternal { SourceChip(isCommandCenter: true) }
             Spacer()
             if !project.isExternal, !customerIsExternal {
                 Button(role: .destructive) {
@@ -237,66 +221,86 @@ struct CustomersView: View {
                 .help("Delete project — any rules pointing to it become customer-level.")
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.controlBackgroundColor)))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
     }
+
+    /// Rule-kind groups shown under "Learned rules" (no priority column).
+    private struct RuleGroup { let title: String; let icon: String; let kinds: [Rule.Kind] }
+    private static let ruleGroups: [RuleGroup] = [
+        .init(title: "Repositories", icon: "chevron.left.forwardslash.chevron.right", kinds: [.gitRepoSlug, .gitRemoteHost]),
+        .init(title: "Browser URLs", icon: "globe", kinds: [.urlHost, .urlPath]),
+        .init(title: "Apps", icon: "app", kinds: [.appBundleID]),
+        .init(title: "Window titles", icon: "macwindow", kinds: [.windowTitle]),
+        .init(title: "Slack channels", icon: "number", kinds: [.slackChannel]),
+    ]
 
     @ViewBuilder
     private func rulesSection(for customer: Customer) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Text("Rules")
-                    .font(.headline)
-                Text("(\(rules.count))")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
+        VStack(alignment: .leading, spacing: 14) {
+            sectionHeader("Learned rules", count: rules.count)
 
             if rules.isEmpty {
-                Text("No rules yet. Click \"Add rule\" to map activity to \(customer.name).")
+                Text("No rules yet. Confirm a repo, URL or app in Review — or click “Add rule” — and it’ll be remembered here.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .padding(.vertical, 18)
+                    .frame(maxWidth: .infinity)
+                    .glassCard(radius: 14)
             } else {
-                Table(rules) {
-                    TableColumn("Kind") { rule in
-                        Text(rule.kind.label)
-                    }
-                    .width(min: 140, ideal: 160)
-
-                    TableColumn("Pattern") { rule in
-                        Text(rule.pattern)
-                            .font(.body.monospaced())
-                    }
-                    .width(min: 200, ideal: 320)
-
-                    TableColumn("Project") { rule in
-                        Text(projectName(for: rule.projectID) ?? "—")
-                            .foregroundStyle(rule.projectID == nil ? .secondary : .primary)
-                    }
-                    .width(min: 120, ideal: 160)
-
-                    TableColumn("Priority") { rule in
-                        Text("\(rule.priority)")
-                            .monospacedDigit()
-                    }
-                    .width(60)
-
-                    TableColumn("") { rule in
-                        Button(role: .destructive) {
-                            delete(rule)
-                        } label: {
-                            Image(systemName: "trash")
+                ForEach(Self.ruleGroups, id: \.title) { group in
+                    let rs = rules.filter { group.kinds.contains($0.kind) }
+                    if !rs.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label(group.title, systemImage: group.icon)
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                            VStack(spacing: 0) {
+                                ForEach(Array(rs.enumerated()), id: \.element.id) { idx, rule in
+                                    if idx > 0 { Divider().opacity(0.4) }
+                                    ruleRow(rule, customer: customer)
+                                }
+                            }
+                            .glassCard(radius: 14)
                         }
-                        .buttonStyle(.borderless)
                     }
-                    .width(40)
                 }
-                .frame(minHeight: 180)
             }
         }
-        .padding()
+    }
+
+    @ViewBuilder
+    private func ruleRow(_ rule: Rule, customer: Customer) -> some View {
+        HStack(spacing: 12) {
+            Text(rule.pattern)
+                .font(.system(.callout, design: .monospaced))
+                .lineLimit(1).truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Image(systemName: "arrow.right").font(.caption).foregroundStyle(.tertiary)
+            Text(projectName(for: rule.projectID) ?? customer.name)
+                .font(.system(size: 13))
+                .foregroundStyle(rule.projectID == nil ? .secondary : .primary)
+                .lineLimit(1)
+            Button(role: .destructive) {
+                delete(rule)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+    }
+
+    private func sectionHeader(_ title: String, count: Int) -> some View {
+        HStack(spacing: 6) {
+            Text(title.uppercased())
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.tertiary)
+            Text("\(count)")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.secondary)
+        }
     }
 
     private func projectName(for id: String?) -> String? {
@@ -395,9 +399,7 @@ private struct CustomerSidebarRow: View {
                 .fill(Color(hex: customer.displayColor) ?? .blue)
                 .frame(width: 10, height: 10)
             Text(customer.name)
-            if customer.isExternal {
-                CommandCenterBadge()
-            }
+            SourceChip(isCommandCenter: customer.isExternal)
             Spacer(minLength: 0)
             if !customer.isExternal, hover {
                 Button(role: .destructive, action: onRequestDelete) {
@@ -556,17 +558,4 @@ struct CommandCenterBadge: View {
     }
 }
 
-extension Color {
-    init?(hex: String?) {
-        guard let hex = hex?.trimmingCharacters(in: .whitespacesAndNewlines), hex.hasPrefix("#"),
-              hex.count == 7 else { return nil }
-        let scanner = Scanner(string: String(hex.dropFirst()))
-        var rgb: UInt64 = 0
-        guard scanner.scanHexInt64(&rgb) else { return nil }
-        self = Color(
-            red: Double((rgb >> 16) & 0xFF) / 255.0,
-            green: Double((rgb >> 8) & 0xFF) / 255.0,
-            blue: Double(rgb & 0xFF) / 255.0
-        )
-    }
-}
+// `Color(hex:)` now lives in DesignSystem.swift (shared).

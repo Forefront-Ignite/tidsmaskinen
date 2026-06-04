@@ -31,20 +31,7 @@ struct MenuBarView: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [Color.accentColor, Color.accentColor.opacity(0.55)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 28, height: 28)
-                Image(systemName: "clock.badge.checkmark.fill")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-            }
+            AppMark.badge(size: 30)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Tidsmaskinen")
                     .font(.system(.headline, design: .rounded).weight(.semibold))
@@ -305,7 +292,7 @@ struct MenuBarView: View {
         ) {
             tile(for: .weeklyReport)
             tile(for: .timeline)
-            tile(for: .discover)
+            tile(for: .review)
             tile(for: .calls)
         }
     }

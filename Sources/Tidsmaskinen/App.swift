@@ -5,11 +5,19 @@ import AppKit
 struct TidsmaskinenApp: App {
     @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
     @StateObject private var state = AppState()
+    // Drives the app-wide appearance (Light / Dark / Auto). Stored so it
+    // applies before first paint and persists across launches.
+    @AppStorage(SettingsKey.appearance) private var appearanceRaw = AppTheme.system.rawValue
+
+    private var colorScheme: ColorScheme? {
+        AppTheme(rawValue: appearanceRaw)?.colorScheme
+    }
 
     var body: some Scene {
         MenuBarExtra {
             MenuBarView()
                 .environmentObject(state)
+                .preferredColorScheme(colorScheme)
         } label: {
             Image(systemName: "clock.badge.checkmark")
         }
@@ -18,6 +26,7 @@ struct TidsmaskinenApp: App {
         Window("Tidsmaskinen", id: WindowID.main) {
             MainWindowView()
                 .environmentObject(state)
+                .preferredColorScheme(colorScheme)
         }
         .defaultSize(width: 1100, height: 680)
         .windowResizability(.contentMinSize)

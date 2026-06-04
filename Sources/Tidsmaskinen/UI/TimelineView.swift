@@ -22,6 +22,9 @@ struct TimelineView: View {
     @State private var pendingUndo: PendingUndo?
     @State private var pendingUndoDismiss: Task<Void, Never>?
     @State private var undoError: String?
+    /// Block selected from the readable agenda list (separate from `selectedBlock`,
+    /// which drives the Gantt-strip popover, so the two popovers never collide).
+    @State private var agendaBlock: TimelineBlock?
     @AppStorage(SettingsKey.timelineShowForeground) private var showForeground: Bool = false
 
     /// Combined gate for the "show hidden items" eye toggle. The toggle is
@@ -85,46 +88,18 @@ struct TimelineView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
-            GeometryReader { outer in
-                let available = max(outer.size.width - labelColumnWidth - 24, 220)
-                let contentWidth = available * zoom
-
-                HStack(alignment: .top, spacing: 0) {
-                    labelColumn
-                        .frame(width: labelColumnWidth + 12, alignment: .leading)
-
-                    ScrollView(.horizontal) {
-                        VStack(alignment: .leading, spacing: rowSpacing) {
-                            timeRuler(width: contentWidth)
-                                .frame(width: contentWidth, height: rulerHeight)
-                            ForEach(allTracks, id: \.self) { track in
-                                trackRow(track, blocks: blocks(for: track), width: contentWidth)
-                                    .frame(width: contentWidth, height: rowHeight(for: track))
-                            }
-                        }
-                        .padding(.top, 8)
-                        .padding(.trailing, 12)
-                        .padding(.bottom, 12)
-                    }
-                    .scrollIndicators(.hidden)
-                    .background(
-                        TimelineScrollZoom { deltaY in
-                            let factor = pow(1.01, deltaY)
-                            zoom = max(minZoom, min(maxZoom, zoom * factor))
-                        }
-                    )
-                    .gesture(
-                        MagnifyGesture()
-                            .onChanged { value in
-                                let base = zoomAtPinchStart ?? zoom
-                                if zoomAtPinchStart == nil { zoomAtPinchStart = zoom }
-                                zoom = max(minZoom, min(maxZoom, base * value.magnification))
-                            }
-                            .onEnded { _ in zoomAtPinchStart = nil }
-                    )
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 20) {
+                    dayStats
+                    timelineStrip
+                        .frame(height: stripHeight)
+                    agendaSection
                 }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
             }
         }
+        .tmWallpaper()
         .overlay(alignment: .bottom) { undoToast }
         .onAppear {
             reload()
@@ -155,6 +130,182 @@ struct TimelineView: View {
         .onChange(of: pendingUndo) { _, _ in undoError = nil }
         .onChange(of: state.sampleCount) { _, _ in reload() }
         .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload() }
+    }
+
+    // MARK: - Day stats
+
+    private static let hhmm: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "HH:mm"; return f
+    }()
+
+    /// Non-idle blocks across all visible tracks, ordered for the agenda list.
+    private var agendaBlocks: [TimelineBlock] {
+        allTracks.flatMap { blocks(for: $0) }
+            .filter { !$0.isIdle }
+            .sorted { $0.startedAt < $1.startedAt }
+    }
+
+    @ViewBuilder
+    private var dayStats: some View {
+        let active = agendaBlocks.reduce(0.0) { $0 + $1.durationSeconds }
+        HStack(spacing: 28) {
+            stat(durationLabel(active), "active today")
+            stat("\(agendaBlocks.count)", "sources")
+            stat("\(allTracks.count)", "tracks")
+        }
+    }
+
+    private func stat(_ value: String, _ label: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value).font(.system(size: 23, weight: .bold)).monospacedDigit()
+            Text(label).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: - Overview strip (the Gantt, capped height)
+
+    private var stripHeight: CGFloat {
+        var h: CGFloat = 8 + rulerHeight + rowSpacing + 12
+        for t in allTracks { h += rowHeight(for: t) + rowSpacing }
+        return h
+    }
+
+    @ViewBuilder
+    private var timelineStrip: some View {
+        GeometryReader { outer in
+            let available = max(outer.size.width - labelColumnWidth - 24, 220)
+            let contentWidth = available * zoom
+
+            HStack(alignment: .top, spacing: 0) {
+                labelColumn
+                    .frame(width: labelColumnWidth + 12, alignment: .leading)
+
+                ScrollView(.horizontal) {
+                    VStack(alignment: .leading, spacing: rowSpacing) {
+                        timeRuler(width: contentWidth)
+                            .frame(width: contentWidth, height: rulerHeight)
+                        ForEach(allTracks, id: \.self) { track in
+                            trackRow(track, blocks: blocks(for: track), width: contentWidth)
+                                .frame(width: contentWidth, height: rowHeight(for: track))
+                        }
+                    }
+                    .padding(.top, 8)
+                    .padding(.trailing, 12)
+                    .padding(.bottom, 12)
+                }
+                .scrollIndicators(.hidden)
+                .background(
+                    TimelineScrollZoom { deltaY in
+                        let factor = pow(1.01, deltaY)
+                        zoom = max(minZoom, min(maxZoom, zoom * factor))
+                    }
+                )
+                .gesture(
+                    MagnifyGesture()
+                        .onChanged { value in
+                            let base = zoomAtPinchStart ?? zoom
+                            if zoomAtPinchStart == nil { zoomAtPinchStart = zoom }
+                            zoom = max(minZoom, min(maxZoom, base * value.magnification))
+                        }
+                        .onEnded { _ in zoomAtPinchStart = nil }
+                )
+            }
+            .padding(8)
+        }
+        .glassCard(radius: 18)
+    }
+
+    // MARK: - Agenda (readable list)
+
+    @ViewBuilder
+    private var agendaSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Timeline · \(dayLabel)")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .textCase(.uppercase)
+            if agendaBlocks.isEmpty {
+                Text("No activity recorded for this day yet.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .padding(.vertical, 12)
+            } else {
+                ForEach(agendaBlocks) { block in
+                    agendaRow(block)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func agendaRow(_ block: TimelineBlock) -> some View {
+        let tint = color(for: block)
+        let attributed = block.attribution.customer != nil
+        HStack(spacing: 14) {
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("\(Self.hhmm.string(from: block.startedAt))–\(Self.hhmm.string(from: block.endedAt))")
+                    .font(.system(size: 12.5, weight: .semibold)).monospacedDigit()
+                    .foregroundStyle(.secondary)
+                Text(durationLabel(block.durationSeconds))
+                    .font(.system(size: 11)).foregroundStyle(.tertiary).monospacedDigit()
+            }
+            .frame(width: 104, alignment: .trailing)
+
+            RoundedRectangle(cornerRadius: 3).fill(tint).frame(width: 4, height: 38)
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(tint.opacity(attributed ? 0.18 : 0.10))
+                Image(systemName: trackIcon(block.track))
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(attributed ? tint : Color.secondary)
+            }
+            .frame(width: 38, height: 38)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(block.title).font(.system(size: 14.5, weight: .semibold)).lineLimit(1)
+                if let sub = block.subtitle {
+                    Text(sub).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 8)
+
+            if attributed {
+                HStack(spacing: 7) {
+                    Circle().fill(tint).frame(width: 10, height: 10)
+                    Text(agendaAttributionLabel(block))
+                        .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.secondary)
+                }
+            } else {
+                Button("Attribute") { agendaBlock = block }
+                    .font(.system(size: 12, weight: .semibold))
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        .glassCard(radius: 16)
+        .contentShape(Rectangle())
+        .onTapGesture { agendaBlock = block }
+        .popover(isPresented: agendaPopoverBinding(block)) {
+            ReattributePopover(block: block,
+                               customers: customers,
+                               projects: projects,
+                               state: state,
+                               onSaved: { agendaBlock = nil; reload() },
+                               onCancel: { agendaBlock = nil },
+                               onIgnored: { event in agendaBlock = nil; stageUndo(event) })
+        }
+    }
+
+    private func agendaPopoverBinding(_ block: TimelineBlock) -> Binding<Bool> {
+        Binding(get: { agendaBlock?.id == block.id },
+                set: { if !$0 { agendaBlock = nil } })
+    }
+
+    private func agendaAttributionLabel(_ block: TimelineBlock) -> String {
+        guard let c = block.attribution.customer else { return "Unattributed" }
+        if let p = block.attribution.project { return "\(c.name) · \(p.name)" }
+        return c.name
     }
 
     // MARK: - Header
