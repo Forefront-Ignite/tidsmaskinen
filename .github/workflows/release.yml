@@ -10,7 +10,10 @@ permissions:
 
 jobs:
   build-and-release:
-    runs-on: macos-15
+    # macOS 26 (Tahoe) runner — required for the macOS 26 SDK that the app's
+    # Liquid Glass APIs (glassEffect, .rect, …) build against. macos-15/Xcode 16
+    # has no macOS 26 SDK and the build fails to compile.
+    runs-on: macos-26
     timeout-minutes: 30
 
     steps:
@@ -21,7 +24,12 @@ jobs:
           ref: main          # we'll push the appcast update back to main
 
       - name: Select latest Xcode
-        run: sudo xcode-select -s /Applications/Xcode_16.4.app || sudo xcode-select -s /Applications/Xcode.app
+        run: |
+          set -euo pipefail
+          # Pick the newest installed Xcode 26.x; fall back to the default symlink.
+          XC=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n1 || true)
+          sudo xcode-select -s "${XC:-/Applications/Xcode.app}"
+          xcodebuild -version
 
       - name: Resolve Swift package dependencies
         run: swift package resolve
