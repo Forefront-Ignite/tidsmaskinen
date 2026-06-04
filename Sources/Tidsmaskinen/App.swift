@@ -5,22 +5,36 @@ import AppKit
 struct TidsmaskinenApp: App {
     @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
     @StateObject private var state = AppState()
+    // Drives the app-wide appearance (Light / Dark / Auto). Stored so it
+    // applies before first paint and persists across launches.
+    @AppStorage(SettingsKey.appearance) private var appearanceRaw = AppTheme.system.rawValue
+
+    private var colorScheme: ColorScheme? {
+        AppTheme(rawValue: appearanceRaw)?.colorScheme
+    }
 
     var body: some Scene {
         MenuBarExtra {
             MenuBarView()
                 .environmentObject(state)
+                .preferredColorScheme(colorScheme)
         } label: {
-            Image(systemName: "clock.badge.checkmark")
+            // Monochrome segmented-clock mark — the design's tray glyph.
+            // Must be a template NSImage; a SwiftUI Canvas doesn't render here.
+            Image(nsImage: AppMark.trayImage)
         }
         .menuBarExtraStyle(.window)
 
         Window("Tidsmaskinen", id: WindowID.main) {
             MainWindowView()
                 .environmentObject(state)
+                .preferredColorScheme(colorScheme)
         }
         .defaultSize(width: 1100, height: 680)
         .windowResizability(.contentMinSize)
+        // Each view renders its own header; hide the system title bar so the
+        // title isn't shown twice and the glass content runs full-height.
+        .windowStyle(.hiddenTitleBar)
         .commands {
             // Wire the standard ⌘, slot to open the main window on the Settings
             // section. This app has no Settings scene (Settings is a sidebar

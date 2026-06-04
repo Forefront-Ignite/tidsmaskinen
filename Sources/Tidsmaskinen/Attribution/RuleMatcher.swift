@@ -85,24 +85,27 @@ struct RuleMatcher {
             let project = sample.projectID.flatMap { projectsByID[$0] }
             return AttributionResult(customer: customer, project: project, matchingRule: nil)
         }
+        // Time-bounded ("this week"/"today") rules only apply to activity within
+        // their window — match against this sample's own capture time.
+        let at = sample.capturedAt
         // Most-specific signals first.
         if let url = sample.gitRemoteURL {
             if let slug = Self.gitSlug(fromRemote: url),
-               let r = match(kind: .gitRepoSlug, against: slug) {
+               let r = match(kind: .gitRepoSlug, against: slug, at: at) {
                 return result(for: r)
             }
             if let host = Self.gitHost(fromRemote: url),
-               let r = match(kind: .gitRemoteHost, against: host) {
+               let r = match(kind: .gitRemoteHost, against: host, at: at) {
                 return result(for: r)
             }
         }
         if let url = sample.chromeURL,
            let normalized = Self.normalizedURL(url),
-           let r = match(kind: .urlPath, against: normalized) {
+           let r = match(kind: .urlPath, against: normalized, at: at) {
             return result(for: r)
         }
         if let host = sample.chromeHost,
-           let r = match(kind: .urlHost, against: host) {
+           let r = match(kind: .urlHost, against: host, at: at) {
             return result(for: r)
         }
         // Slack channel rules: parse the channel out of the Slack window title
@@ -112,15 +115,15 @@ struct RuleMatcher {
         if let bundle = sample.appBundleID?.lowercased(), bundle.contains("slack"),
            let title = sample.windowTitle,
            let channel = MicSession.parseSlackChannel(fromTitle: title),
-           let r = match(kind: .slackChannel, against: channel) {
+           let r = match(kind: .slackChannel, against: channel, at: at) {
             return result(for: r)
         }
         if let title = sample.windowTitle,
-           let r = match(kind: .windowTitle, against: title) {
+           let r = match(kind: .windowTitle, against: title, at: at) {
             return result(for: r)
         }
         if let bundle = sample.appBundleID,
-           let r = match(kind: .appBundleID, against: bundle) {
+           let r = match(kind: .appBundleID, against: bundle, at: at) {
             return result(for: r)
         }
         return .unattributed
@@ -142,13 +145,14 @@ struct RuleMatcher {
             let project = session.projectID.flatMap { projectsByID[$0] }
             return AttributionResult(customer: customer, project: project, matchingRule: nil)
         }
+        let at = session.lastActivityAt ?? session.startedAt
         if let url = session.gitRemoteURL {
             if let slug = Self.gitSlug(fromRemote: url),
-               let r = match(kind: .gitRepoSlug, against: slug) {
+               let r = match(kind: .gitRepoSlug, against: slug, at: at) {
                 return result(for: r)
             }
             if let host = Self.gitHost(fromRemote: url),
-               let r = match(kind: .gitRemoteHost, against: host) {
+               let r = match(kind: .gitRemoteHost, against: host, at: at) {
                 return result(for: r)
             }
         }
@@ -166,7 +170,7 @@ struct RuleMatcher {
             return AttributionResult(customer: customer, project: project, matchingRule: nil)
         }
         if let channel = s.slackChannel,
-           let r = match(kind: .slackChannel, against: channel) {
+           let r = match(kind: .slackChannel, against: channel, at: s.startedAt) {
             return result(for: r)
         }
         return .unattributed
@@ -201,31 +205,53 @@ struct RuleMatcher {
 
     /// Helper for the Discover view: attribute a raw signal value of a given kind without
     /// constructing a fake ActivitySample.
-    func attribute(kind: Rule.Kind, value: String) -> AttributionResult {
-        if let r = match(kind: kind, against: value) {
+    /// `at` defaults to now so time-bounded rules are evaluated for the current
+    /// instant when a call site has no specific timestamp (e.g. the Discover /
+    /// Review "is this attributed?" check reflects whether a window rule is
+    /// active right now).
+    func attribute(kind: Rule.Kind, value: String, at: Date? = nil) -> AttributionResult {
+        let when = at ?? Date()
+        if let r = match(kind: kind, against: value, at: when) {
             return result(for: r)
         }
         // Slug rules also imply remote-host fallback.
         if kind == .gitRepoSlug, let host = value.split(separator: "/").first.map(String.init),
-           let r = match(kind: .gitRemoteHost, against: host) {
+           let r = match(kind: .gitRemoteHost, against: host, at: when) {
             return result(for: r)
         }
         // URL path rules fall back to host rules: `github.com/forefront/foo` → host `github.com`.
         if kind == .urlPath, let host = value.split(separator: "/").first.map(String.init),
-           let r = match(kind: .urlHost, against: host) {
+           let r = match(kind: .urlHost, against: host, at: when) {
             return result(for: r)
         }
         return .unattributed
     }
 
-    private func match(kind: Rule.Kind, against value: String) -> Rule? {
+    private func match(kind: Rule.Kind, against value: String, at date: Date) -> Rule? {
         guard let candidates = rulesByKind[kind] else { return nil }
-        for rule in candidates {
-            if Self.matches(kind: kind, pattern: rule.pattern, value: value) {
-                return rule
-            }
+        let valid = candidates.filter {
+            $0.isValid(at: date) && Self.matches(kind: kind, pattern: $0.pattern, value: value)
         }
-        return nil
+        // Conflict resolution: the most *precise* rule wins. A rule bounded to a
+        // narrow window (today) outranks a wider one (this week), which outranks
+        // a permanent "always" rule — because a bounded rule is a deliberate
+        // override for that period. Ties fall back to priority, then the longer
+        // (more specific) pattern.
+        return valid.min { a, b in
+            let wa = Self.ruleWindow(a), wb = Self.ruleWindow(b)
+            if wa != wb { return wa < wb }
+            if a.priority != b.priority { return a.priority > b.priority }
+            return a.pattern.count > b.pattern.count
+        }
+    }
+
+    /// A rule's time-window size, used to rank specificity. Smaller = more
+    /// precise. Fully-unbounded ("always") is the widest; a half-open bound
+    /// sits between a closed window and "always".
+    private static func ruleWindow(_ r: Rule) -> TimeInterval {
+        if let f = r.validFrom, let t = r.validTo { return max(0, t.timeIntervalSince(f)) }
+        if r.validFrom != nil || r.validTo != nil { return .greatestFiniteMagnitude / 2 }
+        return .greatestFiniteMagnitude
     }
 
     static func matches(kind: Rule.Kind, pattern: String, value: String) -> Bool {

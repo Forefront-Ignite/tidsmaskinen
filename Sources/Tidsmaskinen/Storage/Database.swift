@@ -374,6 +374,17 @@ struct AppDatabase {
                 }
             }
         }
+
+        migrator.registerMigration("v18_rule_validity_window") { db in
+            // Temporary attribution: a rule can be bounded to a time window so
+            // "this week portal.azure.com was customer X" auto-attributes the
+            // rest of that period without permanently mapping the signal.
+            // Both nil = a permanent rule (the default).
+            try db.alter(table: "rules") { t in
+                t.add(column: "validFrom", .datetime)
+                t.add(column: "validTo", .datetime)
+            }
+        }
         try migrator.migrate(dbQueue)
     }
 
@@ -625,6 +636,26 @@ struct AppDatabase {
     func deleteRule(id: String) throws {
         _ = try dbQueue.write { db in
             try Rule.deleteOne(db, key: id)
+        }
+    }
+
+    /// Upsert a rule, replacing only an existing rule with the SAME signal AND
+    /// the SAME validity window. This lets layered rules for one signal coexist
+    /// — e.g. a permanent "always" rule, a "this week" override, and a "today"
+    /// override — so creating one scoped rule never destroys the others. The
+    /// matcher then picks the most precise applicable rule per timestamp.
+    func upsertReplacingWindow(_ rule: Rule) throws {
+        try dbQueue.write { db in
+            let sameWindow = try Rule
+                .filter(Rule.Columns.kind == rule.kind.rawValue
+                        && Rule.Columns.pattern == rule.pattern)
+                .fetchAll(db)
+                .filter { $0.validFrom == rule.validFrom && $0.validTo == rule.validTo }
+            for existing in sameWindow {
+                _ = try Rule.deleteOne(db, key: existing.id)
+            }
+            var r = rule
+            try r.upsert(db)
         }
     }
 

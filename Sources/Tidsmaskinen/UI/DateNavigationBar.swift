@@ -16,7 +16,7 @@ struct DateNavigator: View {
     let prevHelp: String
     let nextHelp: String
     var titleFont: Font = .title3.bold()
-    var titleMinWidth: CGFloat = 200
+    var titleMinWidth: CGFloat = 150
     var nextDisabled: Bool = false
     var nowDisabled: Bool = false
     let onPrev: () -> Void
@@ -31,7 +31,7 @@ struct DateNavigator: View {
 
             Text(title)
                 .font(titleFont)
-                .frame(minWidth: titleMinWidth, alignment: .leading)
+                .frame(minWidth: titleMinWidth, alignment: .center)
 
             Button(action: onNext) { Image(systemName: "chevron.right") }
                 .help(nextHelp)
@@ -161,6 +161,13 @@ enum DateFormatting {
     static let weekdayDayShortMonth: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "EEE d/M"
+        return f
+    }()
+
+    /// e.g. "Mon" — short weekday for chart axes.
+    static let weekdayShort: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE"
         return f
     }()
 }

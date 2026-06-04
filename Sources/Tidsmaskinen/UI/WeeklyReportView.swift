@@ -9,14 +9,16 @@ struct WeeklyReportView: View {
     // user hasn't manually navigated, we snap weekStart forward.
     @State private var lastKnownCurrentWeekStart: Date = Calendar.weekStartingMonday().currentWeekInterval().start
     @State private var report: WeeklyReport?
+    @State private var lastWeekTotal: Double = 0
     @State private var loadError: String?
     @State private var copied: Bool = false
-    @State private var expandedRowID: String?
+    @State private var expandedCustomerID: String?
     @State private var reloadTask: Task<Void, Never>?
-    @State private var contributorAssignTarget: MeetingContributorTarget?
     @State private var customers: [Customer] = []
     @State private var projects: [Project] = []
-    @State private var saveError: String?
+    /// Derived per-customer rollups, recomputed only when the report reloads
+    /// (not on every body evaluation).
+    @State private var summaries: [CustomerSummary] = []
 
     private let calendar = Calendar.weekStartingMonday()
 
@@ -33,7 +35,14 @@ struct WeeklyReportView: View {
             header
             Divider()
             if let report {
-                gridTable(report: report)
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 22) {
+                        heroRow(report)
+                        dayBarsPanel(report)
+                        customerList(report)
+                    }
+                    .padding(28)
+                }
             } else {
                 Spacer()
                 ProgressView().frame(maxWidth: .infinity)
@@ -45,64 +54,43 @@ struct WeeklyReportView: View {
         .onChange(of: weekStart) { _, _ in reload(immediate: true) }
         .onChange(of: state.sampleCount) { _, _ in reload(immediate: false) }
         .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload(immediate: true) }
-        .sheet(item: $contributorAssignTarget) { target in
-            AssignmentSheet(
-                title: "Attribute meeting",
-                subtitle: assignmentSubtitle(for: target),
-                customers: customers,
-                projects: projects,
-                onCreateCustomer: { name in try state.database.createLocalCustomer(name: name) },
-                onCreateProject: { customerID, name in try state.database.createLocalProject(customerID: customerID, name: name) },
-                onSave: { customerID, projectID in
-                    saveMeetingContributor(target, customerID: customerID, projectID: projectID)
-                },
-                initialCustomerID: target.initialCustomerID,
-                initialProjectID: target.initialProjectID
-            )
-        }
-        .alert("Couldn't save attribution", isPresented: saveErrorBinding) {
-            Button("OK") { saveError = nil }
-        } message: { Text(saveError ?? "") }
     }
 
-    private var saveErrorBinding: Binding<Bool> {
-        Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })
-    }
+    // MARK: - Header
 
     @ViewBuilder
     private var header: some View {
         HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Weekly report")
+                    .font(.system(size: 24, weight: .bold))
+                Text(weekTitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if report != nil {
+                Button {
+                    if let report { copyTSV(report) }
+                } label: {
+                    Label(copied ? "Copied!" : "Copy as TSV", systemImage: copied ? "checkmark" : "doc.on.doc")
+                }
+                .buttonStyle(.bordered)
+            }
             DateNavigator(
-                title: weekTitle,
+                title: weekStart == calendar.currentWeekInterval().start ? "This week" : weekTitle,
                 nowLabel: "This week",
                 prevHelp: "Previous week",
                 nextHelp: "Next week",
-                titleMinWidth: 220,
+                titleMinWidth: 150,
                 nowDisabled: weekStart == calendar.currentWeekInterval().start,
                 onPrev: { weekStart = calendar.date(byAdding: .day, value: -7, to: weekStart) ?? weekStart },
                 onNext: { weekStart = calendar.date(byAdding: .day, value: 7, to: weekStart) ?? weekStart },
                 onNow: { weekStart = calendar.currentWeekInterval().start }
             )
-            Spacer()
-            if let report {
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("Total: \(WeeklyReport.formatHours(report.grandTotal).ifEmpty("0.00")) h")
-                        .foregroundStyle(.secondary)
-                    if report.unattributedTotal > 0 {
-                        Text("+ \(WeeklyReport.formatHours(report.unattributedTotal)) h unattributed")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                Button {
-                    copyTSV(report)
-                } label: {
-                    Label(copied ? "Copied!" : "Copy as TSV", systemImage: copied ? "checkmark" : "doc.on.doc")
-                }
-            }
         }
-        .padding(.horizontal)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 28)
+        .padding(.vertical, 14)
     }
 
     private var weekTitle: String {
@@ -110,179 +98,356 @@ struct WeeklyReportView: View {
         return "\(DateFormatting.dayMonth.string(from: weekStart)) – \(DateFormatting.dayMonth.string(from: endDate)) \(DateFormatting.year.string(from: weekStart))"
     }
 
-    // Hand-rolled column layout. Conditional `GridRow`s inside `ForEach`
-    // inside `Grid` caused hit-test indexing to drift — tapping visual row 2
-    // could fire the gesture attached to row 3, and the "Show more" button
-    // inside the conditional detail row swallowed clicks. HStacks with fixed
-    // column widths give predictable hit testing and a single tap target per
-    // row.
-    private static let dateColumnWidth: CGFloat = 72
-    private static let totalColumnWidth: CGFloat = 76
-    private static let cellHPadding: CGFloat = 9
-    private static let cellVPadding: CGFloat = 4
+    // MARK: - Hero
 
     @ViewBuilder
-    private func gridTable(report: WeeklyReport) -> some View {
-        // Header (day columns) and the grand-total row are pinned via section
-        // header/footer so they stay legible while a long report scrolls — both
-        // live inside the same ScrollView as the rows, so their fixed columns
-        // line up regardless of scroll-bar width.
-        ScrollView(.vertical) {
-            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders, .sectionFooters]) {
-                Section {
-                    if report.rows.isEmpty {
-                        Text("No activity this week.")
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, Self.cellHPadding)
-                            .padding(.vertical, Self.cellVPadding)
-                    }
+    private func heroRow(_ report: WeeklyReport) -> some View {
+        let grand = report.grandTotal
+        let attr = report.grandTotal
+        let un = report.unattributedTotal
+        let total = grand + un
+        let attrPct = total > 0 ? attr / total * 100 : 0
+        let delta = grand - lastWeekTotal
 
-                    ForEach(report.rows) { row in
-                        dataRow(row)
-                        if expandedRowID == row.id, let breakdown = report.breakdownsByRowID[row.id] {
-                            WeeklyReportRowDetailView(
-                                breakdown: breakdown,
-                                weekDays: days,
-                                rowColor: Color(hex: row.color) ?? .blue,
-                                onAssignMeetingContributor: { contributor in
-                                    openContributorAssignSheet(
-                                        contributor,
-                                        fromRowID: row.id
-                                    )
+        HStack(alignment: .top, spacing: 18) {
+            // Tracked this week
+            VStack(alignment: .leading, spacing: 8) {
+                Text("TRACKED THIS WEEK")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                HStack(alignment: .firstTextBaseline, spacing: 2) {
+                    Text(oneDecimal(grand))
+                        .font(.system(size: 44, weight: .heavy, design: .rounded))
+                    Text("h").font(.system(size: 22, weight: .bold)).foregroundStyle(.tertiary)
+                }
+                Label {
+                    Text("\(delta >= 0 ? "+" : "")\(oneDecimal(delta))h vs last week")
+                } icon: {
+                    Image(systemName: delta >= 0 ? "arrow.up.right" : "arrow.down.right")
+                }
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(delta >= 0 ? TM.positive : Color.secondary)
+            }
+            .padding(22)
+            .frame(width: 240, alignment: .leading)
+            .glassCard()
+
+            // Attribution
+            VStack(alignment: .leading, spacing: 0) {
+                Text("ATTRIBUTION")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("\(Text(hLabel(attr)).foregroundStyle(TM.accent).bold()) attributed · \(hLabel(un)) to go")
+                    .font(.system(size: 17, weight: .semibold))
+                    .padding(.top, 6)
+
+                attributionMeter(report, total: total)
+                    .padding(.top, 16)
+
+                HStack(spacing: 16) {
+                    legendDot(TM.accent, "\(Int(attrPct.rounded()))% attributed")
+                    legendDot(Color.secondary.opacity(0.4), "\(Int((100 - attrPct).rounded()))% unattributed")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 12)
+
+                Spacer(minLength: 14)
+
+                HStack(spacing: 12) {
+                    if un > 0 {
+                        Button {
+                            state.selectedSection = .review
+                        } label: {
+                            Label("Review unattributed", systemImage: "sparkles")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Text("Attribute open time to fill the gap")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Label("All attributed", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(TM.positive).font(.system(size: 13, weight: .semibold))
+                        Text("Nothing left to review this week ✨")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(22)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .glassCard()
+        }
+    }
+
+    @ViewBuilder
+    private func attributionMeter(_ report: WeeklyReport, total: Double) -> some View {
+        GeometryReader { geo in
+            HStack(spacing: 0) {
+                ForEach(summaries) { c in
+                    Rectangle()
+                        .fill(c.color)
+                        .frame(width: total > 0 ? geo.size.width * (c.total / total) : 0)
+                }
+                Rectangle()
+                    .fill(hatch)
+                    .frame(width: total > 0 ? geo.size.width * (report.unattributedTotal / total) : 0)
+            }
+        }
+        .frame(height: 14)
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+
+    private func legendDot(_ color: Color, _ text: String) -> some View {
+        HStack(spacing: 6) {
+            Circle().fill(color).frame(width: 9, height: 9)
+            Text(text)
+        }
+    }
+
+    // MARK: - Day bars
+
+    @ViewBuilder
+    private func dayBarsPanel(_ report: WeeklyReport) -> some View {
+        let summaries = self.summaries
+        let grandPerDay = (0..<7).map { report.dayTotals[$0] + report.unattributedPerDay[$0] }
+        let maxDay = max(grandPerDay.max() ?? 1, 0.0001)
+
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Hours by day").font(.system(size: 15, weight: .bold))
+                Spacer()
+                Text("stacked by customer").font(.caption).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 22).padding(.top, 18).padding(.bottom, 8)
+
+            HStack(alignment: .bottom, spacing: 14) {
+                ForEach(Array(days.enumerated()), id: \.offset) { i, day in
+                    let tot = grandPerDay[i]
+                    VStack(spacing: 8) {
+                        GeometryReader { geo in
+                            VStack(spacing: 0) {
+                                Spacer(minLength: 0)
+                                VStack(spacing: 0) {
+                                    if tot > 0 {
+                                        ForEach(summaries) { c in
+                                            if c.perDay[i] > 0 {
+                                                Rectangle().fill(c.color)
+                                                    .frame(height: geo.size.height * (tot / maxDay) * (c.perDay[i] / tot))
+                                            }
+                                        }
+                                        if report.unattributedPerDay[i] > 0 {
+                                            Rectangle().fill(hatch)
+                                                .frame(height: geo.size.height * (tot / maxDay) * (report.unattributedPerDay[i] / tot))
+                                        }
+                                    }
                                 }
-                            )
-                            .padding(.bottom, 6)
+                                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            }
+                        }
+                        .frame(maxWidth: 46)
+                        Text(DateFormatting.weekdayShort.string(from: day))
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text(tot > 0 ? oneDecimal(tot) : "–")
+                            .font(.system(size: 11)).foregroundStyle(.tertiary).monospacedDigit()
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .frame(height: 210)
+            .padding(.horizontal, 22).padding(.bottom, 16)
+        }
+        .glassCard()
+    }
+
+    // MARK: - Customer list
+
+    @ViewBuilder
+    private func customerList(_ report: WeeklyReport) -> some View {
+        let summaries = self.summaries
+        let grand = report.grandTotal + report.unattributedTotal
+
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 0) {
+                Text("CUSTOMER").frame(maxWidth: .infinity, alignment: .leading)
+                Text("THIS WEEK").frame(width: 120, alignment: .leading)
+                Text("HOURS").frame(width: 66, alignment: .trailing)
+                Text("SHARE").frame(width: 60, alignment: .trailing)
+                Spacer().frame(width: 24)
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 8)
+
+            ForEach(summaries) { c in
+                customerRow(c, grand: grand)
+            }
+
+            if report.unattributedTotal > 0 {
+                unattributedRow(report, grand: grand)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func customerRow(_ c: CustomerSummary, grand: Double) -> some View {
+        let isOpen = expandedCustomerID == c.id
+        let share = grand > 0 ? Int((c.total / grand * 100).rounded()) : 0
+        let maxDay = max(c.perDay.max() ?? 1, 0.0001)
+
+        VStack(spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    expandedCustomerID = isOpen ? nil : c.id
+                }
+            } label: {
+                HStack(spacing: 15) {
+                    ColorDot(color: c.color, size: 13, square: true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(c.name).font(.system(size: 14.5, weight: .semibold))
+                        Text("\(c.projects.count) \(c.projects.count == 1 ? "project" : "projects")")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    // sparkline
+                    HStack(alignment: .bottom, spacing: 3) {
+                        ForEach(0..<7, id: \.self) { i in
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(c.color.opacity(c.perDay[i] > 0 ? 0.92 : 0.18))
+                                .frame(width: 7, height: max(3, 30 * (c.perDay[i] / maxDay)))
                         }
                     }
-                } header: {
-                    VStack(spacing: 0) {
-                        headerRow
-                        Divider().padding(.top, 4)
+                    .frame(height: 30)
+                    Text(hLabel(c.total)).font(.system(size: 15, weight: .bold)).monospacedDigit()
+                        .frame(width: 66, alignment: .trailing)
+                    Text("\(share)%").font(.caption).foregroundStyle(.tertiary).monospacedDigit()
+                        .frame(width: 60, alignment: .trailing)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(isOpen ? 90 : 0))
+                        .frame(width: 24)
+                }
+                .padding(.horizontal, 18).padding(.vertical, 14)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isOpen {
+                VStack(spacing: 0) {
+                    ForEach(Array(c.projects.enumerated()), id: \.offset) { _, p in
+                        HStack(spacing: 12) {
+                            Text(p.name).font(.system(size: 13)).foregroundStyle(.secondary)
+                            GeometryReader { geo in
+                                Capsule().fill(c.color)
+                                    .frame(width: c.total > 0 ? geo.size.width * (p.hours / c.total) : 0, height: 6)
+                                    .frame(maxHeight: .infinity, alignment: .center)
+                            }
+                            .frame(height: 6)
+                            Text(hLabel(p.hours)).font(.system(size: 13, weight: .semibold)).monospacedDigit()
+                                .frame(width: 54, alignment: .trailing)
+                        }
+                        .padding(.leading, 46).padding(.trailing, 18).padding(.vertical, 9)
+                        Divider().opacity(0.4)
                     }
-                    .padding(.bottom, 4)
-                    .background(.bar)
-                } footer: {
-                    VStack(spacing: 0) {
-                        Divider().padding(.bottom, 4)
-                        totalRow(report: report)
-                    }
-                    .padding(.top, 4)
-                    .background(.bar)
                 }
             }
-            .padding()
         }
+        .glassCard(radius: 16)
     }
 
     @ViewBuilder
-    private var headerRow: some View {
-        HStack(spacing: 0) {
-            Text("Customer")
-                .font(.caption.bold())
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, Self.cellHPadding)
-                .padding(.vertical, Self.cellVPadding)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            ForEach(Array(days.enumerated()), id: \.offset) { _, day in
-                Text(dayHeader(day))
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, Self.cellHPadding)
-                    .padding(.vertical, Self.cellVPadding)
-                    .frame(width: Self.dateColumnWidth, alignment: .trailing)
-            }
-            Text("Total")
-                .font(.caption.bold())
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, Self.cellHPadding)
-                .padding(.vertical, Self.cellVPadding)
-                .frame(width: Self.totalColumnWidth, alignment: .trailing)
-        }
-    }
-
-    @ViewBuilder
-    private func dataRow(_ row: WeeklyReport.Row) -> some View {
-        // A Button (not a bare tap gesture) so the row is keyboard-focusable
-        // and reads as an expandable control to VoiceOver.
+    private func unattributedRow(_ report: WeeklyReport, grand: Double) -> some View {
+        let un = report.unattributedTotal
+        let share = grand > 0 ? Int((un / grand * 100).rounded()) : 0
         Button {
-            toggleExpansion(row.id)
+            state.selectedSection = .review
         } label: {
-            HStack(spacing: 0) {
-                HStack(spacing: 6) {
-                    Image(systemName: expandedRowID == row.id ? "chevron.down" : "chevron.right")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 10)
-                    Circle()
-                        .fill(Color(hex: row.color) ?? .blue)
-                        .frame(width: 10, height: 10)
-                    Text(row.label)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 0)
+            HStack(spacing: 15) {
+                RoundedRectangle(cornerRadius: 4).fill(hatch).frame(width: 13, height: 13)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Unattributed").font(.system(size: 14.5, weight: .semibold))
+                    Text("Review to fill the gap").font(.caption).foregroundStyle(.secondary)
                 }
-                .padding(.horizontal, Self.cellHPadding)
-                .padding(.vertical, Self.cellVPadding)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                ForEach(0..<7, id: \.self) { i in
-                    Text(WeeklyReport.formatHours(row.perDayHours[i]))
-                        .monospacedDigit()
-                        .foregroundStyle(row.perDayHours[i] == 0 ? Color.secondary : Color.primary)
-                        .padding(.horizontal, Self.cellHPadding)
-                        .padding(.vertical, Self.cellVPadding)
-                        .frame(width: Self.dateColumnWidth, alignment: .trailing)
-                }
-                Text(WeeklyReport.formatHours(row.totalHours))
-                    .monospacedDigit()
-                    .bold()
-                    .padding(.horizontal, Self.cellHPadding)
-                    .padding(.vertical, Self.cellVPadding)
-                    .frame(width: Self.totalColumnWidth, alignment: .trailing)
+                Spacer()
+                Text(hLabel(un)).font(.system(size: 15, weight: .bold)).monospacedDigit()
+                    .frame(width: 66, alignment: .trailing)
+                Text("\(share)%").font(.caption).foregroundStyle(.tertiary).monospacedDigit()
+                    .frame(width: 60, alignment: .trailing)
+                Image(systemName: "arrow.right").font(.caption.weight(.semibold)).foregroundStyle(TM.accent)
+                    .frame(width: 24)
             }
+            .padding(.horizontal, 18).padding(.vertical, 14)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityHint(expandedRowID == row.id ? "Collapse daily breakdown" : "Expand daily breakdown")
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            .foregroundStyle(.tertiary))
     }
 
-    @ViewBuilder
-    private func totalRow(report: WeeklyReport) -> some View {
-        HStack(spacing: 0) {
-            Text("Total")
-                .bold()
-                .padding(.horizontal, Self.cellHPadding)
-                .padding(.vertical, Self.cellVPadding)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            ForEach(0..<7, id: \.self) { i in
-                Text(WeeklyReport.formatHours(report.dayTotals[i]))
-                    .monospacedDigit()
-                    .bold()
-                    .padding(.horizontal, Self.cellHPadding)
-                    .padding(.vertical, Self.cellVPadding)
-                    .frame(width: Self.dateColumnWidth, alignment: .trailing)
+    // MARK: - Derived per-customer summaries
+
+    struct CustomerSummary: Identifiable {
+        let id: String          // customerID
+        let name: String
+        let color: Color
+        var perDay: [Double]
+        var projects: [(name: String, hours: Double)]
+        var total: Double { perDay.reduce(0, +) }
+    }
+
+    private func computeCustomerSummaries(_ report: WeeklyReport) -> [CustomerSummary] {
+        let customersByID = Dictionary(uniqueKeysWithValues: customers.map { ($0.id, $0) })
+        let projectsByID = Dictionary(uniqueKeysWithValues: projects.map { ($0.id, $0) })
+        var byCustomer: [String: CustomerSummary] = [:]
+        var order: [String] = []
+
+        for row in report.rows {
+            let parts = row.id.split(separator: "/", maxSplits: 1).map(String.init)
+            let cid = parts[0]
+            let projectID = parts.count > 1 ? parts[1] : nil
+            if byCustomer[cid] == nil {
+                let cust = customersByID[cid]
+                byCustomer[cid] = CustomerSummary(
+                    id: cid,
+                    name: cust?.name ?? row.label.components(separatedBy: " · ").first ?? cid,
+                    color: Color(hex: cust?.displayColor ?? row.color) ?? .blue,
+                    perDay: Array(repeating: 0, count: 7),
+                    projects: []
+                )
+                order.append(cid)
             }
-            Text(WeeklyReport.formatHours(report.grandTotal))
-                .monospacedDigit()
-                .bold()
-                .padding(.horizontal, Self.cellHPadding)
-                .padding(.vertical, Self.cellVPadding)
-                .frame(width: Self.totalColumnWidth, alignment: .trailing)
+            for d in 0..<7 { byCustomer[cid]!.perDay[d] += row.perDayHours[d] }
+            let projName = projectID.flatMap { projectsByID[$0]?.name } ?? "No project"
+            byCustomer[cid]!.projects.append((projName, row.totalHours))
         }
+
+        for cid in order {
+            byCustomer[cid]!.projects.sort { $0.hours > $1.hours }
+        }
+        return order.map { byCustomer[$0]! }.sorted { $0.total > $1.total }
     }
 
-    private func dayHeader(_ date: Date) -> String {
-        DateFormatting.weekdayDayShortMonth.string(from: date)
+    // MARK: - Formatting
+
+    private func oneDecimal(_ h: Double) -> String { String(format: "%.1f", h) }
+
+    /// Compact hours label: trims a trailing ".0" (e.g. "12h", "12.5h").
+    private func hLabel(_ h: Double) -> String {
+        let r = (h * 10).rounded() / 10
+        if r == r.rounded() { return String(format: "%.0fh", r) }
+        return String(format: "%.1fh", r)
     }
+
+    private var hatch: Color { Color.secondary.opacity(0.28) }
+
+    // MARK: - Reload
 
     /// Schedule a reload. `immediate` reloads run as soon as possible (week
     /// navigation, calendar sync). Non-immediate reloads are debounced so the
     /// 15s sample-count tick doesn't re-query and re-dedup the entire week
     /// every time a single sample lands.
     private func reload(immediate: Bool) {
-        // Snap the displayed week forward if the wall clock rolled into a new
-        // week while the window was open AND the user hasn't navigated away
-        // from the previously-current week.
         let currentWeek = calendar.currentWeekInterval().start
         if currentWeek != lastKnownCurrentWeekStart {
             if weekStart == lastKnownCurrentWeekStart {
@@ -294,6 +459,10 @@ struct WeeklyReportView: View {
         reloadTask?.cancel()
         let database = state.database
         let weekValue = week
+        let prevWeek = DateInterval(
+            start: calendar.date(byAdding: .day, value: -7, to: weekStart) ?? weekStart,
+            end: weekStart
+        )
         let sampleInterval = AppSettings.sampleIntervalSeconds
         let idleThresholdMinutes = AppSettings.claudeIdleThresholdMinutes
         let debounceNs: UInt64 = immediate ? 0 : 1_500_000_000
@@ -305,120 +474,45 @@ struct WeeklyReportView: View {
             }
             do {
                 let computed = try await Task.detached(priority: .userInitiated) { () -> ReloadPayload in
-                    let samples = try database.samples(in: weekValue)
-                    let rawEvents = try database.calendarEvents(in: weekValue)
-                    let micSessions = try database.micSessions(in: weekValue)
-                    let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions)
-                    let sessions = try database.sessions(in: weekValue)
-                    let claudeDeltas = try database.claudeActiveDeltas(in: weekValue)
                     let matcher = try RuleMatcher.load(from: database)
-                    let report = WeeklyReport.compute(
-                        week: weekValue,
-                        samples: samples,
-                        events: events,
-                        sessions: sessions,
-                        claudeDeltas: claudeDeltas,
-                        idleThresholdSeconds: TimeInterval(idleThresholdMinutes * 60),
-                        matcher: matcher,
-                        sampleIntervalSeconds: sampleInterval
-                    )
+
+                    func computeWeek(_ interval: DateInterval) throws -> WeeklyReport {
+                        let samples = try database.samples(in: interval)
+                        let rawEvents = try database.calendarEvents(in: interval)
+                        let micSessions = try database.micSessions(in: interval)
+                        let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions)
+                        let sessions = try database.sessions(in: interval)
+                        let claudeDeltas = try database.claudeActiveDeltas(in: interval)
+                        return WeeklyReport.compute(
+                            week: interval,
+                            samples: samples,
+                            events: events,
+                            sessions: sessions,
+                            claudeDeltas: claudeDeltas,
+                            idleThresholdSeconds: TimeInterval(idleThresholdMinutes * 60),
+                            matcher: matcher,
+                            sampleIntervalSeconds: sampleInterval
+                        )
+                    }
+
+                    let report = try computeWeek(weekValue)
+                    let prev = try computeWeek(prevWeek)
                     let customers = try database.allCustomers()
                     let projects = try database.allProjects()
-                    return ReloadPayload(report: report, customers: customers, projects: projects)
+                    return ReloadPayload(report: report, lastWeekTotal: prev.grandTotal,
+                                         customers: customers, projects: projects)
                 }.value
                 if Task.isCancelled { return }
                 self.report = computed.report
+                self.lastWeekTotal = computed.lastWeekTotal
                 self.customers = computed.customers
                 self.projects = computed.projects
+                self.summaries = computeCustomerSummaries(computed.report)
                 self.loadError = nil
             } catch {
                 if Task.isCancelled { return }
                 self.loadError = error.localizedDescription
             }
-        }
-    }
-
-    private func toggleExpansion(_ rowID: String) {
-        withAnimation(.easeInOut(duration: 0.18)) {
-            expandedRowID = expandedRowID == rowID ? nil : rowID
-        }
-    }
-
-    // MARK: - Meeting reattribution
-
-    /// Sheet payload identifying the meeting occurrences to reattribute. When
-    /// every contributing event lives under a single recurring series, the
-    /// sheet writes a series-level rule (so future occurrences inherit the
-    /// attribution too). One-offs and mixed-source sets fall back to per-event
-    /// overrides on each contributing event ID.
-    fileprivate struct MeetingContributorTarget: Identifiable {
-        let id: String   // contributor.id; stable per (row, contributor)
-        let label: String
-        let eventIDs: [String]
-        let seriesMasterIDs: [String]
-        let initialCustomerID: String
-        let initialProjectID: String
-
-        var canApplyToSeries: Bool { seriesMasterIDs.count == 1 }
-        var seriesMasterID: String? { seriesMasterIDs.first }
-    }
-
-    private func openContributorAssignSheet(
-        _ contributor: WeeklyReport.Breakdown.Contributor,
-        fromRowID rowID: String
-    ) {
-        guard contributor.isMeeting else { return }
-        let (initialCustomerID, initialProjectID) = parseRowID(rowID)
-        contributorAssignTarget = MeetingContributorTarget(
-            id: "\(rowID)::\(contributor.id)",
-            label: contributor.label,
-            eventIDs: contributor.meetingEventIDs,
-            seriesMasterIDs: contributor.meetingSeriesIDs,
-            initialCustomerID: initialCustomerID,
-            initialProjectID: initialProjectID
-        )
-    }
-
-    private func parseRowID(_ rowID: String) -> (String, String) {
-        if rowID == WeeklyReport.unattributedID { return ("", "") }
-        let parts = rowID.split(separator: "/", maxSplits: 1).map(String.init)
-        let customerID = parts[0]
-        let projectID = parts.count > 1 ? parts[1] : ""
-        return (customerID, projectID)
-    }
-
-    private func assignmentSubtitle(for target: MeetingContributorTarget) -> String {
-        if target.canApplyToSeries {
-            return "\(target.label) · applies to the entire series"
-        }
-        let count = target.eventIDs.count
-        let suffix = count == 1 ? "occurrence this week" : "occurrences this week"
-        return "\(target.label) · \(count) \(suffix)"
-    }
-
-    private func saveMeetingContributor(_ target: MeetingContributorTarget,
-                                        customerID: String,
-                                        projectID: String?) {
-        do {
-            if let seriesID = target.seriesMasterID, target.canApplyToSeries {
-                try state.database.setMeetingSeriesAttribution(
-                    seriesID: seriesID,
-                    customerID: customerID,
-                    projectID: projectID,
-                    isIgnored: false
-                )
-            } else {
-                for eventID in target.eventIDs {
-                    try state.database.setCalendarEventAttribution(
-                        eventID: eventID,
-                        customerID: customerID,
-                        projectID: projectID
-                    )
-                }
-            }
-            reload(immediate: true)
-        } catch {
-            saveError = error.localizedDescription
         }
     }
 
@@ -436,6 +530,7 @@ struct WeeklyReportView: View {
 
 private struct ReloadPayload {
     let report: WeeklyReport
+    let lastWeekTotal: Double
     let customers: [Customer]
     let projects: [Project]
 }
