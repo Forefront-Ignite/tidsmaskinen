@@ -49,7 +49,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.commandCenterEnabled) private var commandCenterEnabled: Bool = true
     @AppStorage(SettingsKey.commandCenterBaseURL) private var commandCenterBaseURL: String = ""
     @AppStorage(SettingsKey.appearance) private var appearanceRaw: String = AppTheme.system.rawValue
-    @AppStorage(SettingsKey.reviewMinMinutes) private var reviewMinMinutes: Int = 1
+    @AppStorage(SettingsKey.reviewMinMinutes) private var reviewMinMinutes: Int = 5
     @State private var launchAtLogin: Bool = LoginItemManager.isEnabled
     @State private var loginItemError: String?
     @State private var commandCenterTokenInput: String = ""
@@ -275,7 +275,7 @@ struct SettingsView: View {
                     Text(reviewMinMinutes == 0 ? "off" : "\(reviewMinMinutes) min").monospacedDigit()
                 }
             }
-            Text("Items shorter than this are hidden from Review and Discover (0 shows everything). Default 1 min filters out flicker.")
+            Text("Items shorter than this are hidden from Review and Discover (0 shows everything). Default 5 min filters out short bursts.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

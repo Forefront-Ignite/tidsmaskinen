@@ -11,6 +11,7 @@ struct MenuBarView: View {
 
     @State private var report: WeeklyReport?
     @State private var customers: [Customer] = []
+    @State private var backlogCount: Int = 0
     @State private var reloadTask: Task<Void, Never>?
 
     var body: some View {
@@ -46,7 +47,6 @@ struct MenuBarView: View {
 
     private var glanceCard: some View {
         let grand = report?.grandTotal ?? 0
-        let un = report?.unattributedTotal ?? 0
         return VStack(alignment: .leading, spacing: 11) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text("\(oneDecimal(grand))\(Text("h").foregroundStyle(.secondary))")
@@ -61,7 +61,7 @@ struct MenuBarView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                Text(un > 0 ? "\(oneDecimal(un))h to attribute" : "all attributed")
+                Text(backlogCount > 0 ? "\(backlogCount) to review" : "all reviewed")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }
@@ -176,8 +176,9 @@ struct MenuBarView: View {
         let week = cal.currentWeekInterval()
         let sampleInterval = AppSettings.sampleIntervalSeconds
         let idleMinutes = AppSettings.claudeIdleThresholdMinutes
+        let reviewMinMinutes = AppSettings.reviewMinMinutes
         reloadTask = Task { @MainActor in
-            let result = try? await Task.detached(priority: .utility) { () -> (WeeklyReport, [Customer]) in
+            let result = try? await Task.detached(priority: .utility) { () -> (WeeklyReport, [Customer], Int) in
                 let samples = try db.samples(in: week)
                 let rawEvents = try db.calendarEvents(in: week)
                 let micSessions = try db.micSessions(in: week)
@@ -189,12 +190,18 @@ struct MenuBarView: View {
                     week: week, samples: samples, events: events, sessions: sessions,
                     claudeDeltas: deltas, idleThresholdSeconds: TimeInterval(idleMinutes * 60),
                     matcher: matcher, sampleIntervalSeconds: sampleInterval)
-                return (report, try db.allCustomers())
+                let backlog = (try? ReviewQueue.build(
+                    database: db, interval: week,
+                    sampleIntervalSeconds: sampleInterval,
+                    idleThresholdSeconds: TimeInterval(idleMinutes * 60),
+                    minMinutes: reviewMinMinutes)) ?? []
+                return (report, try db.allCustomers(), backlog.count)
             }.value
             if Task.isCancelled { return }
             if let result {
                 self.report = result.0
                 self.customers = result.1
+                self.backlogCount = result.2
             }
         }
     }

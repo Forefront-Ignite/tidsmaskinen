@@ -19,6 +19,12 @@ struct WeeklyReportView: View {
     /// Derived per-customer rollups, recomputed only when the report reloads
     /// (not on every body evaluation).
     @State private var summaries: [CustomerSummary] = []
+    /// The review backlog for this week — the actionable items the Review screen
+    /// would show. Drives the hero's "things worth reviewing" indicator so it
+    /// only nags when there's genuine work (not for ambient app/sub-threshold
+    /// time, which is tracked but not reviewable).
+    @State private var backlogCount: Int = 0
+    @State private var backlogHours: Double = 0
 
     private let calendar = Calendar.weekStartingMonday()
 
@@ -103,10 +109,6 @@ struct WeeklyReportView: View {
     @ViewBuilder
     private func heroRow(_ report: WeeklyReport) -> some View {
         let grand = report.grandTotal
-        let attr = report.grandTotal
-        let un = report.unattributedTotal
-        let total = grand + un
-        let attrPct = total > 0 ? attr / total * 100 : 0
         let delta = grand - lastWeekTotal
 
         HStack(alignment: .top, spacing: 18) {
@@ -132,75 +134,47 @@ struct WeeklyReportView: View {
             .frame(width: 240, alignment: .leading)
             .glassCard()
 
-            // Attribution
+            // Review backlog — only flags genuinely actionable items (the same
+            // pool the Review screen shows). Ambient app/sub-threshold time is
+            // tracked but not a review to-do, so it never appears here.
             VStack(alignment: .leading, spacing: 0) {
                 Text("ATTRIBUTION")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
-                Text("\(Text(hLabel(attr)).foregroundStyle(TM.accent).bold()) attributed · \(hLabel(un)) to go")
-                    .font(.system(size: 17, weight: .semibold))
-                    .padding(.top, 6)
 
-                attributionMeter(report, total: total)
-                    .padding(.top, 16)
+                if backlogCount > 0 {
+                    Text("\(Text("\(backlogCount)").foregroundStyle(TM.accent).bold()) \(backlogCount == 1 ? "thing" : "things") worth reviewing · \(hLabel(backlogHours))")
+                        .font(.system(size: 17, weight: .semibold))
+                        .padding(.top, 6)
 
-                HStack(spacing: 16) {
-                    legendDot(TM.accent, "\(Int(attrPct.rounded()))% attributed")
-                    legendDot(Color.secondary.opacity(0.4), "\(Int((100 - attrPct).rounded()))% unattributed")
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.top, 12)
+                    Spacer(minLength: 14)
 
-                Spacer(minLength: 14)
-
-                HStack(spacing: 12) {
-                    if un > 0 {
+                    HStack(spacing: 12) {
                         Button {
                             state.selectedSection = .review
                         } label: {
                             Label("Review unattributed", systemImage: "sparkles")
                         }
                         .buttonStyle(.borderedProminent)
-                        Text("Attribute open time to fill the gap")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        Label("All attributed", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(TM.positive).font(.system(size: 13, weight: .semibold))
-                        Text("Nothing left to review this week ✨")
+                        Text("Attribute open time so it lands in the report")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                } else {
+                    Text("Everything captured has a home")
+                        .font(.system(size: 17, weight: .semibold))
+                        .padding(.top, 6)
+
+                    Spacer(minLength: 14)
+
+                    Label("All reviewed", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(TM.positive).font(.system(size: 13, weight: .semibold))
+                    Text("Nothing left to attribute. Your report is ready.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
             .padding(22)
             .frame(maxWidth: .infinity, alignment: .leading)
             .glassCard()
-        }
-    }
-
-    @ViewBuilder
-    private func attributionMeter(_ report: WeeklyReport, total: Double) -> some View {
-        GeometryReader { geo in
-            HStack(spacing: 0) {
-                ForEach(summaries) { c in
-                    Rectangle()
-                        .fill(c.color)
-                        .frame(width: total > 0 ? geo.size.width * (c.total / total) : 0)
-                }
-                Rectangle()
-                    .fill(hatch)
-                    .frame(width: total > 0 ? geo.size.width * (report.unattributedTotal / total) : 0)
-            }
-        }
-        .frame(height: 14)
-        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-        .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-    }
-
-    private func legendDot(_ color: Color, _ text: String) -> some View {
-        HStack(spacing: 6) {
-            Circle().fill(color).frame(width: 9, height: 9)
-            Text(text)
         }
     }
 
@@ -354,31 +328,28 @@ struct WeeklyReportView: View {
         .glassCard(radius: 16)
     }
 
+    /// Where-the-time-went accounting for time that matched no customer rule —
+    /// mostly app activity that can't be pinned to one customer. Informational,
+    /// not a to-do: the hero's review backlog is the actionable surface, so this
+    /// row no longer links to Review (most of it isn't reviewable).
     @ViewBuilder
     private func unattributedRow(_ report: WeeklyReport, grand: Double) -> some View {
         let un = report.unattributedTotal
         let share = grand > 0 ? Int((un / grand * 100).rounded()) : 0
-        Button {
-            state.selectedSection = .review
-        } label: {
-            HStack(spacing: 15) {
-                RoundedRectangle(cornerRadius: 4).fill(hatch).frame(width: 13, height: 13)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Unattributed").font(.system(size: 14.5, weight: .semibold))
-                    Text("Review to fill the gap").font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Text(hLabel(un)).font(.system(size: 15, weight: .bold)).monospacedDigit()
-                    .frame(width: 66, alignment: .trailing)
-                Text("\(share)%").font(.caption).foregroundStyle(.tertiary).monospacedDigit()
-                    .frame(width: 60, alignment: .trailing)
-                Image(systemName: "arrow.right").font(.caption.weight(.semibold)).foregroundStyle(TM.accent)
-                    .frame(width: 24)
+        HStack(spacing: 15) {
+            RoundedRectangle(cornerRadius: 4).fill(hatch).frame(width: 13, height: 13)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Uncategorized").font(.system(size: 14.5, weight: .semibold))
+                Text("App time not matched to a customer").font(.caption).foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 18).padding(.vertical, 14)
-            .contentShape(Rectangle())
+            Spacer()
+            Text(hLabel(un)).font(.system(size: 15, weight: .bold)).monospacedDigit()
+                .frame(width: 66, alignment: .trailing)
+            Text("\(share)%").font(.caption).foregroundStyle(.tertiary).monospacedDigit()
+                .frame(width: 60, alignment: .trailing)
+            Spacer().frame(width: 24)
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 18).padding(.vertical, 14)
         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
             .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
@@ -465,6 +436,7 @@ struct WeeklyReportView: View {
         )
         let sampleInterval = AppSettings.sampleIntervalSeconds
         let idleThresholdMinutes = AppSettings.claudeIdleThresholdMinutes
+        let reviewMinMinutes = AppSettings.reviewMinMinutes
         let debounceNs: UInt64 = immediate ? 0 : 1_500_000_000
 
         reloadTask = Task { @MainActor in
@@ -499,14 +471,27 @@ struct WeeklyReportView: View {
                     let prev = try computeWeek(prevWeek)
                     let customers = try database.allCustomers()
                     let projects = try database.allProjects()
+                    // Actionable review backlog for this week — same pool the
+                    // Review screen surfaces, so the hero stays in lockstep.
+                    let backlog = (try? ReviewQueue.build(
+                        database: database,
+                        interval: weekValue,
+                        sampleIntervalSeconds: sampleInterval,
+                        idleThresholdSeconds: TimeInterval(idleThresholdMinutes * 60),
+                        minMinutes: reviewMinMinutes
+                    )) ?? []
                     return ReloadPayload(report: report, lastWeekTotal: prev.grandTotal,
-                                         customers: customers, projects: projects)
+                                         customers: customers, projects: projects,
+                                         backlogCount: backlog.count,
+                                         backlogHours: backlog.reduce(0) { $0 + $1.totalSeconds } / 3600.0)
                 }.value
                 if Task.isCancelled { return }
                 self.report = computed.report
                 self.lastWeekTotal = computed.lastWeekTotal
                 self.customers = computed.customers
                 self.projects = computed.projects
+                self.backlogCount = computed.backlogCount
+                self.backlogHours = computed.backlogHours
                 self.summaries = computeCustomerSummaries(computed.report)
                 self.loadError = nil
             } catch {
@@ -533,6 +518,8 @@ private struct ReloadPayload {
     let lastWeekTotal: Double
     let customers: [Customer]
     let projects: [Project]
+    let backlogCount: Int
+    let backlogHours: Double
 }
 
 private extension String {

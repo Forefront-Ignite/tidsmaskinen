@@ -632,87 +632,23 @@ struct ReviewView: View {
     private func reload() {
         do {
             let interval = self.interval
-            let sampleInterval = AppSettings.sampleIntervalSeconds
-            let idleThreshold = TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60)
+            // Build the triage queue via the shared builder so the Review screen
+            // and the report/menu-bar "to review" indicator always agree.
+            let built = try ReviewQueue.build(
+                database: state.database,
+                interval: interval,
+                sampleIntervalSeconds: AppSettings.sampleIntervalSeconds,
+                idleThresholdSeconds: TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60),
+                minMinutes: AppSettings.reviewMinMinutes
+            )
 
-            var baseAggs = try state.database.signalAggregates(in: interval, sampleIntervalSeconds: sampleInterval)
-            // Fold Claude session activity into git-repo aggregates (as Discover does).
-            let sessionRepos = try state.database.sessionRepoAggregates(in: interval, idleThresholdSeconds: idleThreshold)
-            if !sessionRepos.isEmpty {
-                var bySlug: [String: Double] = [:]
-                var others: [AppDatabase.SignalAggregate] = []
-                for agg in baseAggs {
-                    if agg.kind == .gitRepoSlug { bySlug[agg.value, default: 0] += agg.totalSeconds }
-                    else { others.append(agg) }
-                }
-                for s in sessionRepos { bySlug[s.value, default: 0] += s.totalSeconds }
-                baseAggs = others + bySlug.map { AppDatabase.SignalAggregate(kind: .gitRepoSlug, value: $0.key, totalSeconds: $0.value) }
-            }
-
+            // The card UI also needs a matcher + customer/project lists for the
+            // pickers and resolved-state checks.
             let allCustomers = try state.database.allCustomers()
             let allProjects = try state.database.allProjects()
             let rules = try state.database.allRules()
             let seriesAttrs = try state.database.allMeetingSeriesAttributions()
             let m = RuleMatcher.make(customers: allCustomers, projects: allProjects, rules: rules, series: seriesAttrs)
-            let hidden = try state.database.allHiddenSignals()
-            let hiddenHosts = Set(hidden.filter { $0.kind == .urlHost }.map { $0.value })
-            let hiddenPaths = Set(hidden.filter { $0.kind == .urlPath }.map { $0.value })
-
-            let series = try state.database.meetingSeriesAggregates(in: interval)
-            let oneOffs = try state.database.oneOffMeetingAggregates(in: interval)
-            let seriesByID = Dictionary(uniqueKeysWithValues: seriesAttrs.map { ($0.seriesMasterID, $0) })
-
-            let minSec = Double(AppSettings.reviewMinMinutes) * 60
-            // Evaluate "is this already attributed?" in the reviewed period's
-            // temporal context, so a rule bounded to that week/day still counts
-            // (a rule for last week isn't treated as expired just because it's
-            // not valid "now").
-            let at = interval.start
-            var built: [ReviewUnit] = []
-
-            for agg in baseAggs {
-                switch agg.kind {
-                case .gitRepoSlug:
-                    if agg.totalSeconds < minSec { continue }
-                    if m.attribute(kind: .gitRepoSlug, value: agg.value, at: at).customer == nil {
-                        built.append(.signal(agg))
-                    }
-                case .appBundleID:
-                    // Apps are intentionally not reviewable — e.g. VS Code can't be
-                    // mapped to a single customer. They still attribute via repo/URL.
-                    continue
-                case .urlHost:
-                    if agg.totalSeconds < minSec { continue }
-                    if hiddenHosts.contains(agg.value) { continue }
-                    if m.attribute(kind: .urlHost, value: agg.value, at: at).customer != nil { continue }
-                    // High limit so a host's unattributed time surfaces as assignable
-                    // paths rather than being orphaned beyond the default top-N cap.
-                    let paths = (try? state.database.urlPathAggregates(forHost: agg.value, in: interval, sampleIntervalSeconds: sampleInterval, limit: 60)) ?? []
-                    let openPaths = paths.filter {
-                        $0.totalSeconds >= minSec
-                            && m.attribute(kind: .urlPath, value: $0.value, at: at).customer == nil
-                            && !hiddenPaths.contains($0.value)
-                    }
-                    if openPaths.count >= 1 {
-                        built.append(.hostGroup(host: agg, paths: openPaths))
-                    } else if paths.isEmpty {
-                        built.append(.signal(agg))   // host with no path detail → assign whole host
-                    }
-                case .urlPath:
-                    break
-                }
-            }
-
-            for s in series where s.totalSeconds >= minSec {
-                let attr = seriesByID[s.seriesMasterID]
-                if attr?.isIgnored == true { continue }
-                if attr?.customerID == nil { built.append(.series(s)) }
-            }
-            for e in oneOffs where e.customerID == nil {
-                if max(0, e.endAt.timeIntervalSince(e.startAt)) >= minSec { built.append(.event(e)) }
-            }
-
-            built.sort { $0.totalSeconds > $1.totalSeconds }
 
             self.matcher = m
             self.customers = allCustomers

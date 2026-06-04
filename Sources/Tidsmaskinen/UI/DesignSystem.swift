@@ -98,9 +98,10 @@ extension AppSettings {
         return value
     }
 
-    /// Review hides items shorter than this many minutes (default 1 — hides 0-min noise).
+    /// Review hides items shorter than this many minutes (default 5 — filters
+    /// out short bursts that aren't worth a review card).
     static var reviewMinMinutes: Int {
-        if defaults.object(forKey: SettingsKey.reviewMinMinutes) == nil { return 1 }
+        if defaults.object(forKey: SettingsKey.reviewMinMinutes) == nil { return 5 }
         return max(0, defaults.integer(forKey: SettingsKey.reviewMinMinutes))
     }
 }
