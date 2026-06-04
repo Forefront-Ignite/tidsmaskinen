@@ -188,7 +188,8 @@ struct MenuBarView: View {
                 let matcher = try RuleMatcher.load(from: db)
                 let report = WeeklyReport.compute(
                     week: week, samples: samples, events: events, sessions: sessions,
-                    claudeDeltas: deltas, idleThresholdSeconds: TimeInterval(idleMinutes * 60),
+                    claudeDeltas: deltas, micSessions: micSessions,
+                    idleThresholdSeconds: TimeInterval(idleMinutes * 60),
                     matcher: matcher, sampleIntervalSeconds: sampleInterval)
                 let backlog = (try? ReviewQueue.build(
                     database: db, interval: week,

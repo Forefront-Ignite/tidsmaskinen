@@ -334,6 +334,8 @@ struct ReviewView: View {
                 }
             }
 
+            detailPanel(for: unit)
+
             if let label = resolved[unit.id], !unit.isHostGroup {
                 // Already attributed/ignored this session → show result + undo.
                 resolvedBanner(label) { clear(unit) }
@@ -383,6 +385,130 @@ struct ReviewView: View {
         }
         .padding(24)
         .glassCard(radius: 22)
+    }
+
+    // MARK: - Detail panel (meetings & calls)
+
+    /// Extra context shown under the card header so meetings and calls aren't a
+    /// bare subject + time — attendee domains and organizer in particular are
+    /// the strongest hints for which customer a meeting belongs to.
+    @ViewBuilder
+    private func detailPanel(for unit: ReviewUnit) -> some View {
+        switch unit {
+        case .event(let e):         meetingEventDetail(e)
+        case .series(let s):        meetingSeriesDetail(s)
+        case .call(let session, _): callDetail(session)
+        case .signal, .hostGroup:   EmptyView()
+        }
+    }
+
+    private func detailRow(_ systemImage: String, _ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11)).foregroundStyle(.tertiary).frame(width: 16)
+            Text(text).font(.system(size: 13)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func detailCard<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 7) { content() }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 12))
+    }
+
+    @ViewBuilder
+    private func meetingEventDetail(_ e: CalendarEvent) -> some View {
+        detailCard {
+            detailRow("clock", eventTimeRange(e))
+            if let org = (e.organizerName?.isEmpty == false ? e.organizerName : e.organizerEmail), !org.isEmpty {
+                detailRow("person.crop.circle", "Organizer: \(org)")
+            }
+            if !e.attendeeDomains.isEmpty {
+                detailRow("at", "Attendees from \(e.attendeeDomains.joined(separator: ", "))")
+            }
+            if e.isOnlineMeeting {
+                detailRow("video", onlineLabel(e))
+            } else if let loc = e.location, !loc.isEmpty {
+                detailRow("mappin.and.ellipse", loc)
+            }
+            if let rsvp = rsvpLabel(e.rsvpStatus) {
+                detailRow("checkmark.circle", rsvp)
+            }
+            if let body = e.bodyPreview?.trimmingCharacters(in: .whitespacesAndNewlines), !body.isEmpty {
+                Text(body).font(.system(size: 12)).foregroundStyle(.tertiary).lineLimit(3)
+                    .padding(.top, 1)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func meetingSeriesDetail(_ s: AppDatabase.MeetingSeriesAggregate) -> some View {
+        let avgMin = Int((s.totalSeconds / Double(max(1, s.occurrenceCount)) / 60).rounded())
+        detailCard {
+            detailRow("repeat", "\(s.occurrenceCount) occurrence\(s.occurrenceCount == 1 ? "" : "s") this \(selectedDay == nil ? "week" : "day")")
+            detailRow("calendar", seriesSpan(s))
+            detailRow("clock", "~\(avgMin) min each")
+        }
+    }
+
+    @ViewBuilder
+    private func callDetail(_ s: MicSession) -> some View {
+        let timeRange = callTimeRange(s)
+        let apps = ReviewUnit.callApps(s)
+        detailCard {
+            if let timeRange { detailRow("clock", timeRange) }
+            if !apps.isEmpty { detailRow("app", "Running: \(apps.joined(separator: ", "))") }
+            if let p = s.participant, !p.isEmpty { detailRow("person.crop.circle", "With \(p)") }
+            if let ch = s.slackChannel, !ch.isEmpty {
+                detailRow("number", "Huddle in #\(ch)")
+            } else {
+                detailRow("info.circle", "Ad-hoc call — assigns just this session")
+            }
+        }
+    }
+
+    private func seriesSpan(_ s: AppDatabase.MeetingSeriesAggregate) -> String {
+        let df = DateFormatter(); df.dateFormat = "EEE d MMM"
+        if s.occurrenceCount > 1 {
+            return "\(df.string(from: s.firstStartAt)) – \(df.string(from: s.lastStartAt))"
+        }
+        return df.string(from: s.firstStartAt)
+    }
+
+    private func callTimeRange(_ s: MicSession) -> String? {
+        guard let end = s.endedAt else { return nil }
+        let f = DateFormatter(); f.dateFormat = "EEE d MMM HH:mm"
+        let tf = DateFormatter(); tf.dateFormat = "HH:mm"
+        return "\(f.string(from: s.startedAt))–\(tf.string(from: end))"
+    }
+
+    private func eventTimeRange(_ e: CalendarEvent) -> String {
+        let df = DateFormatter(); df.dateFormat = "EEE d MMM"
+        if e.isAllDay { return "\(df.string(from: e.startAt)) · All day" }
+        let tf = DateFormatter(); tf.dateFormat = "HH:mm"
+        return "\(df.string(from: e.startAt)) · \(tf.string(from: e.startAt))–\(tf.string(from: e.endAt))"
+    }
+
+    private func onlineLabel(_ e: CalendarEvent) -> String {
+        switch e.onlineMeetingProvider?.lowercased() {
+        case .some(let p) where p.contains("teams"): return "Microsoft Teams meeting"
+        case .some(let p) where p.contains("zoom"):  return "Zoom meeting"
+        case .some(let p) where p.contains("meet"):  return "Google Meet"
+        default: return "Online meeting"
+        }
+    }
+
+    private func rsvpLabel(_ status: String) -> String? {
+        switch status {
+        case "accepted":            return "You accepted"
+        case "tentativelyAccepted": return "You marked tentative"
+        case "declined":            return "You declined"
+        case "organizer":           return "You organized this"
+        case "notResponded":        return "No response yet"
+        default:                    return nil
+        }
     }
 
     @ViewBuilder
@@ -450,6 +576,7 @@ struct ReviewView: View {
         switch unit {
         case .signal, .hostGroup: return true
         case .series, .event:     return false
+        case .call(let s, _):     return s.slackChannel != nil   // only a channel huddle can teach a rule
         }
     }
 
@@ -486,6 +613,22 @@ struct ReviewView: View {
             }
         case .event(let e):
             if run({ try state.database.setCalendarEventAttribution(eventID: e.id, customerID: customerID, projectID: projectID) }) {
+                resolved[unit.id] = attrLabel(customerID, projectID); advance()
+            }
+        case .call(let session, _):
+            // Pin this session; if it carries a Slack channel, also teach a
+            // channel rule (bounded under "Just this period", permanent under
+            // "Always") so future huddles in that channel auto-attribute.
+            if run({
+                try state.database.setMicSessionAttribution(id: session.id, customerID: customerID, projectID: projectID)
+                if let channel = session.slackChannel {
+                    let (validFrom, validTo) = scopeBounds
+                    try state.database.upsertReplacingWindow(Rule(
+                        id: UUID().uuidString, customerID: customerID, projectID: projectID,
+                        kind: .slackChannel, pattern: channel, priority: 100, createdAt: Date(),
+                        validFrom: validFrom, validTo: validTo))
+                }
+            }) {
                 resolved[unit.id] = attrLabel(customerID, projectID); advance()
             }
         }
@@ -537,6 +680,8 @@ struct ReviewView: View {
             ok = run { try state.database.setMeetingSeriesAttribution(seriesID: s.seriesMasterID, customerID: nil, projectID: nil, isIgnored: true) }
         case .event(let e):
             ok = run { try state.database.setCalendarEventIgnored(eventID: e.id, isIgnored: true) }
+        case .call:
+            ok = false   // calls aren't ignorable (canIgnore == false) — skip only
         }
         if ok { resolved[unit.id] = "Ignored"; advance() }
     }
@@ -574,6 +719,15 @@ struct ReviewView: View {
             ok = run {
                 try state.database.setCalendarEventAttribution(eventID: e.id, customerID: nil, projectID: nil)
                 try state.database.setCalendarEventIgnored(eventID: e.id, isIgnored: false)
+            }
+        case .call(let session, _):
+            ok = run {
+                try state.database.setMicSessionAttribution(id: session.id, customerID: nil, projectID: nil)
+                if let channel = session.slackChannel {
+                    for r in try state.database.allRules().filter({ $0.kind == .slackChannel && $0.pattern == channel }) {
+                        try state.database.deleteRule(id: r.id)
+                    }
+                }
             }
         }
         if ok { resolved[unit.id] = nil }
@@ -671,6 +825,9 @@ enum ReviewUnit: Identifiable {
     case hostGroup(host: AppDatabase.SignalAggregate, paths: [AppDatabase.SignalAggregate])
     case series(AppDatabase.MeetingSeriesAggregate)
     case event(CalendarEvent)
+    /// An ad-hoc mic session (Slack huddle, impromptu Teams/FaceTime). `seconds`
+    /// is the meeting-subtracted ad-hoc duration, matching the Calls tab.
+    case call(session: MicSession, seconds: Double)
 
     var id: String {
         switch self {
@@ -678,6 +835,7 @@ enum ReviewUnit: Identifiable {
         case .hostGroup(let h, _): return "host:\(h.value)"
         case .series(let s):       return "series:\(s.seriesMasterID)"
         case .event(let e):        return "event:\(e.id)"
+        case .call(let s, _):      return "call:\(s.id)"
         }
     }
 
@@ -693,6 +851,7 @@ enum ReviewUnit: Identifiable {
         case .hostGroup(_, let ps): return ps.reduce(0) { $0 + $1.totalSeconds }
         case .series(let s):        return s.totalSeconds
         case .event(let e):         return max(0, e.endAt.timeIntervalSince(e.startAt))
+        case .call(_, let secs):    return secs
         }
     }
 
@@ -702,6 +861,7 @@ enum ReviewUnit: Identifiable {
         case .hostGroup(let h, _): return h.value
         case .series(let s):       return s.sampleSubject
         case .event(let e):        return e.subject.isEmpty ? "(no subject)" : e.subject
+        case .call(let s, _):      return Self.callTitle(s)
         }
     }
 
@@ -713,6 +873,11 @@ enum ReviewUnit: Identifiable {
         case .event(let e):
             let df = DateFormatter(); df.dateFormat = "EEE d MMM HH:mm"
             return df.string(from: e.startAt)
+        case .call(let s, _):
+            let df = DateFormatter(); df.dateFormat = "EEE d MMM HH:mm"
+            let apps = Self.callApps(s)
+            let when = df.string(from: s.startedAt)
+            return apps.isEmpty ? when : "\(apps.joined(separator: ", ")) · \(when)"
         }
     }
 
@@ -728,6 +893,7 @@ enum ReviewUnit: Identifiable {
         case .hostGroup: return "Shared host"
         case .series:    return "Meeting series"
         case .event:     return "Meeting"
+        case .call:      return "Call"
         }
     }
 
@@ -743,23 +909,49 @@ enum ReviewUnit: Identifiable {
         case .hostGroup: return "globe"
         case .series:    return "repeat"
         case .event:     return "calendar"
+        case .call:      return "mic.fill"
         }
     }
 
     /// Confirming this unit writes a reusable rule (vs a one-off attribution).
+    /// A call only teaches a rule when it carries a Slack channel.
     var createsRule: Bool {
         switch self {
         case .signal, .hostGroup, .series: return true
         case .event:                       return false
+        case .call(let s, _):              return s.slackChannel != nil
         }
     }
 
-    /// Whether "Ignore — don't ask again" applies. Repos can only be skipped.
+    /// Whether "Ignore — don't ask again" applies. Repos and calls can only be
+    /// skipped (there's no persistent ignore for ad-hoc mic activity).
     var canIgnore: Bool {
         switch self {
         case .signal(let s): return s.kind == .urlHost || s.kind == .appBundleID
         case .hostGroup, .series, .event: return true
+        case .call: return false
         }
+    }
+
+    // MARK: Call display helpers
+
+    static func callApps(_ s: MicSession) -> [String] {
+        var seen: Set<String> = []
+        var out: [String] = []
+        for bid in s.voipApps {
+            if let label = MicMonitor.displayName(forBundleID: bid), !seen.contains(label) {
+                seen.insert(label); out.append(label)
+            }
+        }
+        return out
+    }
+
+    static func callTitle(_ s: MicSession) -> String {
+        if let p = s.participant, !p.isEmpty { return p }
+        if let ch = s.slackChannel, !ch.isEmpty { return "#\(ch)" }
+        let apps = callApps(s)
+        if !apps.isEmpty { return apps.joined(separator: " / ") }
+        return "Microphone activity"
     }
 }
 

@@ -25,6 +25,7 @@ struct WeeklyReport {
                         events: [CalendarEvent] = [],
                         sessions: [ClaudeSession] = [],
                         claudeDeltas: [AppDatabase.ClaudeActiveDelta] = [],
+                        micSessions: [MicSession] = [],
                         idleThresholdSeconds: TimeInterval = 300,
                         matcher: RuleMatcher,
                         sampleIntervalSeconds: Int) -> WeeklyReport {
@@ -35,6 +36,7 @@ struct WeeklyReport {
             events: events,
             sessions: sessions,
             claudeDeltas: claudeDeltas,
+            micSessions: micSessions,
             matcher: matcher,
             sampleIntervalSeconds: sampleIntervalSeconds,
             idleThresholdSeconds: idleThresholdSeconds
@@ -182,12 +184,14 @@ struct WeeklyReport {
         enum SourceKind: String, CaseIterable, Hashable {
             case samples
             case events
+            case calls
             case claude
 
             var label: String {
                 switch self {
                 case .samples: return "App activity"
                 case .events:  return "Calendar"
+                case .calls:   return "Calls"
                 case .claude:  return "Claude Code"
                 }
             }
@@ -196,6 +200,7 @@ struct WeeklyReport {
                 switch self {
                 case .samples: return "app.dashed"
                 case .events:  return "calendar"
+                case .calls:   return "mic.fill"
                 case .claude:  return "wand.and.stars"
                 }
             }
@@ -263,9 +268,9 @@ struct WeeklyReport {
     }
 
     /// Priority order when overlapping sources cover the same second of wall
-    /// time for the same bucket: calendar events outrank Claude sessions
-    /// outrank app activity samples. Each second can only credit one source,
-    /// so the per-bucket total never exceeds elapsed wall time.
+    /// time for the same bucket: calendar events outrank calls outrank Claude
+    /// sessions outrank app activity samples. Each second can only credit one
+    /// source, so the per-bucket total never exceeds elapsed wall time.
     private static func byPriority(_ a: AttributedRecord, _ b: AttributedRecord) -> Bool {
         priorityIndex(a.source) < priorityIndex(b.source)
     }
@@ -273,8 +278,9 @@ struct WeeklyReport {
     private static func priorityIndex(_ kind: Breakdown.SourceKind) -> Int {
         switch kind {
         case .events:  return 0
-        case .claude:  return 1
-        case .samples: return 2
+        case .calls:   return 1
+        case .claude:  return 2
+        case .samples: return 3
         }
     }
 
@@ -284,6 +290,7 @@ struct WeeklyReport {
                                         events: [CalendarEvent],
                                         sessions: [ClaudeSession],
                                         claudeDeltas: [AppDatabase.ClaudeActiveDelta],
+                                        micSessions: [MicSession],
                                         matcher: RuleMatcher,
                                         sampleIntervalSeconds: Int,
                                         idleThresholdSeconds: TimeInterval) -> [AttributedRecord] {
@@ -313,6 +320,33 @@ struct WeeklyReport {
                 end: event.endAt,
                 contributor: contributorInfo(forEvent: event)
             ))
+        }
+
+        // Ad-hoc call time: mic activity that isn't already covered by a
+        // (mic-extended) meeting. Meeting-overlapping mic time is credited via
+        // the events above, so we subtract the same extended events here to
+        // avoid double-counting; only genuinely impromptu calls (huddles,
+        // ad-hoc Teams/FaceTime) remain. Only attributed calls reach the report
+        // — unattributed call time shows up in the Review backlog instead. We
+        // skip ongoing sessions (no end yet) so a live call isn't counted.
+        for session in micSessions {
+            guard let endedAt = session.endedAt, endedAt > session.startedAt else { continue }
+            let result = matcher.attribute(micSession: session)
+            guard result.customer != nil else { continue }
+            let bucketID = rowKey(customer: result.customer, project: result.project)
+            let contributor = contributorInfo(forCall: session)
+            let remainders = CallSegment.subtractEvents(
+                from: session.startedAt, to: endedAt, events: events, minimumSeconds: 30
+            )
+            for r in remainders {
+                records.append(AttributedRecord(
+                    bucketID: bucketID,
+                    source: .calls,
+                    start: r.start,
+                    end: r.end,
+                    contributor: contributor
+                ))
+            }
         }
 
         let sessionByID = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0) })
@@ -529,6 +563,25 @@ struct WeeklyReport {
             systemImage: "calendar",
             eventID: event.id,
             seriesMasterID: event.seriesMasterID
+        )
+    }
+
+    private static func contributorInfo(forCall session: MicSession) -> ContributorInfo {
+        let label: String
+        if let p = session.participant, !p.isEmpty {
+            label = p
+        } else if let ch = session.slackChannel, !ch.isEmpty {
+            label = "#\(ch)"
+        } else {
+            label = "Call"
+        }
+        return ContributorInfo(
+            id: "call:\(session.id)",
+            label: label,
+            kindLabel: "Call",
+            systemImage: "mic.fill",
+            eventID: nil,
+            seriesMasterID: nil
         )
     }
 

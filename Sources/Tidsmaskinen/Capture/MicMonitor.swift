@@ -80,7 +80,7 @@ final class MicMonitor {
     // inert.
     private static weak var active: MicMonitor?
 
-    private static let voipBundleIDs: [String: String] = [
+    nonisolated private static let voipBundleIDs: [String: String] = [
         "com.microsoft.teams":              "Teams",
         "com.microsoft.teams2":             "Teams",
         // Teams 2.x captures audio inside helper subprocesses with their own
@@ -584,7 +584,7 @@ final class MicMonitor {
         return MicSession.bestSlackHuddlePerson(fromTitles: titles)
     }
 
-    static func displayName(forBundleID bid: String) -> String? {
+    nonisolated static func displayName(forBundleID bid: String) -> String? {
         voipBundleIDs.first { $0.key.lowercased() == bid.lowercased() }?.value
     }
 }

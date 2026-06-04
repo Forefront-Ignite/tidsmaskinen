@@ -99,6 +99,25 @@ enum ReviewQueue {
             if max(0, e.endAt.timeIntervalSince(e.startAt)) >= minSec { built.append(.event(e)) }
         }
 
+        // Ad-hoc calls: ended mic sessions whose impromptu time (mic minus any
+        // mic-extended meeting) clears the threshold and that aren't already
+        // attributed (no manual save, no matching Slack-channel rule). This
+        // mirrors the Calls tab's segmentation so a huddle or stray Teams call
+        // can be attributed from Review instead of being stranded.
+        let micSessions = try database.micSessions(in: interval)
+        if !micSessions.isEmpty {
+            let rawEvents = try database.calendarEvents(in: interval)
+            let extendedEvents = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions)
+            for session in micSessions {
+                guard let endedAt = session.endedAt, endedAt > session.startedAt else { continue }
+                if m.attribute(micSession: session).customer != nil { continue }   // already has a home
+                let adHoc = CallSegment.subtractEvents(
+                    from: session.startedAt, to: endedAt, events: extendedEvents, minimumSeconds: 30
+                ).reduce(0.0) { $0 + $1.end.timeIntervalSince($1.start) }
+                if adHoc >= minSec { built.append(.call(session: session, seconds: adHoc)) }
+            }
+        }
+
         built.sort { $0.totalSeconds > $1.totalSeconds }
         return built
     }

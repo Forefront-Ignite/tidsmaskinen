@@ -461,6 +461,7 @@ struct WeeklyReportView: View {
                             events: events,
                             sessions: sessions,
                             claudeDeltas: claudeDeltas,
+                            micSessions: micSessions,
                             idleThresholdSeconds: TimeInterval(idleThresholdMinutes * 60),
                             matcher: matcher,
                             sampleIntervalSeconds: sampleInterval
