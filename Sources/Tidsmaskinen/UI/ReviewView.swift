@@ -98,8 +98,7 @@ struct ReviewView: View {
         let frac = Double(processedCount) / Double(total)
         VStack(spacing: 9) {
             HStack {
-                (Text("\(processedCount)").bold().foregroundStyle(.primary)
-                    + Text(" of \(total) reviewed"))
+                Text("**\(processedCount)** of \(total) reviewed")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -274,7 +273,7 @@ struct ReviewView: View {
 
     private func skip(_ unit: ReviewUnit) {
         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-            skipped.insert(unit.id)
+            _ = skipped.insert(unit.id)
         }
     }
 
@@ -378,7 +377,9 @@ struct ReviewView: View {
                 case .urlHost:
                     if hiddenHosts.contains(agg.value) { continue }
                     if m.attribute(kind: .urlHost, value: agg.value).customer != nil { continue }
-                    let paths = (try? state.database.urlPathAggregates(forHost: agg.value, in: interval, sampleIntervalSeconds: sampleInterval)) ?? []
+                    // High limit so a host's unattributed time surfaces as assignable
+                    // paths rather than being orphaned beyond the default top-N cap.
+                    let paths = (try? state.database.urlPathAggregates(forHost: agg.value, in: interval, sampleIntervalSeconds: sampleInterval, limit: 60)) ?? []
                     let openPaths = paths.filter { m.attribute(kind: .urlPath, value: $0.value).customer == nil }
                     if openPaths.count >= 1 {
                         built.append(.hostGroup(host: agg, paths: openPaths))

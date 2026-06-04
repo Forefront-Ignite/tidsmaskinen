@@ -522,7 +522,7 @@ private struct AddRuleSheet: View {
 
 /// Consistent marker for time that hasn't been attributed to a customer yet.
 /// Pairs an icon with the label so the state isn't carried by color alone
-/// (orange text is invisible to many colorblind users). Used in Discover,
+/// (orange text is invisible to many colorblind users). Used in Review,
 /// Calls, and anywhere a row can be unattributed.
 struct UnattributedTag: View {
     var body: some View {
@@ -539,7 +539,7 @@ struct UnattributedTag: View {
 }
 
 /// Small "CC" capsule shown next to customers and projects synced from
-/// Command Center. Used in CustomersView, DiscoverView, and anywhere else the
+/// Command Center. Used in CustomersView, ReviewView, and anywhere else the
 /// user picks an attribution target.
 struct CommandCenterBadge: View {
     var body: some View {
@@ -557,5 +557,3 @@ struct CommandCenterBadge: View {
         )
     }
 }
-
-// `Color(hex:)` now lives in DesignSystem.swift (shared).

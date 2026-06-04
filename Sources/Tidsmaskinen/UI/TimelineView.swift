@@ -25,6 +25,11 @@ struct TimelineView: View {
     /// Block selected from the readable agenda list (separate from `selectedBlock`,
     /// which drives the Gantt-strip popover, so the two popovers never collide).
     @State private var agendaBlock: TimelineBlock?
+    /// Derived data cached so it isn't recomputed on every body evaluation
+    /// (the view re-renders on 8s/30s timers). Refreshed in `reload()` and when
+    /// the foreground-lane toggle changes which tracks are shown.
+    @State private var cachedRowHeights: [TimelineBlock.Track: CGFloat] = [:]
+    @State private var cachedAgendaBlocks: [TimelineBlock] = []
     @AppStorage(SettingsKey.timelineShowForeground) private var showForeground: Bool = false
 
     /// Combined gate for the "show hidden items" eye toggle. The toggle is
@@ -127,6 +132,7 @@ struct TimelineView: View {
             undoError = nil
         }
         .onChange(of: showHidden) { _, _ in reload() }
+        .onChange(of: showForeground) { _, _ in recomputeDerived() }
         .onChange(of: pendingUndo) { _, _ in undoError = nil }
         .onChange(of: state.sampleCount) { _, _ in reload() }
         .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload() }
@@ -139,10 +145,27 @@ struct TimelineView: View {
     }()
 
     /// Non-idle blocks across all visible tracks, ordered for the agenda list.
-    private var agendaBlocks: [TimelineBlock] {
+    /// Reads the cache; recomputed only in `recomputeDerived()`.
+    private var agendaBlocks: [TimelineBlock] { cachedAgendaBlocks }
+
+    private func computeAgendaBlocks() -> [TimelineBlock] {
         allTracks.flatMap { blocks(for: $0) }
             .filter { !$0.isIdle }
             .sorted { $0.startedAt < $1.startedAt }
+    }
+
+    /// Cached row height for a track (falls back to a fresh compute before the
+    /// first cache fill).
+    private func height(for track: TimelineBlock.Track) -> CGFloat {
+        cachedRowHeights[track] ?? rowHeight(for: track)
+    }
+
+    /// Refill the derived caches from the current `bundle` / track set.
+    private func recomputeDerived() {
+        var heights: [TimelineBlock.Track: CGFloat] = [:]
+        for t in TimelineBlock.Track.allCases { heights[t] = rowHeight(for: t) }
+        cachedRowHeights = heights
+        cachedAgendaBlocks = computeAgendaBlocks()
     }
 
     @ViewBuilder
@@ -166,7 +189,7 @@ struct TimelineView: View {
 
     private var stripHeight: CGFloat {
         var h: CGFloat = 8 + rulerHeight + rowSpacing + 12
-        for t in allTracks { h += rowHeight(for: t) + rowSpacing }
+        for t in allTracks { h += height(for: t) + rowSpacing }
         return h
     }
 
@@ -186,7 +209,7 @@ struct TimelineView: View {
                             .frame(width: contentWidth, height: rulerHeight)
                         ForEach(allTracks, id: \.self) { track in
                             trackRow(track, blocks: blocks(for: track), width: contentWidth)
-                                .frame(width: contentWidth, height: rowHeight(for: track))
+                                .frame(width: contentWidth, height: height(for: track))
                         }
                     }
                     .padding(.top, 8)
@@ -276,7 +299,7 @@ struct TimelineView: View {
                         .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.secondary)
                 }
             } else {
-                Button("Attribute") { agendaBlock = block }
+                Button("Attribute") { selectedBlock = nil; agendaBlock = block }
                     .font(.system(size: 12, weight: .semibold))
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
@@ -285,7 +308,8 @@ struct TimelineView: View {
         .padding(.horizontal, 16).padding(.vertical, 12)
         .glassCard(radius: 16)
         .contentShape(Rectangle())
-        .onTapGesture { agendaBlock = block }
+        // Clear the Gantt-strip selection so the two popovers can never both open.
+        .onTapGesture { selectedBlock = nil; agendaBlock = block }
         .popover(isPresented: agendaPopoverBinding(block)) {
             ReattributePopover(block: block,
                                customers: customers,
@@ -313,7 +337,7 @@ struct TimelineView: View {
     @ViewBuilder
     private var header: some View {
         HStack(spacing: 12) {
-            // Timeline keeps "next day" enabled (unlike Discover/Calls) so you
+            // My day keeps "next day" enabled (unlike Review/Calls) so you
             // can look ahead at booked meetings on future days.
             DateNavigator(
                 title: dayLabel,
@@ -430,7 +454,7 @@ struct TimelineView: View {
             legendRow(
                 blockSwatch(fill: .pink.opacity(0.85), border: .orange.opacity(0.7), dash: true),
                 "Unmatched session",
-                "Dashed orange — no rule matched. Attribute it in Discover or by clicking it."
+                "Dashed orange — no rule matched. Attribute it in Review or by clicking it."
             )
             legendRow(
                 blockSwatch(fill: .gray, border: .secondary.opacity(0.7), dash: true, opacity: 0.6),
@@ -513,7 +537,7 @@ struct TimelineView: View {
             Color.clear.frame(height: rulerHeight)
             ForEach(allTracks, id: \.self) { track in
                 trackLabel(track)
-                    .frame(height: rowHeight(for: track), alignment: .top)
+                    .frame(height: height(for: track), alignment: .top)
             }
         }
         .padding(.leading, 12)
@@ -713,7 +737,7 @@ struct TimelineView: View {
         let idle = blocks.filter { $0.isIdle }
         let laned = assignLanes(active)
         let lanes = (laned.map(\.lane).max() ?? -1) + 1
-        let rowH = rowHeight(for: track)
+        let rowH = height(for: track)
         let stacked = lanes > 1
         let blockH: CGFloat = stacked ? compactLaneHeight : activeBlockHeight
 
@@ -832,7 +856,7 @@ struct TimelineView: View {
         .shadow(color: tint.opacity(0.18), radius: 1.5, x: 0, y: 0.5)
         .opacity(isIgnoredMeetingBlock(block) ? 0.6 : 1.0)
         .contentShape(Rectangle())
-        .onTapGesture { selectedBlock = block }
+        .onTapGesture { agendaBlock = nil; selectedBlock = block }
         .help(tooltip(for: block))
         .offset(x: x, y: yPos)
         .popover(isPresented: bindingForPopover(block)) {
@@ -959,7 +983,7 @@ struct TimelineView: View {
             }
         } else {
             attr = block.track == .claudeCode
-                ? "Not matched by any rule — click to assign or add a rule in Discover"
+                ? "Not matched by any rule — click to assign or add a rule in Review"
                 : "Unattributed"
         }
         let mins = Int((block.durationSeconds / 60).rounded())
@@ -1064,6 +1088,7 @@ struct TimelineView: View {
                 claudeIdleThresholdSeconds: TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60),
                 includeIgnoredEvents: showHidden
             )
+            recomputeDerived()
             loadError = nil
         } catch {
             loadError = error.localizedDescription
@@ -1317,7 +1342,7 @@ private struct ReattributePopover: View {
                 systemImage: "exclamationmark.triangle.fill",
                 tint: .orange,
                 primary: "Not matched by any rule.",
-                secondary: "Either assign \(repoName) in Discover (covers every session in this repo) or pick a customer below to attribute just this session."
+                secondary: "Either assign \(repoName) in Review (covers every session in this repo) or pick a customer below to attribute just this session."
             )
         }
     }
@@ -1426,7 +1451,7 @@ private struct ReattributePopover: View {
             Button("Ignore series", role: .destructive) { ignoreSeries() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Every occurrence will be excluded from the weekly report. Undo from the Timeline toast, or restore later from Discover → Ignored meetings.")
+            Text("Every occurrence will be excluded from the weekly report. Undo from the toast, or restore later via “Show hidden” on My day.")
         }
     }
 
@@ -1594,7 +1619,7 @@ private struct ReattributePopover: View {
     private func restoreSeries() {
         guard let seriesID = block.seriesMasterID else { return }
         do {
-            // Mirrors DiscoverView.unignoreMeeting: clear the row entirely so
+            // Clear the row entirely so
             // the series falls back to "no series attribution".
             try state.database.setMeetingSeriesAttribution(
                 seriesID: seriesID,

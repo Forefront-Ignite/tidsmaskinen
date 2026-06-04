@@ -16,6 +16,9 @@ struct WeeklyReportView: View {
     @State private var reloadTask: Task<Void, Never>?
     @State private var customers: [Customer] = []
     @State private var projects: [Project] = []
+    /// Derived per-customer rollups, recomputed only when the report reloads
+    /// (not on every body evaluation).
+    @State private var summaries: [CustomerSummary] = []
 
     private let calendar = Calendar.weekStartingMonday()
 
@@ -135,8 +138,7 @@ struct WeeklyReportView: View {
                 Text("ATTRIBUTION")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
-                (Text(hLabel(attr)).foregroundStyle(TM.accent).bold()
-                    + Text(" attributed · \(hLabel(un)) to go"))
+                Text("\(Text(hLabel(attr)).foregroundStyle(TM.accent).bold()) attributed · \(hLabel(un)) to go")
                     .font(.system(size: 17, weight: .semibold))
                     .padding(.top, 6)
 
@@ -181,7 +183,7 @@ struct WeeklyReportView: View {
     private func attributionMeter(_ report: WeeklyReport, total: Double) -> some View {
         GeometryReader { geo in
             HStack(spacing: 0) {
-                ForEach(customerSummaries(report)) { c in
+                ForEach(summaries) { c in
                     Rectangle()
                         .fill(c.color)
                         .frame(width: total > 0 ? geo.size.width * (c.total / total) : 0)
@@ -207,7 +209,7 @@ struct WeeklyReportView: View {
 
     @ViewBuilder
     private func dayBarsPanel(_ report: WeeklyReport) -> some View {
-        let summaries = customerSummaries(report)
+        let summaries = self.summaries
         let grandPerDay = (0..<7).map { report.dayTotals[$0] + report.unattributedPerDay[$0] }
         let maxDay = max(grandPerDay.max() ?? 1, 0.0001)
 
@@ -262,7 +264,7 @@ struct WeeklyReportView: View {
 
     @ViewBuilder
     private func customerList(_ report: WeeklyReport) -> some View {
-        let summaries = customerSummaries(report)
+        let summaries = self.summaries
         let grand = report.grandTotal + report.unattributedTotal
 
         VStack(alignment: .leading, spacing: 9) {
@@ -395,7 +397,7 @@ struct WeeklyReportView: View {
         var total: Double { perDay.reduce(0, +) }
     }
 
-    private func customerSummaries(_ report: WeeklyReport) -> [CustomerSummary] {
+    private func computeCustomerSummaries(_ report: WeeklyReport) -> [CustomerSummary] {
         let customersByID = Dictionary(uniqueKeysWithValues: customers.map { ($0.id, $0) })
         let projectsByID = Dictionary(uniqueKeysWithValues: projects.map { ($0.id, $0) })
         var byCustomer: [String: CustomerSummary] = [:]
@@ -506,6 +508,7 @@ struct WeeklyReportView: View {
                 self.lastWeekTotal = computed.lastWeekTotal
                 self.customers = computed.customers
                 self.projects = computed.projects
+                self.summaries = computeCustomerSummaries(computed.report)
                 self.loadError = nil
             } catch {
                 if Task.isCancelled { return }
