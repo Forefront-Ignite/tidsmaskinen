@@ -946,12 +946,8 @@ struct DiscoverView: View {
         // today / this week bound the rule; always = permanent.
         let (validFrom, validTo) = scope.bounds(reference: Date())
         do {
-            // Delete any existing rules with same (kind, pattern) to keep the assignment unique.
-            let existing = try state.database.allRules()
-                .filter { $0.kind == kind && $0.pattern == pattern }
-            for rule in existing {
-                try state.database.deleteRule(id: rule.id)
-            }
+            // Replace only a rule with the same signal AND window, so a scoped
+            // override coexists with any standing permanent rule for this signal.
             let r = Rule(
                 id: UUID().uuidString,
                 customerID: customerID,
@@ -963,7 +959,7 @@ struct DiscoverView: View {
                 validFrom: validFrom,
                 validTo: validTo
             )
-            try state.database.upsert(r)
+            try state.database.upsertReplacingWindow(r)
             reload()
         } catch {
             loadError = error.localizedDescription

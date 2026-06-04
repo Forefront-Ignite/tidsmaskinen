@@ -388,10 +388,7 @@ struct TeamsCallsView: View {
             // auto-attribute. Only possible when the channel is known.
             if scope.createsRule, let cid = customerID, let channel = session.slackChannel {
                 let (validFrom, validTo) = scope.bounds(reference: session.startedAt)
-                let existing = try state.database.allRules()
-                    .filter { $0.kind == .slackChannel && $0.pattern == channel }
-                for rule in existing { try state.database.deleteRule(id: rule.id) }
-                try state.database.upsert(Rule(
+                try state.database.upsertReplacingWindow(Rule(
                     id: UUID().uuidString, customerID: cid, projectID: projectID,
                     kind: .slackChannel, pattern: channel, priority: 100, createdAt: Date(),
                     validFrom: validFrom, validTo: validTo))

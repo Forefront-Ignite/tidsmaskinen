@@ -1558,9 +1558,7 @@ private struct ReattributePopover: View {
             // chose more than "just this block" and we have a signal + customer.
             if scope.createsRule, let sig = block.ruleSignal, let cid = customerID {
                 let (validFrom, validTo) = scope.bounds(reference: block.startedAt)
-                let existing = try state.database.allRules().filter { $0.kind == sig.kind && $0.pattern == sig.pattern }
-                for rule in existing { try state.database.deleteRule(id: rule.id) }
-                try state.database.upsert(Rule(
+                try state.database.upsertReplacingWindow(Rule(
                     id: UUID().uuidString, customerID: cid, projectID: projectID,
                     kind: sig.kind, pattern: sig.pattern, priority: 100, createdAt: Date(),
                     validFrom: validFrom, validTo: validTo))

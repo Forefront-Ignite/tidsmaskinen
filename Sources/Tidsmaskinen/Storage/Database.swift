@@ -639,6 +639,26 @@ struct AppDatabase {
         }
     }
 
+    /// Upsert a rule, replacing only an existing rule with the SAME signal AND
+    /// the SAME validity window. This lets layered rules for one signal coexist
+    /// — e.g. a permanent "always" rule, a "this week" override, and a "today"
+    /// override — so creating one scoped rule never destroys the others. The
+    /// matcher then picks the most precise applicable rule per timestamp.
+    func upsertReplacingWindow(_ rule: Rule) throws {
+        try dbQueue.write { db in
+            let sameWindow = try Rule
+                .filter(Rule.Columns.kind == rule.kind.rawValue
+                        && Rule.Columns.pattern == rule.pattern)
+                .fetchAll(db)
+                .filter { $0.validFrom == rule.validFrom && $0.validTo == rule.validTo }
+            for existing in sameWindow {
+                _ = try Rule.deleteOne(db, key: existing.id)
+            }
+            var r = rule
+            try r.upsert(db)
+        }
+    }
+
     // MARK: - Projects
 
     /// Active projects only. Includes locals + non-archived externals.

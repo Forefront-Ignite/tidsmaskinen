@@ -2,9 +2,9 @@ import SwiftUI
 import AppKit
 
 /// Menu-bar tray popover. Matches the Liquid Glass design: AppMark header, a
-/// week glance with the attribution meter + Review button, a live "capturing"
-/// source line, three shortcuts, and a footer. Microsoft 365 sign-in and the
-/// permission prompt live in Settings (reachable via the gear).
+/// week glance with the attribution meter + Review button, three shortcuts, and
+/// a footer. Microsoft 365 sign-in and the permission prompt live in Settings
+/// (reachable via the gear).
 struct MenuBarView: View {
     @EnvironmentObject private var state: AppState
     @Environment(\.openWindow) private var openWindow

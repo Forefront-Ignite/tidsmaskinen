@@ -103,6 +103,11 @@ struct ReviewView: View {
         .onAppear { if !didInitialLoad { didInitialLoad = true; reload() } }
         .onChange(of: weekStart) { _, _ in reload() }
         .onChange(of: selectedDay) { _, _ in reload() }
+        // Refresh when new activity lands, but only before the user has started
+        // acting — so a live snapshot doesn't wipe in-session resolutions/cursor.
+        .onChange(of: state.sampleCount) { _, _ in
+            if cursor == 0 && resolved.isEmpty && pathResolved.isEmpty { reload() }
+        }
         .alert("Database error", isPresented: errorBinding) {
             Button("OK") { loadError = nil }
         } message: { Text(loadError ?? "") }
@@ -412,7 +417,9 @@ struct ReviewView: View {
                     onCreateProject: { try state.database.createLocalProject(customerID: $0, name: $1) },
                     onConfirm: { cust, proj in assignSignal(host, customerID: cust, projectID: proj, markUnit: unit.id) }
                 )
-                Text("All current and future paths under \(host.value) attribute here.")
+                Text(scope == .always
+                     ? "All current and future paths under \(host.value) attribute here."
+                     : "Paths under \(host.value) during \(periodLabel) attribute here.")
                     .font(.caption).foregroundStyle(.tertiary)
             }
             Divider()
@@ -468,40 +475,46 @@ struct ReviewView: View {
     private func confirm(_ unit: ReviewUnit, customerID: String, projectID: String?) {
         switch unit {
         case .signal(let s):
-            run { try writeSignalRule(s, customerID: customerID, projectID: projectID) }
-            resolved[unit.id] = attrLabel(customerID, projectID); advance()
+            if run({ try writeSignalRule(s, customerID: customerID, projectID: projectID) }) {
+                resolved[unit.id] = attrLabel(customerID, projectID); advance()
+            }
         case .hostGroup:
             break // host group handled per path / whole-host
         case .series(let s):
-            run { try state.database.setMeetingSeriesAttribution(seriesID: s.seriesMasterID, customerID: customerID, projectID: projectID, isIgnored: false) }
-            resolved[unit.id] = attrLabel(customerID, projectID); advance()
+            if run({ try state.database.setMeetingSeriesAttribution(seriesID: s.seriesMasterID, customerID: customerID, projectID: projectID, isIgnored: false) }) {
+                resolved[unit.id] = attrLabel(customerID, projectID); advance()
+            }
         case .event(let e):
-            run { try state.database.setCalendarEventAttribution(eventID: e.id, customerID: customerID, projectID: projectID) }
-            resolved[unit.id] = attrLabel(customerID, projectID); advance()
+            if run({ try state.database.setCalendarEventAttribution(eventID: e.id, customerID: customerID, projectID: projectID) }) {
+                resolved[unit.id] = attrLabel(customerID, projectID); advance()
+            }
         }
     }
 
     /// Whole-host or single-signal rule assignment (advances).
     private func assignSignal(_ signal: AppDatabase.SignalAggregate, customerID: String, projectID: String?, markUnit: String) {
-        run { try writeSignalRule(signal, customerID: customerID, projectID: projectID) }
-        resolved[markUnit] = attrLabel(customerID, projectID); advance()
+        if run({ try writeSignalRule(signal, customerID: customerID, projectID: projectID) }) {
+            resolved[markUnit] = attrLabel(customerID, projectID); advance()
+        }
     }
 
     /// A single path inside a host group — records path resolution, stays on card.
     private func assignPath(_ path: AppDatabase.SignalAggregate, customerID: String, projectID: String?) {
-        run { try writeSignalRule(path, customerID: customerID, projectID: projectID) }
-        pathResolved[path.value] = attrLabel(customerID, projectID)
+        if run({ try writeSignalRule(path, customerID: customerID, projectID: projectID) }) {
+            pathResolved[path.value] = attrLabel(customerID, projectID)
+        }
     }
 
     private func ignorePath(_ path: AppDatabase.SignalAggregate) {
-        run { try state.database.hideSignal(kind: .urlPath, value: path.value) }
-        pathResolved[path.value] = "Ignored"
+        if run({ try state.database.hideSignal(kind: .urlPath, value: path.value) }) {
+            pathResolved[path.value] = "Ignored"
+        }
     }
 
     private func clearPath(_ path: AppDatabase.SignalAggregate) {
         let kind = ruleKind(path.kind)
         let pattern = (path.kind == .urlPath && !path.value.contains("*")) ? path.value + "*" : path.value
-        run {
+        let ok = run {
             for r in try state.database.allRules().filter({ $0.kind == kind && $0.pattern == pattern }) {
                 try state.database.deleteRule(id: r.id)
             }
@@ -509,30 +522,33 @@ struct ReviewView: View {
                 try state.database.unhide(id: h.id)
             }
         }
-        pathResolved[path.value] = nil
+        if ok { pathResolved[path.value] = nil }
     }
 
     private func ignore(_ unit: ReviewUnit) {
+        let ok: Bool
         switch unit {
         case .signal(let s):
-            if let hk = hiddenKind(s.kind) { run { try state.database.hideSignal(kind: hk, value: s.value) } }
+            if let hk = hiddenKind(s.kind) { ok = run { try state.database.hideSignal(kind: hk, value: s.value) } }
+            else { ok = false }
         case .hostGroup(let host, _):
-            run { try state.database.hideSignal(kind: .urlHost, value: host.value) }
+            ok = run { try state.database.hideSignal(kind: .urlHost, value: host.value) }
         case .series(let s):
-            run { try state.database.setMeetingSeriesAttribution(seriesID: s.seriesMasterID, customerID: nil, projectID: nil, isIgnored: true) }
+            ok = run { try state.database.setMeetingSeriesAttribution(seriesID: s.seriesMasterID, customerID: nil, projectID: nil, isIgnored: true) }
         case .event(let e):
-            run { try state.database.setCalendarEventIgnored(eventID: e.id, isIgnored: true) }
+            ok = run { try state.database.setCalendarEventIgnored(eventID: e.id, isIgnored: true) }
         }
-        resolved[unit.id] = "Ignored"; advance()
+        if ok { resolved[unit.id] = "Ignored"; advance() }
     }
 
     /// Undo a resolved unit — delete its rule / clear its attribution / un-ignore.
     private func clear(_ unit: ReviewUnit) {
+        let ok: Bool
         switch unit {
         case .signal(let s):
             let kind = ruleKind(s.kind)
             let pattern = (s.kind == .urlPath && !s.value.contains("*")) ? s.value + "*" : s.value
-            run {
+            ok = run {
                 for r in try state.database.allRules().filter({ $0.kind == kind && $0.pattern == pattern }) {
                     try state.database.deleteRule(id: r.id)
                 }
@@ -543,7 +559,7 @@ struct ReviewView: View {
                 }
             }
         case .hostGroup(let host, _):
-            run {
+            ok = run {
                 // whole-host rule + host hide
                 for r in try state.database.allRules().filter({ $0.kind == .urlHost && $0.pattern == host.value }) {
                     try state.database.deleteRule(id: r.id)
@@ -553,14 +569,14 @@ struct ReviewView: View {
                 }
             }
         case .series(let s):
-            run { try state.database.setMeetingSeriesAttribution(seriesID: s.seriesMasterID, customerID: nil, projectID: nil, isIgnored: false) }
+            ok = run { try state.database.setMeetingSeriesAttribution(seriesID: s.seriesMasterID, customerID: nil, projectID: nil, isIgnored: false) }
         case .event(let e):
-            run {
+            ok = run {
                 try state.database.setCalendarEventAttribution(eventID: e.id, customerID: nil, projectID: nil)
                 try state.database.setCalendarEventIgnored(eventID: e.id, isIgnored: false)
             }
         }
-        resolved[unit.id] = nil
+        if ok { resolved[unit.id] = nil }
     }
 
     /// Shared rule writer: replace any rule with the same (kind, pattern), then
@@ -569,10 +585,7 @@ struct ReviewView: View {
         let kind = ruleKind(signal.kind)
         let pattern = (signal.kind == .urlPath && !signal.value.contains("*")) ? signal.value + "*" : signal.value
         let (validFrom, validTo) = scopeBounds
-        for r in try state.database.allRules().filter({ $0.kind == kind && $0.pattern == pattern }) {
-            try state.database.deleteRule(id: r.id)
-        }
-        try state.database.upsert(Rule(
+        try state.database.upsertReplacingWindow(Rule(
             id: UUID().uuidString, customerID: customerID, projectID: projectID,
             kind: kind, pattern: pattern, priority: 100, createdAt: Date(),
             validFrom: validFrom, validTo: validTo))
@@ -584,9 +597,11 @@ struct ReviewView: View {
         }
     }
 
-    /// Runs a DB mutation; surfaces errors. Does NOT reload the snapshot.
-    private func run(_ body: () throws -> Void) {
-        do { try body() } catch { loadError = error.localizedDescription }
+    /// Runs a DB mutation, returning whether it succeeded so callers only update
+    /// in-session UI state on success. Surfaces errors; does NOT reload the snapshot.
+    @discardableResult
+    private func run(_ body: () throws -> Void) -> Bool {
+        do { try body(); return true } catch { loadError = error.localizedDescription; return false }
     }
 
     private func hiddenKind(_ k: AppDatabase.SignalAggregate.Kind) -> HiddenSignal.Kind? {
@@ -648,13 +663,18 @@ struct ReviewView: View {
             let seriesByID = Dictionary(uniqueKeysWithValues: seriesAttrs.map { ($0.seriesMasterID, $0) })
 
             let minSec = Double(AppSettings.reviewMinMinutes) * 60
+            // Evaluate "is this already attributed?" in the reviewed period's
+            // temporal context, so a rule bounded to that week/day still counts
+            // (a rule for last week isn't treated as expired just because it's
+            // not valid "now").
+            let at = interval.start
             var built: [ReviewUnit] = []
 
             for agg in baseAggs {
                 switch agg.kind {
                 case .gitRepoSlug:
                     if agg.totalSeconds < minSec { continue }
-                    if m.attribute(kind: .gitRepoSlug, value: agg.value).customer == nil {
+                    if m.attribute(kind: .gitRepoSlug, value: agg.value, at: at).customer == nil {
                         built.append(.signal(agg))
                     }
                 case .appBundleID:
@@ -664,13 +684,13 @@ struct ReviewView: View {
                 case .urlHost:
                     if agg.totalSeconds < minSec { continue }
                     if hiddenHosts.contains(agg.value) { continue }
-                    if m.attribute(kind: .urlHost, value: agg.value).customer != nil { continue }
+                    if m.attribute(kind: .urlHost, value: agg.value, at: at).customer != nil { continue }
                     // High limit so a host's unattributed time surfaces as assignable
                     // paths rather than being orphaned beyond the default top-N cap.
                     let paths = (try? state.database.urlPathAggregates(forHost: agg.value, in: interval, sampleIntervalSeconds: sampleInterval, limit: 60)) ?? []
                     let openPaths = paths.filter {
                         $0.totalSeconds >= minSec
-                            && m.attribute(kind: .urlPath, value: $0.value).customer == nil
+                            && m.attribute(kind: .urlPath, value: $0.value, at: at).customer == nil
                             && !hiddenPaths.contains($0.value)
                     }
                     if openPaths.count >= 1 {
