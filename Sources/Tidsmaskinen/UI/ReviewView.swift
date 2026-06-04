@@ -15,23 +15,83 @@ import SwiftUI
 struct ReviewView: View {
     @EnvironmentObject private var state: AppState
 
+    // A *stable snapshot* of the open items for the period. Actions don't remove
+    // items — they record a resolution — so you can navigate back to anything you
+    // already attributed/ignored (and undo it), and stay on a host card while
+    // assigning its paths one by one.
     @State private var units: [ReviewUnit] = []
+    @State private var resolved: [String: String] = [:]      // unit id → result label
+    @State private var pathResolved: [String: String] = [:]  // path value → result label
     @State private var matcher: RuleMatcher = .make(customers: [], projects: [], rules: [])
     @State private var customers: [Customer] = []
     @State private var projects: [Project] = []
-    @State private var skipped: Set<String> = []
-    @State private var processedCount: Int = 0
+    @State private var cursor: Int = 0          // position in the snapshot
     @State private var loadError: String?
     @State private var didInitialLoad = false
+    @State private var scope: AttrScope = .always
+    @State private var weekStart: Date = Calendar.weekStartingMonday().currentWeekInterval().start
+    @State private var selectedDay: Date? = nil    // nil = whole selected week
 
-    private var interval: DateInterval {
-        let now = Date()
-        let start = Calendar.current.date(byAdding: .day, value: -7, to: now) ?? now
-        return DateInterval(start: start, end: now)
+    private let calendar = Calendar.weekStartingMonday()
+
+    /// `.always` writes a permanent rule; `.period` writes a temporary rule
+    /// bounded to the currently-selected week (or day), so the same signal can
+    /// attribute elsewhere in a different period.
+    enum AttrScope: String, CaseIterable, Identifiable {
+        case always, period
+        var id: String { rawValue }
     }
 
-    private var visible: [ReviewUnit] {
-        units.filter { !skipped.contains($0.id) }
+    private var week: DateInterval {
+        DateInterval(start: weekStart, end: calendar.date(byAdding: .day, value: 7, to: weekStart) ?? weekStart)
+    }
+
+    /// The activity window the review reflects: a single day if one is picked,
+    /// otherwise the whole selected week.
+    private var period: DateInterval {
+        if let day = selectedDay {
+            let s = calendar.startOfDay(for: day)
+            return DateInterval(start: s, end: calendar.date(byAdding: .day, value: 1, to: s) ?? s)
+        }
+        return week
+    }
+
+    private var interval: DateInterval { period }
+
+    /// (validFrom, validTo) for a rule under the current scope.
+    private var scopeBounds: (Date?, Date?) {
+        scope == .always ? (nil, nil) : (period.start, period.end)
+    }
+
+    /// "this week" / "Wed 4 Jun" — used in the scope label + hint.
+    private var periodLabel: String {
+        if let day = selectedDay { return DateFormatting.weekdayDayShortMonth.string(from: day) }
+        return "this week"
+    }
+
+    private var isCurrentWeek: Bool { weekStart == calendar.currentWeekInterval().start }
+
+    /// The card currently under the cursor (nil = stepped past the end → done).
+    private var current: ReviewUnit? {
+        cursor >= 0 && cursor < units.count ? units[cursor] : nil
+    }
+
+    /// A unit is resolved once it's attributed/ignored — for a host group, once
+    /// every one of its paths is assigned/ignored (or the whole host is set).
+    private func isResolved(_ unit: ReviewUnit) -> Bool {
+        if resolved[unit.id] != nil { return true }
+        if unit.isHostGroup {
+            return !unit.hostPaths.isEmpty && unit.hostPaths.allSatisfy { pathResolved[$0.value] != nil }
+        }
+        return false
+    }
+    private var resolvedCount: Int { units.filter { isResolved($0) }.count }
+
+    private func goBack() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { cursor = max(0, cursor - 1) }
+    }
+    private func goForward() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { cursor = min(units.count, cursor + 1) }
     }
 
     var body: some View {
@@ -40,9 +100,9 @@ struct ReviewView: View {
             Divider()
             content
         }
-        .tmWallpaper()
         .onAppear { if !didInitialLoad { didInitialLoad = true; reload() } }
-        .onChange(of: state.sampleCount) { _, _ in reload() }
+        .onChange(of: weekStart) { _, _ in reload() }
+        .onChange(of: selectedDay) { _, _ in reload() }
         .alert("Database error", isPresented: errorBinding) {
             Button("OK") { loadError = nil }
         } message: { Text(loadError ?? "") }
@@ -56,53 +116,125 @@ struct ReviewView: View {
 
     @ViewBuilder
     private var header: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Review")
-                .font(.system(size: 24, weight: .bold))
-            Text("Attribute open time — last 7 days")
-                .font(.subheadline).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Review").font(.system(size: 24, weight: .bold))
+                    Text("Attribute open time — \(weekTitle)")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+                Spacer()
+                DateNavigator(
+                    title: isCurrentWeek ? "This week" : weekTitle,
+                    nowLabel: "This week",
+                    prevHelp: "Previous week", nextHelp: "Next week",
+                    titleMinWidth: 150,
+                    nowDisabled: isCurrentWeek,
+                    onPrev: { weekStart = calendar.date(byAdding: .day, value: -7, to: weekStart) ?? weekStart },
+                    onNext: { weekStart = calendar.date(byAdding: .day, value: 7, to: weekStart) ?? weekStart },
+                    onNow: { weekStart = calendar.currentWeekInterval().start }
+                )
+            }
+            dayChips
         }
         .padding(.horizontal, 28).padding(.vertical, 14)
+    }
+
+    private var weekTitle: String {
+        let end = calendar.date(byAdding: .day, value: 6, to: weekStart) ?? weekStart
+        return "\(DateFormatting.dayMonth.string(from: weekStart)) – \(DateFormatting.dayMonth.string(from: end))"
+    }
+
+    /// "Whole week" + the 7 weekdays of the selected week. Picking a day narrows
+    /// the review (and "Just this period" → that day).
+    @ViewBuilder
+    private var dayChips: some View {
+        let days = calendar.days(in: week)
+        HStack(spacing: 6) {
+            chip(title: "Whole week", active: selectedDay == nil) { selectedDay = nil }
+            ForEach(Array(days.enumerated()), id: \.offset) { _, day in
+                chip(title: DateFormatting.weekdayShort.string(from: day),
+                     active: selectedDay.map { calendar.isDate($0, inSameDayAs: day) } ?? false) {
+                    selectedDay = day
+                }
+            }
+        }
+    }
+
+    private func chip(title: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(active ? Color.white : Color.primary)
+                .padding(.horizontal, 11).padding(.vertical, 5)
+                .background(active ? TM.accent : Color.primary.opacity(0.06),
+                            in: Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Content
 
     @ViewBuilder
     private var content: some View {
-        if let current = visible.first {
+        if let current {
             ScrollView {
-                VStack(spacing: 22) {
+                VStack(spacing: 18) {
                     progressBar
-                    card(for: current)
-                        .id(current.id)
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .bottom).combined(with: .opacity),
-                            removal: .move(edge: .trailing).combined(with: .opacity)))
-                    footerHint(for: current)
+                        .frame(maxWidth: 620)
+                    HStack(alignment: .top, spacing: 16) {
+                        navArrow(systemImage: "chevron.left", disabled: cursor == 0, action: goBack)
+                            .padding(.top, 30)
+                        VStack(spacing: 14) {
+                            card(for: current)
+                                .id(current.id)
+                                .transition(.asymmetric(
+                                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                                    removal: .move(edge: .trailing).combined(with: .opacity)))
+                            footerHint(for: current)
+                        }
+                        .frame(maxWidth: 560)
+                        navArrow(systemImage: "chevron.right", disabled: false, action: goForward)
+                            .padding(.top, 30)
+                    }
                 }
-                .frame(maxWidth: 560)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 24)
-                .padding(.horizontal, 28)
+                .padding(.horizontal, 24)
             }
         } else {
             doneState
         }
     }
 
-    private var totalToReview: Int { processedCount + visible.count }
+    /// Large circular navigation arrow flanking the review card.
+    private func navArrow(systemImage: String, disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(disabled ? Color.secondary.opacity(0.4) : Color.primary)
+                .frame(width: 44, height: 44)
+                .glassEffect(.regular.interactive(), in: .circle)
+                .contentShape(Circle())   // whole circle is clickable, not just the glyph
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .help(systemImage.contains("left") ? "Previous item" : "Next item")
+    }
+
+    private var reviewedCount: Int { resolvedCount }
+    private var totalToReview: Int { units.count }
 
     @ViewBuilder
     private var progressBar: some View {
         let total = max(totalToReview, 1)
-        let frac = Double(processedCount) / Double(total)
+        let frac = Double(reviewedCount) / Double(total)
         VStack(spacing: 9) {
-            HStack {
-                Text("**\(processedCount)** of \(total) reviewed")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                Text("\(reviewedCount) of \(total) reviewed")
+                    .font(.system(size: 17, weight: .bold))
                 Spacer()
-                Text("\(Int((frac * 100).rounded()))%")
+                Text("item \(min(cursor + 1, total)) · \(Int((frac * 100).rounded()))%")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(TM.accent)
             }
@@ -141,15 +273,18 @@ struct ReviewView: View {
                 .background(LinearGradient(colors: [TM.positive, Color(hex: "#0ea371") ?? TM.positive],
                                            startPoint: .top, endPoint: .bottom), in: Circle())
                 .shadow(color: TM.positive.opacity(0.5), radius: 18, y: 8)
-            Text("You're all caught up").font(.system(size: 26, weight: .bold))
-            Text(skipped.isEmpty
-                 ? "Every captured signal in the last 7 days has a home. Your report is ready."
-                 : "Nothing left except what you skipped. Skipped items stay open for next time.")
+            let openCount = units.filter { !isResolved($0) }.count
+            Text(openCount == 0 ? "You're all caught up" : "Reached the end").font(.system(size: 26, weight: .bold))
+            Text(openCount == 0
+                 ? "Every captured item for \(periodLabel) has a home. Your report is ready."
+                 : "\(openCount) item\(openCount == 1 ? "" : "s") still open — you skipped past them. Jump back to attribute them.")
                 .font(.body).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center).frame(maxWidth: 380)
-            if !skipped.isEmpty {
-                Button("Review \(skipped.count) skipped") {
-                    withAnimation { skipped.removeAll() }
+            if openCount > 0 {
+                Button("Back to \(openCount) open") {
+                    withAnimation {
+                        cursor = units.firstIndex { !isResolved($0) } ?? 0
+                    }
                 }
                 .buttonStyle(.bordered)
             }
@@ -188,26 +323,33 @@ struct ReviewView: View {
                 VStack(alignment: .trailing, spacing: 2) {
                     Text(formatHours(unit.totalSeconds))
                         .font(.system(size: 20, weight: .bold)).monospacedDigit()
-                    Text(unit.isHostGroup ? "\(unit.hostPaths.count) to sort" : "this week")
+                    Text(unit.isHostGroup ? "\(unit.hostPaths.count) to sort" : periodLabel)
                         .font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
                         .textCase(.uppercase)
                 }
             }
 
-            if unit.isHostGroup {
-                VStack(spacing: 8) {
-                    ForEach(unit.hostPaths) { path in
-                        PathAssignRow(
-                            path: path,
-                            customers: customers,
-                            projects: projects,
-                            onCreateCustomer: { try state.database.createLocalCustomer(name: $0) },
-                            onCreateProject: { try state.database.createLocalProject(customerID: $0, name: $1) },
-                            onConfirm: { cust, proj in assignSignal(path, customerID: cust, projectID: proj) }
-                        )
-                    }
+            if let label = resolved[unit.id], !unit.isHostGroup {
+                // Already attributed/ignored this session → show result + undo.
+                resolvedBanner(label) { clear(unit) }
+            } else if unit.isHostGroup, case .hostGroup(let host, _) = unit {
+                if let label = resolved[unit.id] {
+                    resolvedBanner(label) { clear(unit) }
+                } else {
+                    hostGroupBody(unit, host: host)
                 }
             } else {
+                if showsScopePicker(unit) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Picker("", selection: $scope) {
+                            Text("Always").tag(AttrScope.always)
+                            Text("Just \(periodLabel)").tag(AttrScope.period)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        Text(scopeHint).font(.caption).foregroundStyle(.tertiary)
+                    }
+                }
                 InlineAssign(
                     customers: customers,
                     projects: projects,
@@ -216,91 +358,235 @@ struct ReviewView: View {
                     onCreateProject: { try state.database.createLocalProject(customerID: $0, name: $1) },
                     onConfirm: { cust, proj in confirm(unit, customerID: cust, projectID: proj) }
                 )
-                if case .signal(let s) = unit, s.kind == .gitRepoSlug {
+                if case .signal(let s) = unit, s.kind == .gitRepoSlug, scope == .always {
                     Label("Future commits to this repo attribute here automatically.",
                           systemImage: "info.circle")
                         .font(.caption).foregroundStyle(.tertiary)
                 }
-            }
-
-            Divider()
-            HStack {
-                Button("Skip for now") { skip(unit) }
-                    .buttonStyle(.plain).foregroundStyle(.secondary)
-                    .keyboardShortcut("s", modifiers: [])
-                Spacer()
                 if unit.canIgnore {
-                    Button("Ignore — don't ask again") { ignore(unit) }
-                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                    Divider()
+                    HStack {
+                        Spacer()
+                        Button("Ignore — don't ask again") { ignore(unit) }
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
+                            .font(.system(size: 13, weight: .medium))
+                    }
+                    Text("Ignore hides it permanently — the Always / Just-this-period choice only affects attribution.")
+                        .font(.caption2).foregroundStyle(.tertiary)
                 }
             }
-            .font(.system(size: 13, weight: .medium))
         }
         .padding(24)
         .glassCard(radius: 22)
     }
 
+    @ViewBuilder
+    private func resolvedBanner(_ label: String, onClear: @escaping () -> Void) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "checkmark.circle.fill").font(.system(size: 22)).foregroundStyle(TM.positive)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(label).font(.system(size: 15, weight: .semibold))
+                Text("Saved this session").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Clear", role: .destructive, action: onClear)
+        }
+        .padding(.vertical, 6)
+    }
+
+    @ViewBuilder
+    private func hostGroupBody(_ unit: ReviewUnit, host: AppDatabase.SignalAggregate) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if showsScopePicker(unit) {
+                Picker("", selection: $scope) {
+                    Text("Always").tag(AttrScope.always)
+                    Text("Just \(periodLabel)").tag(AttrScope.period)
+                }
+                .pickerStyle(.segmented).labelsHidden()
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("ASSIGN ENTIRE HOST").font(.system(size: 10, weight: .bold)).foregroundStyle(.tertiary)
+                InlineAssign(
+                    customers: customers, projects: projects, confirmLabel: "Assign host",
+                    onCreateCustomer: { try state.database.createLocalCustomer(name: $0) },
+                    onCreateProject: { try state.database.createLocalProject(customerID: $0, name: $1) },
+                    onConfirm: { cust, proj in assignSignal(host, customerID: cust, projectID: proj, markUnit: unit.id) }
+                )
+                Text("All current and future paths under \(host.value) attribute here.")
+                    .font(.caption).foregroundStyle(.tertiary)
+            }
+            Divider()
+            Text("OR ASSIGN INDIVIDUAL PATHS").font(.system(size: 10, weight: .bold)).foregroundStyle(.tertiary)
+            VStack(spacing: 8) {
+                ForEach(unit.hostPaths) { path in
+                    PathAssignRow(
+                        path: path,
+                        resolvedLabel: pathResolved[path.value],
+                        customers: customers,
+                        projects: projects,
+                        onCreateCustomer: { try state.database.createLocalCustomer(name: $0) },
+                        onCreateProject: { try state.database.createLocalProject(customerID: $0, name: $1) },
+                        onConfirm: { cust, proj in assignPath(path, customerID: cust, projectID: proj) },
+                        onIgnore: { ignorePath(path) },
+                        onClear: { clearPath(path) }
+                    )
+                }
+            }
+            Button("Ignore host — don't ask again") { ignore(unit) }
+                .buttonStyle(.plain).foregroundStyle(.secondary).font(.system(size: 13, weight: .medium))
+        }
+    }
+
+    /// Scope picker applies to rule-creating signals (repos / URLs / hosts),
+    /// not meetings (series attribution isn't time-bounded here).
+    private func showsScopePicker(_ unit: ReviewUnit) -> Bool {
+        switch unit {
+        case .signal, .hostGroup: return true
+        case .series, .event:     return false
+        }
+    }
+
+    private var scopeHint: String {
+        switch scope {
+        case .always: return "Creates a rule — future activity auto-attributes here."
+        case .period: return "Attributes only \(periodLabel)'s matching activity; other periods can go elsewhere."
+        }
+    }
+
     // MARK: - Actions
+    //
+    // Actions mutate the DB and record an in-session resolution (no reload /
+    // removal), so the snapshot is stable and any item can be revisited & undone.
+
+    /// Human label for the resolved banner / tags.
+    private func attrLabel(_ customerID: String, _ projectID: String?) -> String {
+        let c = customers.first { $0.id == customerID }?.name ?? customerID
+        if let pid = projectID, let p = projects.first(where: { $0.id == pid })?.name { return "\(c) · \(p)" }
+        return c
+    }
 
     private func confirm(_ unit: ReviewUnit, customerID: String, projectID: String?) {
         switch unit {
         case .signal(let s):
-            assignSignal(s, customerID: customerID, projectID: projectID)
+            run { try writeSignalRule(s, customerID: customerID, projectID: projectID) }
+            resolved[unit.id] = attrLabel(customerID, projectID); advance()
         case .hostGroup:
-            break // host group confirms per path
+            break // host group handled per path / whole-host
         case .series(let s):
-            write { try state.database.setMeetingSeriesAttribution(seriesID: s.seriesMasterID, customerID: customerID, projectID: projectID, isIgnored: false) }
+            run { try state.database.setMeetingSeriesAttribution(seriesID: s.seriesMasterID, customerID: customerID, projectID: projectID, isIgnored: false) }
+            resolved[unit.id] = attrLabel(customerID, projectID); advance()
         case .event(let e):
-            write { try state.database.setCalendarEventAttribution(eventID: e.id, customerID: customerID, projectID: projectID) }
+            run { try state.database.setCalendarEventAttribution(eventID: e.id, customerID: customerID, projectID: projectID) }
+            resolved[unit.id] = attrLabel(customerID, projectID); advance()
         }
     }
 
-    /// Writes a rule for a signal (repo / app / host / path), matching the
-    /// behaviour Discover used: replace any existing rule with the same
-    /// (kind, pattern) then upsert at priority 100.
-    private func assignSignal(_ signal: AppDatabase.SignalAggregate, customerID: String, projectID: String?) {
-        let kind = ruleKind(signal.kind)
-        let pattern: String = (signal.kind == .urlPath && !signal.value.contains("*"))
-            ? signal.value + "*" : signal.value
-        write {
-            let existing = try state.database.allRules().filter { $0.kind == kind && $0.pattern == pattern }
-            for rule in existing { try state.database.deleteRule(id: rule.id) }
-            try state.database.upsert(Rule(
-                id: UUID().uuidString, customerID: customerID, projectID: projectID,
-                kind: kind, pattern: pattern, priority: 100, createdAt: Date()))
-        }
+    /// Whole-host or single-signal rule assignment (advances).
+    private func assignSignal(_ signal: AppDatabase.SignalAggregate, customerID: String, projectID: String?, markUnit: String) {
+        run { try writeSignalRule(signal, customerID: customerID, projectID: projectID) }
+        resolved[markUnit] = attrLabel(customerID, projectID); advance()
     }
 
-    private func skip(_ unit: ReviewUnit) {
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-            _ = skipped.insert(unit.id)
+    /// A single path inside a host group — records path resolution, stays on card.
+    private func assignPath(_ path: AppDatabase.SignalAggregate, customerID: String, projectID: String?) {
+        run { try writeSignalRule(path, customerID: customerID, projectID: projectID) }
+        pathResolved[path.value] = attrLabel(customerID, projectID)
+    }
+
+    private func ignorePath(_ path: AppDatabase.SignalAggregate) {
+        run { try state.database.hideSignal(kind: .urlPath, value: path.value) }
+        pathResolved[path.value] = "Ignored"
+    }
+
+    private func clearPath(_ path: AppDatabase.SignalAggregate) {
+        let kind = ruleKind(path.kind)
+        let pattern = (path.kind == .urlPath && !path.value.contains("*")) ? path.value + "*" : path.value
+        run {
+            for r in try state.database.allRules().filter({ $0.kind == kind && $0.pattern == pattern }) {
+                try state.database.deleteRule(id: r.id)
+            }
+            for h in try state.database.allHiddenSignals().filter({ $0.kind == .urlPath && $0.value == path.value }) {
+                try state.database.unhide(id: h.id)
+            }
         }
+        pathResolved[path.value] = nil
     }
 
     private func ignore(_ unit: ReviewUnit) {
         switch unit {
         case .signal(let s):
-            if let hk = hiddenKind(s.kind) {
-                write { try state.database.hideSignal(kind: hk, value: s.value) }
+            if let hk = hiddenKind(s.kind) { run { try state.database.hideSignal(kind: hk, value: s.value) } }
+        case .hostGroup(let host, _):
+            run { try state.database.hideSignal(kind: .urlHost, value: host.value) }
+        case .series(let s):
+            run { try state.database.setMeetingSeriesAttribution(seriesID: s.seriesMasterID, customerID: nil, projectID: nil, isIgnored: true) }
+        case .event(let e):
+            run { try state.database.setCalendarEventIgnored(eventID: e.id, isIgnored: true) }
+        }
+        resolved[unit.id] = "Ignored"; advance()
+    }
+
+    /// Undo a resolved unit — delete its rule / clear its attribution / un-ignore.
+    private func clear(_ unit: ReviewUnit) {
+        switch unit {
+        case .signal(let s):
+            let kind = ruleKind(s.kind)
+            let pattern = (s.kind == .urlPath && !s.value.contains("*")) ? s.value + "*" : s.value
+            run {
+                for r in try state.database.allRules().filter({ $0.kind == kind && $0.pattern == pattern }) {
+                    try state.database.deleteRule(id: r.id)
+                }
+                if let hk = hiddenKind(s.kind) {
+                    for h in try state.database.allHiddenSignals().filter({ $0.kind == hk && $0.value == s.value }) {
+                        try state.database.unhide(id: h.id)
+                    }
+                }
             }
         case .hostGroup(let host, _):
-            write { try state.database.hideSignal(kind: .urlHost, value: host.value) }
+            run {
+                // whole-host rule + host hide
+                for r in try state.database.allRules().filter({ $0.kind == .urlHost && $0.pattern == host.value }) {
+                    try state.database.deleteRule(id: r.id)
+                }
+                for h in try state.database.allHiddenSignals().filter({ $0.kind == .urlHost && $0.value == host.value }) {
+                    try state.database.unhide(id: h.id)
+                }
+            }
         case .series(let s):
-            write { try state.database.setMeetingSeriesAttribution(seriesID: s.seriesMasterID, customerID: nil, projectID: nil, isIgnored: true) }
+            run { try state.database.setMeetingSeriesAttribution(seriesID: s.seriesMasterID, customerID: nil, projectID: nil, isIgnored: false) }
         case .event(let e):
-            write { try state.database.setCalendarEventIgnored(eventID: e.id, isIgnored: true) }
+            run {
+                try state.database.setCalendarEventAttribution(eventID: e.id, customerID: nil, projectID: nil)
+                try state.database.setCalendarEventIgnored(eventID: e.id, isIgnored: false)
+            }
+        }
+        resolved[unit.id] = nil
+    }
+
+    /// Shared rule writer: replace any rule with the same (kind, pattern), then
+    /// upsert at priority 100 with the current scope's validity window.
+    private func writeSignalRule(_ signal: AppDatabase.SignalAggregate, customerID: String, projectID: String?) throws {
+        let kind = ruleKind(signal.kind)
+        let pattern = (signal.kind == .urlPath && !signal.value.contains("*")) ? signal.value + "*" : signal.value
+        let (validFrom, validTo) = scopeBounds
+        for r in try state.database.allRules().filter({ $0.kind == kind && $0.pattern == pattern }) {
+            try state.database.deleteRule(id: r.id)
+        }
+        try state.database.upsert(Rule(
+            id: UUID().uuidString, customerID: customerID, projectID: projectID,
+            kind: kind, pattern: pattern, priority: 100, createdAt: Date(),
+            validFrom: validFrom, validTo: validTo))
+    }
+
+    private func advance() {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            cursor = min(units.count, cursor + 1)
         }
     }
 
-    /// Runs a DB mutation, counts it as one processed item, and reloads.
-    private func write(_ body: () throws -> Void) {
-        do {
-            try body()
-            processedCount += 1
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { reload() }
-        } catch {
-            loadError = error.localizedDescription
-        }
+    /// Runs a DB mutation; surfaces errors. Does NOT reload the snapshot.
+    private func run(_ body: () throws -> Void) {
+        do { try body() } catch { loadError = error.localizedDescription }
     }
 
     private func hiddenKind(_ k: AppDatabase.SignalAggregate.Kind) -> HiddenSignal.Kind? {
@@ -354,33 +640,39 @@ struct ReviewView: View {
             let seriesAttrs = try state.database.allMeetingSeriesAttributions()
             let m = RuleMatcher.make(customers: allCustomers, projects: allProjects, rules: rules, series: seriesAttrs)
             let hidden = try state.database.allHiddenSignals()
-            let hiddenApps = Set(hidden.filter { $0.kind == .appBundleID }.map { $0.value })
             let hiddenHosts = Set(hidden.filter { $0.kind == .urlHost }.map { $0.value })
+            let hiddenPaths = Set(hidden.filter { $0.kind == .urlPath }.map { $0.value })
 
             let series = try state.database.meetingSeriesAggregates(in: interval)
             let oneOffs = try state.database.oneOffMeetingAggregates(in: interval)
             let seriesByID = Dictionary(uniqueKeysWithValues: seriesAttrs.map { ($0.seriesMasterID, $0) })
 
+            let minSec = Double(AppSettings.reviewMinMinutes) * 60
             var built: [ReviewUnit] = []
 
             for agg in baseAggs {
                 switch agg.kind {
                 case .gitRepoSlug:
+                    if agg.totalSeconds < minSec { continue }
                     if m.attribute(kind: .gitRepoSlug, value: agg.value).customer == nil {
                         built.append(.signal(agg))
                     }
                 case .appBundleID:
-                    if hiddenApps.contains(agg.value) { continue }
-                    if m.attribute(kind: .appBundleID, value: agg.value).customer == nil {
-                        built.append(.signal(agg))
-                    }
+                    // Apps are intentionally not reviewable — e.g. VS Code can't be
+                    // mapped to a single customer. They still attribute via repo/URL.
+                    continue
                 case .urlHost:
+                    if agg.totalSeconds < minSec { continue }
                     if hiddenHosts.contains(agg.value) { continue }
                     if m.attribute(kind: .urlHost, value: agg.value).customer != nil { continue }
                     // High limit so a host's unattributed time surfaces as assignable
                     // paths rather than being orphaned beyond the default top-N cap.
                     let paths = (try? state.database.urlPathAggregates(forHost: agg.value, in: interval, sampleIntervalSeconds: sampleInterval, limit: 60)) ?? []
-                    let openPaths = paths.filter { m.attribute(kind: .urlPath, value: $0.value).customer == nil }
+                    let openPaths = paths.filter {
+                        $0.totalSeconds >= minSec
+                            && m.attribute(kind: .urlPath, value: $0.value).customer == nil
+                            && !hiddenPaths.contains($0.value)
+                    }
                     if openPaths.count >= 1 {
                         built.append(.hostGroup(host: agg, paths: openPaths))
                     } else if paths.isEmpty {
@@ -391,13 +683,13 @@ struct ReviewView: View {
                 }
             }
 
-            for s in series {
+            for s in series where s.totalSeconds >= minSec {
                 let attr = seriesByID[s.seriesMasterID]
                 if attr?.isIgnored == true { continue }
                 if attr?.customerID == nil { built.append(.series(s)) }
             }
             for e in oneOffs where e.customerID == nil {
-                built.append(.event(e))
+                if max(0, e.endAt.timeIntervalSince(e.startAt)) >= minSec { built.append(.event(e)) }
             }
 
             built.sort { $0.totalSeconds > $1.totalSeconds }
@@ -406,6 +698,10 @@ struct ReviewView: View {
             self.customers = allCustomers
             self.projects = allProjects
             self.units = built
+            // Fresh snapshot for this period — clear in-session resolutions & cursor.
+            self.resolved = [:]
+            self.pathResolved = [:]
+            self.cursor = 0
         } catch {
             loadError = error.localizedDescription
         }
@@ -544,36 +840,56 @@ private struct InlineAssign: View {
     }
 }
 
-/// One path row inside a host group — compact picker + Assign.
+/// One path row inside a host group — compact picker + Assign, or a resolved
+/// state (assigned/ignored) with an undo when already handled this session.
 private struct PathAssignRow: View {
     let path: AppDatabase.SignalAggregate
+    var resolvedLabel: String?
     let customers: [Customer]
     let projects: [Project]
     let onCreateCustomer: (String) throws -> Customer
     let onCreateProject: (String, String) throws -> Project
     let onConfirm: (String, String?) -> Void
+    let onIgnore: () -> Void
+    let onClear: () -> Void
 
     var pathLabel: String {
         if let slash = path.value.firstIndex(of: "/") { return String(path.value[slash...]) }
         return path.value
     }
+    private var timeLabel: String {
+        String(format: path.totalSeconds < 3600 ? "%.0f min" : "%.1f h",
+               path.totalSeconds < 3600 ? path.totalSeconds / 60 : path.totalSeconds / 3600)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(spacing: 8) {
                 Text(pathLabel).font(.system(.callout, design: .monospaced)).lineLimit(1).truncationMode(.middle)
                 Spacer()
-                Text(String(format: path.totalSeconds < 3600 ? "%.0f min" : "%.1f h",
-                            path.totalSeconds < 3600 ? path.totalSeconds / 60 : path.totalSeconds / 3600))
-                    .font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+                Text(timeLabel).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+                if resolvedLabel == nil {
+                    Button { onIgnore() } label: { Image(systemName: "eye.slash").font(.system(size: 11)) }
+                        .buttonStyle(.borderless).foregroundStyle(.secondary)
+                        .help("Ignore this path — don't ask again")
+                }
             }
-            InlineAssign(
-                customers: customers, projects: projects, confirmLabel: "Assign",
-                onCreateCustomer: onCreateCustomer, onCreateProject: onCreateProject,
-                onConfirm: onConfirm
-            )
+            if let label = resolvedLabel {
+                HStack(spacing: 7) {
+                    Image(systemName: "checkmark.circle.fill").font(.system(size: 13)).foregroundStyle(TM.positive)
+                    Text(label).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Clear", action: onClear).buttonStyle(.borderless).font(.caption)
+                }
+            } else {
+                InlineAssign(
+                    customers: customers, projects: projects, confirmLabel: "Assign",
+                    onCreateCustomer: onCreateCustomer, onCreateProject: onCreateProject,
+                    onConfirm: onConfirm
+                )
+            }
         }
         .padding(12)
-        .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 12))
+        .background(.quaternary.opacity(resolvedLabel == nil ? 0.4 : 0.25), in: .rect(cornerRadius: 12))
     }
 }

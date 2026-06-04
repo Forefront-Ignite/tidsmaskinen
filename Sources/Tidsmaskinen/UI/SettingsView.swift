@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Categories for the two-pane Settings layout (macOS System Settings style).
 enum SettingsCategory: String, CaseIterable, Identifiable {
@@ -48,6 +49,7 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.commandCenterEnabled) private var commandCenterEnabled: Bool = true
     @AppStorage(SettingsKey.commandCenterBaseURL) private var commandCenterBaseURL: String = ""
     @AppStorage(SettingsKey.appearance) private var appearanceRaw: String = AppTheme.system.rawValue
+    @AppStorage(SettingsKey.reviewMinMinutes) private var reviewMinMinutes: Int = 1
     @State private var launchAtLogin: Bool = LoginItemManager.isEnabled
     @State private var loginItemError: String?
     @State private var commandCenterTokenInput: String = ""
@@ -63,42 +65,97 @@ struct SettingsView: View {
 
     @State private var category: SettingsCategory = .general
     @State private var hiddenSignals: [HiddenSignal] = []
+    @State private var accessibilityTrusted: Bool = Probes.isAccessibilityTrusted(promptIfNeeded: false)
 
     var body: some View {
         HSplitView {
             categoryRail
-                .frame(minWidth: 210, idealWidth: 230, maxWidth: 280)
-            Form {
-                paneContent
+                .frame(minWidth: 220, idealWidth: 240, maxWidth: 280)
+            VStack(alignment: .leading, spacing: 0) {
+                paneHeader
+                HStack(spacing: 0) {
+                    Form { paneContent }
+                        .formStyle(.grouped)
+                        .scrollContentBackground(.hidden)
+                        .frame(maxWidth: 640)
+                    Spacer(minLength: 0)
+                }
             }
-            .formStyle(.grouped)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 720, minHeight: 560)
-        .onAppear { refreshCommandCenterCounts(); reloadHidden() }
+        .frame(minWidth: 760, minHeight: 560)
+        .onAppear { refreshCommandCenterCounts(); reloadHidden(); accessibilityTrusted = Probes.isAccessibilityTrusted(promptIfNeeded: false) }
         .onChange(of: state.commandCenterLastSyncAt) { _, _ in refreshCommandCenterCounts() }
         .onChange(of: category) { _, _ in reloadHidden() }
     }
 
     // MARK: - Two-pane scaffold
 
+    /// Button-based category list (a plain `List(selection:)` swallowed clicks
+    /// here). Styled like the prototype: icon chip + label/detail, accent fill
+    /// when active, count badge on Ignored.
     @ViewBuilder
     private var categoryRail: some View {
-        List(selection: $category) {
-            ForEach(SettingsCategory.allCases) { cat in
-                Label {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(cat.label)
-                        Text(cat.detail).font(.caption2).foregroundStyle(.secondary)
+        ScrollView {
+            VStack(spacing: 3) {
+                ForEach(SettingsCategory.allCases) { cat in
+                    let active = cat == category
+                    Button {
+                        category = cat
+                    } label: {
+                        HStack(spacing: 11) {
+                            Image(systemName: cat.icon)
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(active ? Color.white : Color.secondary)
+                                .frame(width: 28, height: 28)
+                                .background(active ? Color.white.opacity(0.22) : Color.secondary.opacity(0.12),
+                                            in: .rect(cornerRadius: 8))
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(cat.label).font(.system(size: 13.5, weight: .semibold))
+                                Text(cat.detail).font(.system(size: 10.5))
+                                    .foregroundStyle(active ? Color.white.opacity(0.8) : Color.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer(minLength: 4)
+                            if cat == .ignored, !hiddenSignals.isEmpty {
+                                Text("\(hiddenSignals.count)")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(active ? Color.white : Color.secondary)
+                                    .padding(.horizontal, 6).padding(.vertical, 1)
+                                    .background(active ? Color.white.opacity(0.25) : Color.secondary.opacity(0.18),
+                                                in: Capsule())
+                            }
+                        }
+                        .foregroundStyle(active ? Color.white : Color.primary)
+                        .padding(.horizontal, 10).padding(.vertical, 9)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(active ? TM.accent : Color.clear, in: .rect(cornerRadius: 11))
+                        .contentShape(Rectangle())
                     }
-                } icon: {
-                    Image(systemName: cat.icon).foregroundStyle(TM.accent)
+                    .buttonStyle(.plain)
                 }
-                .tag(cat)
-                .badge(cat == .ignored ? hiddenSignals.count : 0)
             }
+            .padding(10)
         }
-        .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .background { TMWallpaper().ignoresSafeArea() }
+    }
+
+    @ViewBuilder
+    private var paneHeader: some View {
+        HStack(spacing: 13) {
+            Image(systemName: category.icon)
+                .font(.system(size: 20))
+                .foregroundStyle(TM.accent)
+                .frame(width: 42, height: 42)
+                .background(TM.accentSoft, in: .rect(cornerRadius: 12))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(category.label).font(.system(size: 19, weight: .bold))
+                Text(category.detail).font(.subheadline).foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 24).padding(.top, 22).padding(.bottom, 14)
     }
 
     @ViewBuilder
@@ -148,6 +205,30 @@ struct SettingsView: View {
             }
         }
 
+        Section("Permissions") {
+            HStack {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Accessibility")
+                        Text(accessibilityTrusted
+                             ? "Granted — window titles & project detection work."
+                             : "Needed for window titles and project detection.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: accessibilityTrusted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(accessibilityTrusted ? TM.positive : .orange)
+                }
+                Spacer()
+                if !accessibilityTrusted {
+                    Button("Grant…") {
+                        _ = Probes.isAccessibilityTrusted(promptIfNeeded: true)
+                        openAccessibilitySettings()
+                    }
+                }
+            }
+        }
+
         Section("Startup") {
             Toggle("Open at login", isOn: launchAtLoginBinding)
             Text(LoginItemManager.statusDescription)
@@ -186,6 +267,16 @@ struct SettingsView: View {
             Text("Off: only one customer billed per minute. On: a meeting and concurrent coding both attribute to their own customers.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+
+        Section("Review & Discover") {
+            Stepper(value: $reviewMinMinutes, in: 0...60, step: 1) {
+                LabeledContent("Hide items under") {
+                    Text(reviewMinMinutes == 0 ? "off" : "\(reviewMinMinutes) min").monospacedDigit()
+                }
+            }
+            Text("Items shorter than this are hidden from Review and Discover (0 shows everything). Default 1 min filters out flicker.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -237,13 +328,21 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
-                Spacer()
                 if state.isSignedIn {
+                    Label(state.signedInPrincipal ?? "Connected", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(TM.positive).font(.callout)
+                    Spacer()
                     Button(role: .destructive) {
                         Task { await state.signOut() }
-                    } label: {
-                        Text("Sign out (\(state.signedInPrincipal ?? ""))")
-                    }
+                    } label: { Text("Sign out") }
+                } else {
+                    Label("Not connected", systemImage: "person.crop.circle.badge.xmark")
+                        .foregroundStyle(.secondary).font(.callout)
+                    Spacer()
+                    Button {
+                        state.showSignIn = true
+                    } label: { Label("Sign in to Microsoft", systemImage: "person.crop.circle.badge.plus") }
+                    .buttonStyle(.borderedProminent)
                 }
             }
             Text("Changing the preset, Client ID or Tenant invalidates the cached refresh token. Sign out and sign in again after editing.")
@@ -290,6 +389,12 @@ struct SettingsView: View {
 
     private func reloadHidden() {
         hiddenSignals = (try? state.database.allHiddenSignals()) ?? []
+    }
+
+    private func openAccessibilitySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private func unhide(_ signal: HiddenSignal) {

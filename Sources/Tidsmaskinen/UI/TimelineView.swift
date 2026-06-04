@@ -104,7 +104,6 @@ struct TimelineView: View {
                 .padding(.vertical, 16)
             }
         }
-        .tmWallpaper()
         .overlay(alignment: .bottom) { undoToast }
         .onAppear {
             reload()
@@ -1053,6 +1052,7 @@ struct TimelineView: View {
             let micSessions = try state.database.micSessions(in: dayInterval)
             let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions)
             let sessions = try state.database.sessions(in: dayInterval)
+            let claudeDeltas = try state.database.claudeActiveDeltas(in: dayInterval)
             customers = try state.database.allCustomers()
             projects = try state.database.allProjects()
             let rules = try state.database.allRules()
@@ -1083,6 +1083,7 @@ struct TimelineView: View {
                 samples: samples,
                 events: events,
                 sessions: sessions,
+                claudeDeltas: claudeDeltas,
                 matcher: matcher,
                 sampleIntervalSeconds: AppSettings.sampleIntervalSeconds,
                 claudeIdleThresholdSeconds: TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60),
@@ -1218,8 +1219,12 @@ private struct ReattributePopover: View {
 
     @State private var selectedCustomerID: String = ""
     @State private var selectedProjectID: String = ""
+    @State private var scope: AttributionScope = .justThis
     @State private var error: String?
     @State private var confirmingSeriesIgnore: Bool = false
+
+    /// Non-calendar block with a signal a rule can attach to → offer scope.
+    private var showsScope: Bool { !isCalendarBlock && block.ruleSignal != nil }
 
     private var isCalendarBlock: Bool { block.track == .calendar }
     private var isClaudeBlock: Bool { block.track == .claudeCode }
@@ -1264,6 +1269,15 @@ private struct ReattributePopover: View {
                     emptyCustomerLabel: emptyCustomerLabel,
                     error: $error
                 )
+            }
+
+            if showsScope {
+                AttributionScopePicker(
+                    scope: $scope,
+                    options: [.justThis, .today, .thisWeek, .always],
+                    hint: scope == .justThis
+                        ? "Attributes just this block."
+                        : "Creates a \(scope == .always ? "permanent" : scope.label.lowercased()) rule for \(block.ruleSignal?.pattern ?? "this signal").")
             }
 
             if let error {
@@ -1540,6 +1554,20 @@ private struct ReattributePopover: View {
 
     private func apply(customerID: String?, projectID: String?) {
         do {
+            // Scoped rule creation (today / this week / always) when the user
+            // chose more than "just this block" and we have a signal + customer.
+            if scope.createsRule, let sig = block.ruleSignal, let cid = customerID {
+                let (validFrom, validTo) = scope.bounds(reference: block.startedAt)
+                let existing = try state.database.allRules().filter { $0.kind == sig.kind && $0.pattern == sig.pattern }
+                for rule in existing { try state.database.deleteRule(id: rule.id) }
+                try state.database.upsert(Rule(
+                    id: UUID().uuidString, customerID: cid, projectID: projectID,
+                    kind: sig.kind, pattern: sig.pattern, priority: 100, createdAt: Date(),
+                    validFrom: validFrom, validTo: validTo))
+                onSaved()
+                return
+            }
+            // "Just this block" (or clearing) → precise per-occurrence override.
             switch block.source {
             case .calendarEvent(let id):
                 try state.database.setCalendarEventAttribution(eventID: id, customerID: customerID, projectID: projectID)

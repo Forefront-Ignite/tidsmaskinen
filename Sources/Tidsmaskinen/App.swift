@@ -19,7 +19,9 @@ struct TidsmaskinenApp: App {
                 .environmentObject(state)
                 .preferredColorScheme(colorScheme)
         } label: {
-            Image(systemName: "clock.badge.checkmark")
+            // Monochrome segmented-clock mark — the design's tray glyph.
+            // Must be a template NSImage; a SwiftUI Canvas doesn't render here.
+            Image(nsImage: AppMark.trayImage)
         }
         .menuBarExtraStyle(.window)
 
@@ -30,6 +32,9 @@ struct TidsmaskinenApp: App {
         }
         .defaultSize(width: 1100, height: 680)
         .windowResizability(.contentMinSize)
+        // Each view renders its own header; hide the system title bar so the
+        // title isn't shown twice and the glass content runs full-height.
+        .windowStyle(.hiddenTitleBar)
         .commands {
             // Wire the standard ⌘, slot to open the main window on the Settings
             // section. This app has no Settings scene (Settings is a sidebar

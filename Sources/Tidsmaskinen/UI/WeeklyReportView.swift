@@ -49,7 +49,6 @@ struct WeeklyReportView: View {
                 Spacer()
             }
         }
-        .tmWallpaper()
         .onAppear { reload(immediate: true) }
         .onDisappear { reloadTask?.cancel() }
         .onChange(of: weekStart) { _, _ in reload(immediate: true) }
@@ -79,11 +78,11 @@ struct WeeklyReportView: View {
                 .buttonStyle(.bordered)
             }
             DateNavigator(
-                title: "This week",
+                title: weekStart == calendar.currentWeekInterval().start ? "This week" : weekTitle,
                 nowLabel: "This week",
                 prevHelp: "Previous week",
                 nextHelp: "Next week",
-                titleMinWidth: 120,
+                titleMinWidth: 150,
                 nowDisabled: weekStart == calendar.currentWeekInterval().start,
                 onPrev: { weekStart = calendar.date(byAdding: .day, value: -7, to: weekStart) ?? weekStart },
                 onNext: { weekStart = calendar.date(byAdding: .day, value: 7, to: weekStart) ?? weekStart },

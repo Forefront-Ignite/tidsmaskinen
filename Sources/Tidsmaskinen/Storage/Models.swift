@@ -114,6 +114,21 @@ struct Rule: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, E
     var pattern: String
     var priority: Int
     var createdAt: Date
+    /// Optional validity window. When both are nil the rule is permanent.
+    /// A bounded rule only matches activity whose timestamp falls in
+    /// `[validFrom, validTo)` — used for "attribute this week / today only".
+    var validFrom: Date? = nil
+    var validTo: Date? = nil
+
+    /// True when this rule attributes activity at the given instant.
+    func isValid(at date: Date) -> Bool {
+        if let from = validFrom, date < from { return false }
+        if let to = validTo, date >= to { return false }
+        return true
+    }
+
+    /// A rule with any bound set is temporary (expires / is windowed).
+    var isTemporary: Bool { validFrom != nil || validTo != nil }
 
     enum Kind: String, Codable, CaseIterable, Identifiable, Hashable {
         case gitRemoteHost
@@ -375,6 +390,7 @@ struct HiddenSignal: Codable, FetchableRecord, MutablePersistableRecord, Identif
     enum Kind: String, Codable, Hashable {
         case appBundleID
         case urlHost
+        case urlPath
     }
 
     var id: String

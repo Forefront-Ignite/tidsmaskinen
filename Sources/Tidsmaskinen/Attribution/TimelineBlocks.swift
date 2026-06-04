@@ -22,6 +22,12 @@ struct TimelineBlock: Identifiable {
         case foregroundSamples(ids: [Int64])
     }
 
+    /// The signal a time-bounded/permanent rule would be built from when the
+    /// user reattributes this block with a scope other than "just this block".
+    /// nil for calendar blocks (which use event/series attribution) and any
+    /// block with no clean signal.
+    struct RuleSignal: Equatable { let kind: Rule.Kind; let pattern: String }
+
     let id: String
     let track: Track
     let source: Source
@@ -41,6 +47,8 @@ struct TimelineBlock: Identifiable {
     let appBundleID: String?
     /// Series master id, present on calendar-event blocks that are part of a series.
     let seriesMasterID: String?
+    /// Signal for "attribute this signal for today/this week/always" from My day.
+    var ruleSignal: RuleSignal? = nil
 
     var durationSeconds: TimeInterval {
         max(1, endedAt.timeIntervalSince(startedAt))
@@ -62,6 +70,7 @@ enum TimelineBuilder {
                       samples: [ActivitySample],
                       events: [CalendarEvent],
                       sessions: [ClaudeSession],
+                      claudeDeltas: [AppDatabase.ClaudeActiveDelta] = [],
                       matcher: RuleMatcher,
                       sampleIntervalSeconds: Int,
                       claudeIdleThresholdSeconds: TimeInterval,
@@ -98,40 +107,74 @@ enum TimelineBuilder {
                                                matcher: matcher)
 
         // ---- Claude Code sessions ----
-        let claudeBlocks: [TimelineBlock] = sessions.compactMap { session -> TimelineBlock? in
-            // For open sessions, cap the rendered end at lastActivityAt + idleThreshold so
-            // a session that idled overnight (no SessionEnd received before sleep) doesn't
-            // visually paint the whole sleep window as work.
-            let inferredEnd: Date = {
-                if let last = session.lastActivityAt {
-                    return max(session.startedAt, last.addingTimeInterval(claudeIdleThresholdSeconds))
-                }
-                return session.startedAt
-            }()
-            let sessionEnd = session.endedAt ?? inferredEnd
-            let clippedStart = max(session.startedAt, day.start)
-            let clippedEnd = min(sessionEnd, day.end)
-            guard clippedEnd > clippedStart else { return nil }
+        // A session spans wall-clock from start to end, but most of that can be
+        // idle. When per-event activity deltas are available we render only the
+        // ACTIVE spans (merging gaps ≤ idle threshold) so an editor left open
+        // since 00:00 doesn't paint the whole day as work. Sessions without
+        // deltas fall back to a single capped block.
+        let deltasBySession = Dictionary(grouping: claudeDeltas, by: { $0.sessionID })
+        let claudeBlocks: [TimelineBlock] = sessions.flatMap { session -> [TimelineBlock] in
             let attribution = matcher.attribute(session: session)
             let override = (session.customerID != nil)
             let titlePath = session.gitRepoPath ?? session.cwd ?? "(no cwd)"
             let title = (titlePath as NSString).lastPathComponent
             let subtitle = session.gitRemoteURL ?? session.cwd
-            return TimelineBlock(
-                id: "ses-\(session.id)",
-                track: .claudeCode,
-                source: .claudeSession(id: session.id),
-                startedAt: clippedStart,
-                endedAt: clippedEnd,
-                title: title,
-                subtitle: subtitle,
-                attribution: attribution,
-                eventAttribution: nil,
-                hasManualOverride: override,
-                isIdle: !session.isActive(idleThresholdSeconds: claudeIdleThresholdSeconds) && session.endedAt == nil,
-                appBundleID: nil,
-                seriesMasterID: nil
-            )
+
+            let claudeSignal: TimelineBlock.RuleSignal? = session.gitRemoteURL
+                .flatMap { RuleMatcher.gitSlug(fromRemote: $0) }
+                .map { TimelineBlock.RuleSignal(kind: .gitRepoSlug, pattern: $0) }
+            func block(_ start: Date, _ end: Date, idSuffix: String, idle: Bool) -> TimelineBlock? {
+                let clippedStart = max(start, day.start)
+                let clippedEnd = min(end, day.end)
+                guard clippedEnd > clippedStart else { return nil }
+                return TimelineBlock(
+                    id: "ses-\(session.id)\(idSuffix)",
+                    track: .claudeCode,
+                    source: .claudeSession(id: session.id),
+                    startedAt: clippedStart,
+                    endedAt: clippedEnd,
+                    title: title,
+                    subtitle: subtitle,
+                    attribution: attribution,
+                    eventAttribution: nil,
+                    hasManualOverride: override,
+                    isIdle: idle,
+                    appBundleID: nil,
+                    seriesMasterID: nil,
+                    ruleSignal: claudeSignal
+                )
+            }
+
+            let deltas = (deltasBySession[session.id] ?? []).sorted { $0.occurredAt < $1.occurredAt }
+            if !deltas.isEmpty {
+                // Build active intervals [occurredAt - gained, occurredAt], merging
+                // those separated by ≤ the idle threshold into one work block.
+                var intervals: [(start: Date, end: Date)] = []
+                for d in deltas {
+                    let s = d.occurredAt.addingTimeInterval(-max(1, d.gainedSeconds))
+                    let e = d.occurredAt
+                    if var last = intervals.last, s.timeIntervalSince(last.end) <= claudeIdleThresholdSeconds {
+                        last.end = max(last.end, e)
+                        intervals[intervals.count - 1] = last
+                    } else {
+                        intervals.append((s, e))
+                    }
+                }
+                return intervals.enumerated().compactMap { i, iv in
+                    block(iv.start, iv.end, idSuffix: "-\(i)", idle: false)
+                }
+            } else {
+                // No deltas: cap an open session at lastActivity + idle threshold.
+                let inferredEnd: Date = {
+                    if let last = session.lastActivityAt {
+                        return max(session.startedAt, last.addingTimeInterval(claudeIdleThresholdSeconds))
+                    }
+                    return session.startedAt
+                }()
+                let end = session.endedAt ?? inferredEnd
+                let idle = !session.isActive(idleThresholdSeconds: claudeIdleThresholdSeconds) && session.endedAt == nil
+                return [block(session.startedAt, end, idSuffix: "", idle: idle)].compactMap { $0 }
+            }
         }
 
         return DayBundle(calendar: calendarBlocks,
@@ -179,6 +222,17 @@ enum TimelineBuilder {
             let title = g.representative.appName ?? g.representative.appBundleID ?? "—"
             let subtitle = representativeSubtitle(for: g.samples)
 
+            // Most-specific signal a rule could attach to: repo > host > app.
+            let rep = g.representative
+            let signal: TimelineBlock.RuleSignal? = {
+                if let url = rep.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: url) {
+                    return TimelineBlock.RuleSignal(kind: .gitRepoSlug, pattern: slug)
+                }
+                if let host = rep.chromeHost { return TimelineBlock.RuleSignal(kind: .urlHost, pattern: host) }
+                if let bid = rep.appBundleID { return TimelineBlock.RuleSignal(kind: .appBundleID, pattern: bid) }
+                return nil
+            }()
+
             // Extend the block end by one sample interval so a single-sample
             // block is still visible on the timeline.
             let endedAt = g.last.addingTimeInterval(interval)
@@ -195,7 +249,8 @@ enum TimelineBuilder {
                 hasManualOverride: override,
                 isIdle: g.representative.isIdle,
                 appBundleID: g.representative.appBundleID,
-                seriesMasterID: nil
+                seriesMasterID: nil,
+                ruleSignal: signal
             )
         }
     }

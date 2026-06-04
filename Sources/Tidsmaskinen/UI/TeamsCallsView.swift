@@ -117,11 +117,11 @@ struct TeamsCallsView: View {
                 prefillCustomerID: attribution.customer?.id ?? "",
                 prefillProjectID: attribution.project?.id ?? "",
                 autoMatched: attribution.fromRule,
-                onSave: { customerID, projectID in
-                    save(session: segment.session, customerID: customerID, projectID: projectID)
+                onSave: { customerID, projectID, scope in
+                    save(session: segment.session, customerID: customerID, projectID: projectID, scope: scope)
                 },
                 onClear: {
-                    save(session: segment.session, customerID: nil, projectID: nil)
+                    save(session: segment.session, customerID: nil, projectID: nil, scope: .justThis)
                 }
             )
         }
@@ -137,6 +137,7 @@ struct TeamsCallsView: View {
     @ViewBuilder
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
+            Text("Calls").font(.system(size: 24, weight: .bold))
             HStack(alignment: .top) {
                 Text("Microphone-active sessions, regardless of which app was frontmost. Tagged with whichever VoIP apps were running at the time.")
                     .font(.caption)
@@ -374,13 +375,27 @@ struct TeamsCallsView: View {
         return (result.customer, result.project, result.matchingRule != nil)
     }
 
-    private func save(session: MicSession, customerID: String?, projectID: String?) {
+    private func save(session: MicSession, customerID: String?, projectID: String?, scope: AttributionScope) {
         do {
+            // Always pin this specific session.
             try state.database.setMicSessionAttribution(
                 id: session.id,
                 customerID: customerID,
                 projectID: projectID
             )
+            // Beyond "just this", also teach a Slack-channel rule (bounded by the
+            // session's day/week, or permanent) so future huddles in that channel
+            // auto-attribute. Only possible when the channel is known.
+            if scope.createsRule, let cid = customerID, let channel = session.slackChannel {
+                let (validFrom, validTo) = scope.bounds(reference: session.startedAt)
+                let existing = try state.database.allRules()
+                    .filter { $0.kind == .slackChannel && $0.pattern == channel }
+                for rule in existing { try state.database.deleteRule(id: rule.id) }
+                try state.database.upsert(Rule(
+                    id: UUID().uuidString, customerID: cid, projectID: projectID,
+                    kind: .slackChannel, pattern: channel, priority: 100, createdAt: Date(),
+                    validFrom: validFrom, validTo: validTo))
+            }
             reload()
         } catch {
             loadError = error.localizedDescription
@@ -398,12 +413,13 @@ private struct CallDetailSheet: View {
     /// True when the prefill came from a Slack-channel rule rather than a saved
     /// override — drives the "Save to pin it" hint.
     let autoMatched: Bool
-    let onSave: (String?, String?) -> Void
+    let onSave: (String?, String?, AttributionScope) -> Void
     let onClear: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var selectedCustomerID: String = ""
     @State private var selectedProjectID: String = ""
+    @State private var scope: AttributionScope = .justThis
     @State private var appBreakdown: [AppUsage] = []
     @State private var urlBreakdown: [URLUsage] = []
     @State private var loadError: String?
@@ -492,6 +508,14 @@ private struct CallDetailSheet: View {
                 emptyCustomerLabel: "Unattributed",
                 error: Binding(get: { loadError }, set: { loadError = $0 })
             )
+            if session.slackChannel != nil {
+                AttributionScopePicker(
+                    scope: $scope,
+                    options: [.justThis, .today, .thisWeek, .always],
+                    hint: scope == .justThis
+                        ? "Attributes just this call."
+                        : "Also teaches a #\(session.slackChannel ?? "") rule\(scope == .always ? "" : " for \(scope.label.lowercased())").")
+            }
         }
     }
 
@@ -558,7 +582,7 @@ private struct CallDetailSheet: View {
             Button("Save") {
                 let cid = selectedCustomerID.isEmpty ? nil : selectedCustomerID
                 let pid = selectedProjectID.isEmpty ? nil : selectedProjectID
-                onSave(cid, pid)
+                onSave(cid, pid, scope)
                 dismiss()
             }
             .keyboardShortcut(.defaultAction)

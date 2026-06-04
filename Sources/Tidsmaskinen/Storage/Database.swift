@@ -374,6 +374,17 @@ struct AppDatabase {
                 }
             }
         }
+
+        migrator.registerMigration("v18_rule_validity_window") { db in
+            // Temporary attribution: a rule can be bounded to a time window so
+            // "this week portal.azure.com was customer X" auto-attributes the
+            // rest of that period without permanently mapping the signal.
+            // Both nil = a permanent rule (the default).
+            try db.alter(table: "rules") { t in
+                t.add(column: "validFrom", .datetime)
+                t.add(column: "validTo", .datetime)
+            }
+        }
         try migrator.migrate(dbQueue)
     }
 

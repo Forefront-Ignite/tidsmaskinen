@@ -14,6 +14,11 @@ struct CustomersView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            HStack {
+                Text("Customers").font(.system(size: 24, weight: .bold))
+                Spacer()
+            }
+            .padding(.horizontal, 20).padding(.top, 14).padding(.bottom, 8)
             if state.commandCenterTokenInvalid {
                 tokenInvalidBanner
             }
@@ -106,6 +111,7 @@ struct CustomersView: View {
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
 
             Divider()
 
@@ -275,7 +281,14 @@ struct CustomersView: View {
             Text(rule.pattern)
                 .font(.system(.callout, design: .monospaced))
                 .lineLimit(1).truncationMode(.middle)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if let scope = ruleScopeLabel(rule) {
+                Text(scope)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 6).padding(.vertical, 1)
+                    .background(Color.orange.opacity(0.14), in: Capsule())
+            }
+            Spacer(minLength: 0)
             Image(systemName: "arrow.right").font(.caption).foregroundStyle(.tertiary)
             Text(projectName(for: rule.projectID) ?? customer.name)
                 .font(.system(size: 13))
@@ -306,6 +319,15 @@ struct CustomersView: View {
     private func projectName(for id: String?) -> String? {
         guard let id else { return nil }
         return customerProjects.first { $0.id == id }?.name
+    }
+
+    /// Short tag for a time-bounded (temporary) rule, else nil for permanent.
+    private func ruleScopeLabel(_ rule: Rule) -> String? {
+        guard rule.isTemporary, let to = rule.validTo else { return rule.isTemporary ? "temporary" : nil }
+        let span = (rule.validFrom.map { to.timeIntervalSince($0) }) ?? 0
+        if span > 0, span <= 36 * 3600 { return "today" }
+        if span > 0, span <= 8 * 86400 { return "this week" }
+        return "until " + to.formatted(.dateTime.day().month())
     }
 
     private func reload() {
