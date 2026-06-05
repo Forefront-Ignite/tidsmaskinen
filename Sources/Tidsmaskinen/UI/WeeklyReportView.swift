@@ -19,6 +19,9 @@ struct WeeklyReportView: View {
     /// Derived per-customer rollups, recomputed only when the report reloads
     /// (not on every body evaluation).
     @State private var summaries: [CustomerSummary] = []
+    /// Derived per-(customer, project) per-day grid rows, recomputed only when
+    /// the report reloads (the source for the "Hours by project & day" table).
+    @State private var gridGroups: [GridGroup] = []
     /// The review backlog for this week — the actionable items the Review screen
     /// would show. Drives the hero's "things worth reviewing" indicator so it
     /// only nags when there's genuine work (not for ambient app/sub-threshold
@@ -44,6 +47,7 @@ struct WeeklyReportView: View {
                 ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: 22) {
                         heroRow(report)
+                        projectGridPanel(report)
                         dayBarsPanel(report)
                         customerList(report)
                     }
@@ -242,6 +246,131 @@ struct WeeklyReportView: View {
         .glassCard()
     }
 
+    // MARK: - Hours by project & day grid
+
+    /// Spreadsheet-style table: one row per project (grouped under its customer),
+    /// one column per weekday, cells = that project's hours that day, with a
+    /// per-customer subtotal, a per-project row total, and a column-total footer.
+    /// This is the on-screen twin of the TSV the "Copy as TSV" button produces —
+    /// it's the only place you can read "project X, Tuesday = 2.0h" directly.
+    @ViewBuilder
+    private func projectGridPanel(_ report: WeeklyReport) -> some View {
+        let groups = self.gridGroups
+        let dayWidth: CGFloat = 46
+        let totalWidth: CGFloat = 60
+
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Hours by project & day").font(.system(size: 15, weight: .bold))
+                Spacer()
+                Text("each cell is that project's hours that day")
+                    .font(.caption).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 22).padding(.top, 18).padding(.bottom, 12)
+
+            if groups.isEmpty {
+                Text("No attributed time this week yet.")
+                    .font(.system(size: 13)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 22).padding(.bottom, 18)
+            } else {
+                Grid(alignment: .trailing, horizontalSpacing: 10, verticalSpacing: 0) {
+                    // Column headers: weekday over day-of-month.
+                    GridRow {
+                        Text("PROJECT")
+                            .font(.system(size: 11, weight: .semibold)).foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .gridColumnAlignment(.leading)
+                        ForEach(Array(days.enumerated()), id: \.offset) { _, day in
+                            VStack(spacing: 1) {
+                                Text(DateFormatting.weekdayShort.string(from: day))
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text(dayNumber(day))
+                                    .font(.system(size: 9)).foregroundStyle(.tertiary)
+                            }
+                            .frame(width: dayWidth)
+                            .gridColumnAlignment(.center)
+                        }
+                        Text("TOTAL")
+                            .font(.system(size: 11, weight: .semibold)).foregroundStyle(.tertiary)
+                            .frame(width: totalWidth, alignment: .trailing)
+                            .gridColumnAlignment(.trailing)
+                    }
+                    .padding(.bottom, 8)
+
+                    Divider().gridCellUnsizedAxes(.horizontal)
+
+                    ForEach(groups) { g in
+                        // Customer subtotal header — name + color, weekly total.
+                        GridRow {
+                            HStack(spacing: 9) {
+                                ColorDot(color: g.color, size: 11, square: true)
+                                Text(g.name).font(.system(size: 13.5, weight: .semibold))
+                                Spacer(minLength: 0)
+                            }
+                            .gridCellColumns(8)
+                            Text(gridNum(g.total))
+                                .font(.system(size: 13, weight: .bold)).monospacedDigit()
+                                .frame(width: totalWidth, alignment: .trailing)
+                        }
+                        .padding(.top, 13).padding(.bottom, 4)
+
+                        ForEach(g.projects) { p in
+                            GridRow {
+                                Text(p.name)
+                                    .font(.system(size: 12.5)).foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.leading, 20)
+                                ForEach(Array(p.perDay.enumerated()), id: \.offset) { _, h in
+                                    cellText(h).frame(width: dayWidth, alignment: .trailing)
+                                }
+                                Text(gridNum(p.total))
+                                    .font(.system(size: 12.5, weight: .semibold)).monospacedDigit()
+                                    .frame(width: totalWidth, alignment: .trailing)
+                            }
+                            .padding(.vertical, 3)
+                        }
+                    }
+
+                    Divider().gridCellUnsizedAxes(.horizontal).padding(.top, 9)
+
+                    // Column totals — these match the hero's "tracked this week".
+                    GridRow {
+                        Text("Total").font(.system(size: 13, weight: .bold))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        ForEach(Array(report.dayTotals.enumerated()), id: \.offset) { _, h in
+                            Text(h > 0 ? gridNum(h) : "·")
+                                .font(.system(size: 12.5, weight: .bold))
+                                .foregroundStyle(h > 0 ? Color.primary : Color(.quaternaryLabelColor))
+                                .monospacedDigit()
+                                .frame(width: dayWidth, alignment: .trailing)
+                        }
+                        Text(gridNum(report.grandTotal))
+                            .font(.system(size: 13, weight: .heavy)).monospacedDigit()
+                            .frame(width: totalWidth, alignment: .trailing)
+                    }
+                    .padding(.top, 11)
+                }
+                .padding(.horizontal, 22).padding(.bottom, 18)
+            }
+        }
+        .glassCard()
+    }
+
+    private func dayNumber(_ day: Date) -> String {
+        String(calendar.component(.day, from: day))
+    }
+
+    /// A single grid cell: the hours, right-aligned and monospaced, or a faint
+    /// dot when the project had no time that day (reads cleaner than a blank).
+    @ViewBuilder
+    private func cellText(_ h: Double) -> some View {
+        if h > 0 {
+            Text(gridNum(h)).font(.system(size: 12.5)).monospacedDigit()
+        } else {
+            Text("·").font(.system(size: 12.5)).foregroundStyle(Color(.quaternaryLabelColor))
+        }
+    }
+
     // MARK: - Customer list
 
     @ViewBuilder
@@ -418,9 +547,79 @@ struct WeeklyReportView: View {
         return order.map { byCustomer[$0]! }.sorted { $0.total > $1.total }
     }
 
+    // MARK: - Derived per-(customer, project) grid
+
+    struct GridProject: Identifiable {
+        let id: String          // the report row id (customerID or customerID/projectID)
+        let name: String
+        let perDay: [Double]    // 7 entries, Mon..Sun
+        var total: Double { perDay.reduce(0, +) }
+    }
+
+    struct GridGroup: Identifiable {
+        let id: String          // customerID
+        let name: String
+        let color: Color
+        var perDay: [Double]    // 7 entries, customer subtotal
+        var projects: [GridProject]
+        var total: Double { perDay.reduce(0, +) }
+    }
+
+    /// Group the report's `(customer, project)` rows by customer, preserving each
+    /// row's per-day hours so the grid can show a project's daily breakdown.
+    /// Mirrors `computeCustomerSummaries`' grouping but keeps the day dimension.
+    private func computeGridGroups(_ report: WeeklyReport) -> [GridGroup] {
+        let customersByID = Dictionary(uniqueKeysWithValues: customers.map { ($0.id, $0) })
+        let projectsByID = Dictionary(uniqueKeysWithValues: projects.map { ($0.id, $0) })
+        var perDay: [String: [Double]] = [:]
+        var projectsByCustomer: [String: [GridProject]] = [:]
+        var name: [String: String] = [:]
+        var color: [String: Color] = [:]
+        var order: [String] = []
+
+        for row in report.rows {
+            let parts = row.id.split(separator: "/", maxSplits: 1).map(String.init)
+            let cid = parts[0]
+            let projectID = parts.count > 1 ? parts[1] : nil
+            if perDay[cid] == nil {
+                let cust = customersByID[cid]
+                name[cid] = cust?.name ?? row.label.components(separatedBy: " · ").first ?? cid
+                color[cid] = Color(hex: cust?.displayColor ?? row.color) ?? .blue
+                perDay[cid] = Array(repeating: 0, count: 7)
+                projectsByCustomer[cid] = []
+                order.append(cid)
+            }
+            for d in 0..<7 { perDay[cid]![d] += row.perDayHours[d] }
+            let projName = projectID.flatMap { projectsByID[$0]?.name } ?? "No project"
+            projectsByCustomer[cid]!.append(GridProject(id: row.id, name: projName, perDay: row.perDayHours))
+        }
+
+        return order.map { cid in
+            GridGroup(
+                id: cid,
+                name: name[cid] ?? cid,
+                color: color[cid] ?? .blue,
+                perDay: perDay[cid] ?? Array(repeating: 0, count: 7),
+                projects: (projectsByCustomer[cid] ?? []).sorted { $0.total > $1.total }
+            )
+        }
+        .sorted { $0.total > $1.total }
+    }
+
     // MARK: - Formatting
 
     private func oneDecimal(_ h: Double) -> String { String(format: "%.1f", h) }
+
+    /// Compact bare number for grid cells/totals: "2", "1.5", "2.25". Values are
+    /// already quarter-rounded upstream (`WeeklyReport.roundedQuarter`), so this
+    /// only trims trailing zeros — no "h" suffix, unlike `hLabel`.
+    private func gridNum(_ h: Double) -> String {
+        let r = (h * 4).rounded() / 4
+        if r <= 0 { return "0" }
+        var s = String(format: "%.2f", r)
+        while s.contains(".") && (s.hasSuffix("0") || s.hasSuffix(".")) { s.removeLast() }
+        return s
+    }
 
     /// Compact hours label: trims a trailing ".0" (e.g. "12h", "12.5h").
     private func hLabel(_ h: Double) -> String {
@@ -513,6 +712,7 @@ struct WeeklyReportView: View {
                 self.backlogCount = computed.backlogCount
                 self.backlogHours = computed.backlogHours
                 self.summaries = computeCustomerSummaries(computed.report)
+                self.gridGroups = computeGridGroups(computed.report)
                 self.loadError = nil
             } catch {
                 if Task.isCancelled { return }
