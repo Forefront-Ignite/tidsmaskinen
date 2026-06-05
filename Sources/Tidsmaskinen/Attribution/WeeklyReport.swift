@@ -14,6 +14,13 @@ struct WeeklyReport {
     let dayTotals: [Double]            // 7 entries, attributed only
     let unattributedPerDay: [Double]   // 7 entries — informational, not summed into totals
     let breakdownsByRowID: [String: Breakdown]
+    /// Distinct wall-clock hours of attributed activity across the week — the
+    /// union of every attributed bucket's covered seconds laid on a single
+    /// timeline. Unlike `grandTotal` (which sums per-customer time, so parallel
+    /// work on two customers in the same minute counts twice), each real second
+    /// is counted at most once here. Always ≤ `grandTotal`. Excludes the
+    /// unattributed bucket, matching what `grandTotal` sums.
+    let activeHours: Double
     var grandTotal: Double { dayTotals.reduce(0, +) }
     var unattributedTotal: Double { unattributedPerDay.reduce(0, +) }
 
@@ -41,9 +48,10 @@ struct WeeklyReport {
             sampleIntervalSeconds: sampleIntervalSeconds,
             idleThresholdSeconds: idleThresholdSeconds
         )
-        for record in records.sorted(by: byPriority) {
+        for record in records {
             engine.add(record)
         }
+        engine.finalize()
 
         var rows: [Row] = []
         var dayTotals = Array(repeating: 0.0, count: 7)
@@ -86,7 +94,8 @@ struct WeeklyReport {
             rows: rows,
             dayTotals: dayTotals,
             unattributedPerDay: unattributedSeconds.map { roundedQuarter($0 / 3600.0) },
-            breakdownsByRowID: breakdowns
+            breakdownsByRowID: breakdowns,
+            activeHours: engine.attributedActiveSeconds / 3600.0
         )
     }
 
@@ -381,16 +390,23 @@ struct WeeklyReport {
         return records
     }
 
-    /// Tracks, for each bucket, the seconds (since week start) already credited
-    /// to that bucket. Each subsequent record only contributes the seconds it
-    /// adds beyond what's already covered for its bucket — eliminating overlap
-    /// across sources while preserving cross-bucket independence.
+    /// Buffers records per bucket, then resolves them into per-day / per-source
+    /// / per-contributor seconds. Within a bucket, records are applied in
+    /// priority order and each wall-clock second is credited to the first source
+    /// that claims it (so the bucket total never exceeds elapsed time and higher
+    /// priority sources win contested seconds). Buckets are independent, so the
+    /// same second can be credited to two different customers worked in parallel.
+    ///
+    /// Coverage is tracked with a flat per-second claim buffer (reused across
+    /// buckets) rather than a per-bucket `IndexSet`. A real week fragments a
+    /// busy bucket into thousands of disjoint 15 s blocks; the old IndexSet
+    /// rescanned all of them on every insert (O(N²) — multiple seconds per
+    /// report). The flat buffer makes resolution O(total covered seconds).
     private struct DedupEngine {
         let week: DateInterval
         let weekSeconds: Int
         let daySecondOffsets: [Int]   // 8 entries; day i spans [offsets[i], offsets[i+1])
 
-        var bucketCovered: [String: IndexSet] = [:]
         var perBucketPerSource: [String: [Breakdown.SourceKind: [Double]]] = [:]
         var perBucketContribSeconds: [String: [String: Double]] = [:]
         var perBucketContribInfo: [String: [String: ContributorInfo]] = [:]
@@ -399,6 +415,12 @@ struct WeeklyReport {
         /// UI can reattribute them in one click.
         var perBucketContribMeetingEventIDs: [String: [String: Set<String>]] = [:]
         var perBucketContribMeetingSeriesIDs: [String: [String: Set<String>]] = [:]
+        /// Distinct active seconds across all *attributed* buckets — each
+        /// wall-clock second counted at most once regardless of parallel work,
+        /// so it never exceeds elapsed time. Filled by `finalize()`.
+        var attributedActiveSeconds: Double = 0
+
+        private var recordsByBucket: [String: [AttributedRecord]] = [:]
 
         init(week: DateInterval) {
             let cal = Calendar.weekStartingMonday()
@@ -416,52 +438,88 @@ struct WeeklyReport {
         }
 
         mutating func add(_ record: AttributedRecord) {
-            let startSec = max(0, Int(record.start.timeIntervalSince(week.start)))
-            let endSec = min(weekSeconds, Int(record.end.timeIntervalSince(week.start)))
-            guard endSec > startSec else { return }
-            var effective = IndexSet(integersIn: startSec..<endSec)
-            if let existing = bucketCovered[record.bucketID] {
-                effective.subtract(existing)
-            }
-            guard !effective.isEmpty else { return }
+            recordsByBucket[record.bucketID, default: []].append(record)
+        }
 
-            // Per-day, per-source seconds.
-            var bySource = perBucketPerSource[record.bucketID] ?? [:]
-            var arr = bySource[record.source] ?? Array(repeating: 0.0, count: 7)
-            for d in 0..<7 {
-                let dayRange = IndexSet(integersIn: daySecondOffsets[d]..<daySecondOffsets[d + 1])
-                arr[d] += Double(effective.intersection(dayRange).count)
-            }
-            bySource[record.source] = arr
-            perBucketPerSource[record.bucketID] = bySource
+        /// Resolve all buffered records. Call once after every `add`.
+        mutating func finalize() {
+            guard weekSeconds > 0 else { return }
+            // `claimed` is reset (only over touched spans) between buckets;
+            // `attributedUnion` persists to count distinct active seconds.
+            var claimed = [Bool](repeating: false, count: weekSeconds)
+            var attributedUnion = [Bool](repeating: false, count: weekSeconds)
 
-            // Contributor seconds (week-total).
-            if let info = record.contributor {
-                let added = Double(effective.count)
-                var secsByID = perBucketContribSeconds[record.bucketID] ?? [:]
-                secsByID[info.id, default: 0] += added
-                perBucketContribSeconds[record.bucketID] = secsByID
+            for (bucketID, recs) in recordsByBucket {
+                let isAttributed = bucketID != WeeklyReport.unattributedID
+                let sorted = recs.sorted(by: WeeklyReport.byPriority)
 
-                var infoByID = perBucketContribInfo[record.bucketID] ?? [:]
-                if infoByID[info.id] == nil { infoByID[info.id] = info }
-                perBucketContribInfo[record.bucketID] = infoByID
+                var bySource: [Breakdown.SourceKind: [Double]] = [:]
+                var secsByID: [String: Double] = [:]
+                var infoByID: [String: ContributorInfo] = [:]
+                var eventIDsByContrib: [String: Set<String>] = [:]
+                var seriesIDsByContrib: [String: Set<String>] = [:]
+                var touched: [(Int, Int)] = []
+                touched.reserveCapacity(sorted.count)
 
-                if let eventID = info.eventID {
-                    var byContrib = perBucketContribMeetingEventIDs[record.bucketID] ?? [:]
-                    byContrib[info.id, default: []].insert(eventID)
-                    perBucketContribMeetingEventIDs[record.bucketID] = byContrib
+                for record in sorted {
+                    let s = max(0, Int(record.start.timeIntervalSince(week.start)))
+                    let e = min(weekSeconds, Int(record.end.timeIntervalSince(week.start)))
+                    guard e > s else { continue }
+                    touched.append((s, e))
+
+                    var arr = bySource[record.source] ?? Array(repeating: 0.0, count: 7)
+                    var addedTotal = 0
+                    var i = s
+                    while i < e {
+                        if claimed[i] { i += 1; continue }
+                        // Claim a contiguous free run, bounded by the day end so
+                        // each run lands in exactly one day bucket.
+                        let d = dayIndex(forSecond: i)
+                        let limit = min(e, daySecondOffsets[d + 1])
+                        var j = i
+                        while j < limit && !claimed[j] {
+                            claimed[j] = true
+                            if isAttributed { attributedUnion[j] = true }
+                            j += 1
+                        }
+                        let secs = j - i
+                        arr[d] += Double(secs)
+                        addedTotal += secs
+                        i = j
+                    }
+                    bySource[record.source] = arr
+
+                    if let info = record.contributor, addedTotal > 0 {
+                        secsByID[info.id, default: 0] += Double(addedTotal)
+                        if infoByID[info.id] == nil { infoByID[info.id] = info }
+                        if let eventID = info.eventID { eventIDsByContrib[info.id, default: []].insert(eventID) }
+                        if let seriesID = info.seriesMasterID { seriesIDsByContrib[info.id, default: []].insert(seriesID) }
+                    }
                 }
-                if let seriesID = info.seriesMasterID {
-                    var byContrib = perBucketContribMeetingSeriesIDs[record.bucketID] ?? [:]
-                    byContrib[info.id, default: []].insert(seriesID)
-                    perBucketContribMeetingSeriesIDs[record.bucketID] = byContrib
+
+                perBucketPerSource[bucketID] = bySource
+                perBucketContribSeconds[bucketID] = secsByID
+                perBucketContribInfo[bucketID] = infoByID
+                perBucketContribMeetingEventIDs[bucketID] = eventIDsByContrib
+                perBucketContribMeetingSeriesIDs[bucketID] = seriesIDsByContrib
+
+                // Reset only what this bucket touched, ready for the next bucket.
+                for (s, e) in touched where e > s {
+                    for k in s..<e { claimed[k] = false }
                 }
             }
 
-            // Mark covered.
-            var cov = bucketCovered[record.bucketID] ?? IndexSet()
-            cov.formUnion(effective)
-            bucketCovered[record.bucketID] = cov
+            var active = 0
+            for v in attributedUnion where v { active += 1 }
+            attributedActiveSeconds = Double(active)
+        }
+
+        /// Day index (0...6) a given second-offset falls in, per the (possibly
+        /// DST-adjusted) day boundaries. Clamped to the valid range.
+        private func dayIndex(forSecond sec: Int) -> Int {
+            var d = 0
+            while d < 6 && sec >= daySecondOffsets[d + 1] { d += 1 }
+            return d
         }
     }
 

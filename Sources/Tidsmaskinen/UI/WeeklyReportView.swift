@@ -122,6 +122,13 @@ struct WeeklyReportView: View {
                         .font(.system(size: 44, weight: .heavy, design: .rounded))
                     Text("h").font(.system(size: 22, weight: .bold)).foregroundStyle(.tertiary)
                 }
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.turn.down.right")
+                        .font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
+                    Text("\(oneDecimal(report.activeHours))h actual")
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+                }
+                .help("Your parallel work laid on a single timeline — each minute counted once, so it never double-counts time you reported to two customers at once.")
                 Label {
                     Text("\(delta >= 0 ? "+" : "")\(oneDecimal(delta))h vs last week")
                 } icon: {

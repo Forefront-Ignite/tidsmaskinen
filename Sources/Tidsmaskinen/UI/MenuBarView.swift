@@ -53,12 +53,22 @@ struct MenuBarView: View {
 
     private var glanceCard: some View {
         let grand = report?.grandTotal ?? 0
+        let active = report?.activeHours ?? 0
         return VStack(alignment: .leading, spacing: 11) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text("\(oneDecimal(grand))\(Text("h").foregroundStyle(.secondary))")
                     .font(.system(size: 25, weight: .bold))
                 Text("tracked this week").font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer()
+            }
+            if active > 0 {
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.turn.down.right")
+                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary)
+                    Text("\(oneDecimal(active))h actual")
+                        .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                }
+                .help("Distinct working time — parallel work on multiple customers collapsed onto one timeline, each minute counted once.")
             }
             meter
             HStack(spacing: 11) {

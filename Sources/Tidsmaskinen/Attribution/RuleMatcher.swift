@@ -263,14 +263,36 @@ struct RuleMatcher {
     }
 
     static func globMatch(pattern: String, value: String) -> Bool {
+        guard let regex = compiledGlob(for: pattern) else { return false }
+        let range = NSRange(value.startIndex..., in: value)
+        return regex.firstMatch(in: value, options: [], range: range) != nil
+    }
+
+    // Compiling an NSRegularExpression is expensive and was previously done on
+    // every match — tens of thousands of times when attributing a week of
+    // samples. Patterns are few and stable, so cache the compiled regex per
+    // pattern. Guarded by a lock since attribution runs on background tasks.
+    private static let globCacheLock = NSLock()
+    nonisolated(unsafe) private static var globCache: [String: NSRegularExpression] = [:]
+
+    private static func compiledGlob(for pattern: String) -> NSRegularExpression? {
+        globCacheLock.lock()
+        if let cached = globCache[pattern] {
+            globCacheLock.unlock()
+            return cached
+        }
+        globCacheLock.unlock()
+
         let escaped = NSRegularExpression.escapedPattern(for: pattern)
             .replacingOccurrences(of: "\\*", with: ".*")
         guard let regex = try? NSRegularExpression(pattern: "^\(escaped)$",
                                                    options: [.caseInsensitive]) else {
-            return false
+            return nil
         }
-        let range = NSRange(value.startIndex..., in: value)
-        return regex.firstMatch(in: value, options: [], range: range) != nil
+        globCacheLock.lock()
+        globCache[pattern] = regex
+        globCacheLock.unlock()
+        return regex
     }
 
     /// Extracts `owner/name[/path]` from a Git remote URL.
