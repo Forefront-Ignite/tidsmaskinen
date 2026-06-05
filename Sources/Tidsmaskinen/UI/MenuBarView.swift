@@ -11,8 +11,14 @@ struct MenuBarView: View {
 
     @State private var report: WeeklyReport?
     @State private var customers: [Customer] = []
-    @State private var backlogCount: Int = 0
+    /// Review backlog across the current week *and* recent previous weeks, so
+    /// the glance never claims "all reviewed" while an older week still has
+    /// open items. See `ReviewQueue.rolling`.
+    @State private var backlog = ReviewQueue.Rolling()
     @State private var reloadTask: Task<Void, Never>?
+
+    /// How many weeks back the glance scans for residual backlog.
+    private let backlogWeeksBack = ReviewQueue.defaultBacklogWeeksBack
 
     var body: some View {
         VStack(spacing: 12) {
@@ -56,12 +62,12 @@ struct MenuBarView: View {
             }
             meter
             HStack(spacing: 11) {
-                Button { open(.review) } label: {
+                Button { openReview() } label: {
                     Label("Review", systemImage: "sparkles")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                Text(backlogCount > 0 ? "\(backlogCount) to review" : "all reviewed")
+                Text(backlogLabel)
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }
@@ -72,7 +78,8 @@ struct MenuBarView: View {
 
     @ViewBuilder
     private var meter: some View {
-        let total = (report?.grandTotal ?? 0) + (report?.unattributedTotal ?? 0)
+        // Attributed time only, matching the "tracked this week" total above.
+        let total = report?.grandTotal ?? 0
         GeometryReader { geo in
             HStack(spacing: 0) {
                 if total > 0, let rows = report?.rows {
@@ -81,9 +88,6 @@ struct MenuBarView: View {
                             .fill(Color(hex: row.color) ?? .blue)
                             .frame(width: geo.size.width * (row.totalHours / total))
                     }
-                    Rectangle()
-                        .fill(Color.secondary.opacity(0.28))
-                        .frame(width: geo.size.width * ((report?.unattributedTotal ?? 0) / total))
                 }
             }
         }
@@ -163,6 +167,27 @@ struct MenuBarView: View {
 
     private func oneDecimal(_ h: Double) -> String { String(format: "%.1f", h) }
 
+    /// "all reviewed" only when the whole window is clean; otherwise break out
+    /// how much of the backlog is older than this week so it doesn't surprise
+    /// you when you navigate back.
+    private var backlogLabel: String {
+        if backlog.totalCount == 0 { return "all reviewed" }
+        if backlog.earlierCount > 0 && backlog.currentWeekCount > 0 {
+            return "\(backlog.currentWeekCount) this week · \(backlog.earlierCount) earlier"
+        }
+        if backlog.earlierCount > 0 {
+            return "\(backlog.earlierCount) in earlier weeks"
+        }
+        return "\(backlog.totalCount) to review"
+    }
+
+    /// Open Review, landing on the oldest week that still has open items so you
+    /// clear the tail first instead of starting on a clean current week.
+    private func openReview() {
+        state.reviewTargetWeekStart = backlog.oldestOpenWeekStart
+        open(.review)
+    }
+
     private func open(_ section: SidebarItem) {
         state.selectedSection = section
         openWindow(id: WindowID.main)
@@ -177,8 +202,10 @@ struct MenuBarView: View {
         let sampleInterval = AppSettings.sampleIntervalSeconds
         let idleMinutes = AppSettings.claudeIdleThresholdMinutes
         let reviewMinMinutes = AppSettings.reviewMinMinutes
+        let weeksBack = backlogWeeksBack
+        let now = Date()
         reloadTask = Task { @MainActor in
-            let result = try? await Task.detached(priority: .utility) { () -> (WeeklyReport, [Customer], Int) in
+            let result = try? await Task.detached(priority: .utility) { () -> (WeeklyReport, [Customer], ReviewQueue.Rolling) in
                 let samples = try db.samples(in: week)
                 let rawEvents = try db.calendarEvents(in: week)
                 let micSessions = try db.micSessions(in: week)
@@ -191,18 +218,18 @@ struct MenuBarView: View {
                     claudeDeltas: deltas, micSessions: micSessions,
                     idleThresholdSeconds: TimeInterval(idleMinutes * 60),
                     matcher: matcher, sampleIntervalSeconds: sampleInterval)
-                let backlog = (try? ReviewQueue.build(
-                    database: db, interval: week,
+                let backlog = (try? ReviewQueue.rolling(
+                    database: db, now: now, weeksBack: weeksBack,
                     sampleIntervalSeconds: sampleInterval,
                     idleThresholdSeconds: TimeInterval(idleMinutes * 60),
-                    minMinutes: reviewMinMinutes)) ?? []
-                return (report, try db.allCustomers(), backlog.count)
+                    minMinutes: reviewMinMinutes)) ?? ReviewQueue.Rolling()
+                return (report, try db.allCustomers(), backlog)
             }.value
             if Task.isCancelled { return }
             if let result {
                 self.report = result.0
                 self.customers = result.1
-                self.backlogCount = result.2
+                self.backlog = result.2
             }
         }
     }

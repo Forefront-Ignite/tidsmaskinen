@@ -87,6 +87,45 @@ struct ReviewView: View {
     }
     private var resolvedCount: Int { units.filter { isResolved($0) }.count }
 
+    /// If the menu bar asked Review to land on a specific week, snap to it and
+    /// clear the request. Changing `weekStart` triggers a reload via onChange.
+    /// Returns whether a target was consumed.
+    @discardableResult
+    private func consumeReviewTarget() -> Bool {
+        guard let target = state.reviewTargetWeekStart else { return false }
+        state.reviewTargetWeekStart = nil
+        selectedDay = nil
+        if target != weekStart { weekStart = target }
+        return true
+    }
+
+    /// Scan the recent weeks for residual backlog and jump to the oldest one
+    /// with open items (falling back to a normal load of the current week when
+    /// everything is clean). Runs off the main actor; if `weekStart` ends up
+    /// changing, the onChange handler does the reload.
+    private func landOnOldestOpenWeek() {
+        let db = state.database
+        let now = Date()
+        let sampleInterval = AppSettings.sampleIntervalSeconds
+        let idleMinutes = AppSettings.claudeIdleThresholdMinutes
+        let reviewMin = AppSettings.reviewMinMinutes
+        Task { @MainActor in
+            let oldest = await Task.detached(priority: .userInitiated) { () -> Date? in
+                (try? ReviewQueue.rolling(
+                    database: db, now: now,
+                    weeksBack: ReviewQueue.defaultBacklogWeeksBack,
+                    sampleIntervalSeconds: sampleInterval,
+                    idleThresholdSeconds: TimeInterval(idleMinutes * 60),
+                    minMinutes: reviewMin))?.oldestOpenWeekStart
+            }.value
+            if let oldest, oldest != weekStart {
+                weekStart = oldest   // onChange(weekStart) → reload
+            } else {
+                reload()
+            }
+        }
+    }
+
     private func goBack() {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { cursor = max(0, cursor - 1) }
     }
@@ -100,7 +139,19 @@ struct ReviewView: View {
             Divider()
             content
         }
-        .onAppear { if !didInitialLoad { didInitialLoad = true; reload() } }
+        .onAppear {
+            let hadTarget = consumeReviewTarget()
+            if !didInitialLoad {
+                didInitialLoad = true
+                // A fresh entry (sidebar click, window reopen) lands on the
+                // oldest week that still has open items — same window the
+                // menu-bar glance scans — so you clear the backlog tail first.
+                // An explicit target (from the menu bar) already picked the
+                // week, so just load it.
+                if hadTarget { reload() } else { landOnOldestOpenWeek() }
+            }
+        }
+        .onChange(of: state.reviewTargetWeekStart) { _, _ in _ = consumeReviewTarget() }
         .onChange(of: weekStart) { _, _ in reload() }
         .onChange(of: selectedDay) { _, _ in reload() }
         // Refresh when new activity lands, but only before the user has started

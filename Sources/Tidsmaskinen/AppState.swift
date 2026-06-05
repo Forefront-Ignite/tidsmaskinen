@@ -11,6 +11,10 @@ final class AppState: ObservableObject {
     @Published var lastError: String?
     @Published var signedInPrincipal: String?
     @Published var selectedSection: SidebarItem = .weeklyReport
+    /// When set, the Review screen jumps to this week on its next appear/change
+    /// (then clears it). Lets the menu-bar glance send you straight to the
+    /// oldest week that still has unattributed items.
+    @Published var reviewTargetWeekStart: Date?
     @Published var showSignIn: Bool = false
 
     // Command Center sync state — driven by `commandCenter.runSync()`.

@@ -121,4 +121,51 @@ enum ReviewQueue {
         built.sort { $0.totalSeconds > $1.totalSeconds }
         return built
     }
+
+    /// Aggregate review backlog across the current week plus the previous
+    /// `weeksBack` weeks. The always-on surfaces (menu-bar glance) use this so
+    /// "all reviewed" reflects *every* recent week — a stray huddle left
+    /// unattributed last week no longer hides behind a clean current week.
+    struct Rolling {
+        var totalCount: Int = 0
+        var totalSeconds: Double = 0
+        var currentWeekCount: Int = 0
+        var earlierCount: Int = 0
+        /// Start of the oldest week (within the window) that still has open
+        /// items — where Review should land so you clear the backlog tail first.
+        /// nil when nothing is open anywhere in the window.
+        var oldestOpenWeekStart: Date?
+    }
+
+    /// Default look-back window for the "any open backlog?" surfaces (menu-bar
+    /// glance, Review's landing week). Kept in one place so they agree.
+    static let defaultBacklogWeeksBack = 4
+
+    static func rolling(database: AppDatabase,
+                        now: Date,
+                        weeksBack: Int,
+                        sampleIntervalSeconds: Int,
+                        idleThresholdSeconds: TimeInterval,
+                        minMinutes: Int) throws -> Rolling {
+        let cal = Calendar.weekStartingMonday()
+        let currentStart = cal.currentWeekInterval(reference: now).start
+        var result = Rolling()
+        // Walk newest → oldest so the final non-empty week we touch is the
+        // oldest one with open items.
+        for w in 0...max(0, weeksBack) {
+            guard let start = cal.date(byAdding: .day, value: -7 * w, to: currentStart) else { continue }
+            let end = cal.date(byAdding: .day, value: 7, to: start) ?? start
+            let units = try build(database: database,
+                                  interval: DateInterval(start: start, end: end),
+                                  sampleIntervalSeconds: sampleIntervalSeconds,
+                                  idleThresholdSeconds: idleThresholdSeconds,
+                                  minMinutes: minMinutes)
+            guard !units.isEmpty else { continue }
+            result.totalCount += units.count
+            result.totalSeconds += units.reduce(0) { $0 + $1.totalSeconds }
+            if w == 0 { result.currentWeekCount += units.count } else { result.earlierCount += units.count }
+            result.oldestOpenWeekStart = start
+        }
+        return result
+    }
 }

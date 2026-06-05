@@ -183,7 +183,10 @@ struct WeeklyReportView: View {
     @ViewBuilder
     private func dayBarsPanel(_ report: WeeklyReport) -> some View {
         let summaries = self.summaries
-        let grandPerDay = (0..<7).map { report.dayTotals[$0] + report.unattributedPerDay[$0] }
+        // Attributed time only, matching the hero's "tracked this week" total.
+        // Ambient, non-attributable app time isn't charted here; open backlog is
+        // surfaced as its own row in the customer list instead.
+        let grandPerDay = report.dayTotals
         let maxDay = max(grandPerDay.max() ?? 1, 0.0001)
 
         VStack(alignment: .leading, spacing: 0) {
@@ -208,10 +211,6 @@ struct WeeklyReportView: View {
                                                 Rectangle().fill(c.color)
                                                     .frame(height: geo.size.height * (tot / maxDay) * (c.perDay[i] / tot))
                                             }
-                                        }
-                                        if report.unattributedPerDay[i] > 0 {
-                                            Rectangle().fill(hatch)
-                                                .frame(height: geo.size.height * (tot / maxDay) * (report.unattributedPerDay[i] / tot))
                                         }
                                     }
                                 }
@@ -238,7 +237,11 @@ struct WeeklyReportView: View {
     @ViewBuilder
     private func customerList(_ report: WeeklyReport) -> some View {
         let summaries = self.summaries
-        let grand = report.grandTotal + report.unattributedTotal
+        // Share is computed against attributed time only, so the customer rows
+        // sum to ~100%. Open backlog is shown below as its own actionable row
+        // (the same pool Review surfaces) rather than diluting every share with
+        // ambient, non-attributable app time.
+        let grand = report.grandTotal
 
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 0) {
@@ -256,8 +259,8 @@ struct WeeklyReportView: View {
                 customerRow(c, grand: grand)
             }
 
-            if report.unattributedTotal > 0 {
-                unattributedRow(report, grand: grand)
+            if backlogCount > 0 {
+                backlogRow()
             }
         }
     }
@@ -328,28 +331,34 @@ struct WeeklyReportView: View {
         .glassCard(radius: 16)
     }
 
-    /// Where-the-time-went accounting for time that matched no customer rule —
-    /// mostly app activity that can't be pinned to one customer. Informational,
-    /// not a to-do: the hero's review backlog is the actionable surface, so this
-    /// row no longer links to Review (most of it isn't reviewable).
+    /// Open backlog for the week — the *same* actionable pool the Review screen
+    /// and the hero surface (via `ReviewQueue`), not the dedup engine's raw
+    /// leftover. Keeping the two in lockstep means this row vanishes exactly
+    /// when the hero says "all reviewed", instead of contradicting it with
+    /// ambient, non-attributable app time.
     @ViewBuilder
-    private func unattributedRow(_ report: WeeklyReport, grand: Double) -> some View {
-        let un = report.unattributedTotal
-        let share = grand > 0 ? Int((un / grand * 100).rounded()) : 0
-        HStack(spacing: 15) {
-            RoundedRectangle(cornerRadius: 4).fill(hatch).frame(width: 13, height: 13)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Uncategorized").font(.system(size: 14.5, weight: .semibold))
-                Text("App time not matched to a customer").font(.caption).foregroundStyle(.secondary)
+    private func backlogRow() -> some View {
+        Button {
+            state.selectedSection = .review
+        } label: {
+            HStack(spacing: 15) {
+                RoundedRectangle(cornerRadius: 4).fill(hatch).frame(width: 13, height: 13)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Uncategorized").font(.system(size: 14.5, weight: .semibold))
+                    Text("\(backlogCount) \(backlogCount == 1 ? "item" : "items") worth reviewing — attribute so it lands in the report")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(hLabel(backlogHours)).font(.system(size: 15, weight: .bold)).monospacedDigit()
+                    .frame(width: 66, alignment: .trailing)
+                Label("Review", systemImage: "sparkles")
+                    .font(.caption.weight(.semibold)).foregroundStyle(TM.accent)
+                    .frame(width: 84, alignment: .trailing)
             }
-            Spacer()
-            Text(hLabel(un)).font(.system(size: 15, weight: .bold)).monospacedDigit()
-                .frame(width: 66, alignment: .trailing)
-            Text("\(share)%").font(.caption).foregroundStyle(.tertiary).monospacedDigit()
-                .frame(width: 60, alignment: .trailing)
-            Spacer().frame(width: 24)
+            .padding(.horizontal, 18).padding(.vertical, 14)
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 18).padding(.vertical, 14)
+        .buttonStyle(.plain)
         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
             .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
