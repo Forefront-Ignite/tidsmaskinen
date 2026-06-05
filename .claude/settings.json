@@ -1,0 +1,5 @@
+{
+  "env": {
+    "OTEL_RESOURCE_ATTRIBUTES": "team=ignite-se,repository=tidsmaskinen"
+  }
+}
