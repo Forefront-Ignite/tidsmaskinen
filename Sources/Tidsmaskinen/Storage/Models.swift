@@ -456,7 +456,11 @@ struct MicSession: Codable, FetchableRecord, MutablePersistableRecord, Identifia
     static func parseSlackChannel(fromTitle title: String) -> String? {
         let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
         if let r = t.range(of: " (Channel)") {
-            let name = String(t[..<r.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            var name = String(t[..<r.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            // Private channels carry a literal "#" in Slack's window titles
+            // (public ones are bare) — strip it so storage, rules, and labels
+            // all see one format.
+            if name.hasPrefix("#") { name = String(name.dropFirst()) }
             return name.isEmpty ? nil : name
         }
         if t.hasPrefix("Huddle:") {
@@ -467,7 +471,8 @@ struct MicSession: Codable, FetchableRecord, MutablePersistableRecord, Identifia
             }
             rest = rest.trimmingCharacters(in: .whitespacesAndNewlines)
             if rest.isEmpty || rest.hasPrefix("@") { return nil } // DM huddle
-            return rest
+            if rest.hasPrefix("#") { rest = String(rest.dropFirst()) }
+            return rest.isEmpty ? nil : rest
         }
         return nil
     }

@@ -385,6 +385,24 @@ struct AppDatabase {
                 t.add(column: "validTo", .datetime)
             }
         }
+
+        migrator.registerMigration("v19_strip_channel_hash_prefix") { db in
+            // Slack's window titles include a literal "#" for *private*
+            // channel huddles (public ones are bare), so private-channel
+            // sessions stored "#channel" while everything else stored
+            // "channel" — rendering as "##channel" in the UI and splitting
+            // rule matching across two formats. parseSlackChannel now strips
+            // the "#"; normalize the rows and slackChannel rule patterns it
+            // already produced.
+            try db.execute(sql: """
+                UPDATE mic_sessions SET slackChannel = substr(slackChannel, 2)
+                WHERE slackChannel LIKE '#%'
+                """)
+            try db.execute(sql: """
+                UPDATE rules SET pattern = substr(pattern, 2)
+                WHERE kind = 'slackChannel' AND pattern LIKE '#%'
+                """)
+        }
         try migrator.migrate(dbQueue)
     }
 
