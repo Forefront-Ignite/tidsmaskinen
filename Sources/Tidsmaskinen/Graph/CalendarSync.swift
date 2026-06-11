@@ -84,11 +84,20 @@ final class CalendarSync: ObservableObject {
             let fetchedIDs = Set(fetched.map { $0.id })
 
             let existing = try database.calendarEvents(in: interval)
-            let existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+
+            // Look up prior rows by the *fetched IDs*, not by the startAt window:
+            // /calendarView returns events that merely overlap the range, so while
+            // the window's trailing edge is inside an event (start behind the edge,
+            // end ahead of it) the event is still fetched but a startAt-bounded
+            // lookup misses its prior row — and the full-row upsert would wipe
+            // customerID/projectID/isIgnored. That silently un-attributed every
+            // meeting 14 days after it started.
+            let prior = try database.calendarEvents(ids: Array(fetchedIDs))
+            let priorByID = Dictionary(uniqueKeysWithValues: prior.map { ($0.id, $0) })
 
             // Preserve manual overrides on surviving events.
             let merged = fetched.map { fresh -> CalendarEvent in
-                guard let prior = existingByID[fresh.id] else { return fresh }
+                guard let prior = priorByID[fresh.id] else { return fresh }
                 var copy = fresh
                 copy.customerID = prior.customerID
                 copy.projectID = prior.projectID

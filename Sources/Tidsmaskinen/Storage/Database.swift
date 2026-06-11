@@ -782,6 +782,14 @@ struct AppDatabase {
         }
     }
 
+    func calendarEvents(ids: [String]) throws -> [CalendarEvent] {
+        try dbQueue.read { db in
+            try CalendarEvent
+                .filter(ids.contains(CalendarEvent.Columns.id))
+                .fetchAll(db)
+        }
+    }
+
     func calendarEvents(in interval: DateInterval) throws -> [CalendarEvent] {
         try dbQueue.read { db in
             try CalendarEvent
