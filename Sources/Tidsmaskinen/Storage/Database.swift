@@ -403,6 +403,14 @@ struct AppDatabase {
                 WHERE kind = 'slackChannel' AND pattern LIKE '#%'
                 """)
         }
+
+        migrator.registerMigration("v20_mic_session_ignore") { db in
+            // Standalone calls/huddles can be ignored like calendar events:
+            // hidden from Review, never counted in the weekly report.
+            try db.alter(table: "mic_sessions") { t in
+                t.add(column: "isIgnored", .boolean).notNull().defaults(to: false)
+            }
+        }
         try migrator.migrate(dbQueue)
     }
 
@@ -546,6 +554,16 @@ struct AppDatabase {
                 .updateAll(db,
                            MicSession.Columns.customerID.set(to: customerID),
                            MicSession.Columns.projectID.set(to: projectID),
+                           MicSession.Columns.updatedAt.set(to: Date()))
+        }
+    }
+
+    func setMicSessionIgnored(id: String, isIgnored: Bool) throws {
+        _ = try dbQueue.write { db in
+            try MicSession
+                .filter(MicSession.Columns.id == id)
+                .updateAll(db,
+                           MicSession.Columns.isIgnored.set(to: isIgnored),
                            MicSession.Columns.updatedAt.set(to: Date()))
         }
     }

@@ -40,6 +40,9 @@ struct CustomerProjectPicker: View {
     @State private var isPresented = false
     @State private var didAutoOpen = false
     @State private var query: String = ""
+    /// Nav-entry id of the row highlighted via arrow keys; nil = no keyboard
+    /// highlight (Enter then falls back to the first/exact match).
+    @State private var highlightedID: String? = nil
     @FocusState private var searchFocused: Bool
     @State private var creatingCustomer = false
     @State private var newCustomerName = ""
@@ -85,6 +88,7 @@ struct CustomerProjectPicker: View {
         .onChange(of: isPresented) { _, newValue in
             if newValue {
                 query = ""
+                highlightedID = nil
                 creatingCustomer = false
                 creatingProjectUnder = nil
                 newCustomerName = ""
@@ -170,44 +174,49 @@ struct CustomerProjectPicker: View {
 
             Divider()
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if allowsClear {
-                        clearRow
-                        Divider()
-                    }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        if allowsClear {
+                            clearRow
+                            Divider()
+                        }
 
-                    let groups = matchingGroups()
-                    let ccGroups = groups.filter { $0.customer.isExternal }
-                    let localGroups = groups.filter { !$0.customer.isExternal }
+                        let groups = matchingGroups()
+                        let ccGroups = groups.filter { $0.customer.isExternal }
+                        let localGroups = groups.filter { !$0.customer.isExternal }
 
-                    if !ccGroups.isEmpty {
-                        sectionHeader("Command Center")
-                        ForEach(ccGroups) { group in
-                            customerSection(group)
+                        if !ccGroups.isEmpty {
+                            sectionHeader("Command Center")
+                            ForEach(ccGroups) { group in
+                                customerSection(group)
+                            }
+                        }
+                        if !localGroups.isEmpty {
+                            if !ccGroups.isEmpty { Divider().padding(.vertical, 2) }
+                            sectionHeader("Local")
+                            ForEach(localGroups) { group in
+                                customerSection(group)
+                            }
+                        }
+
+                        if groups.isEmpty {
+                            Text(customers.isEmpty
+                                 ? "No customers yet — add one below."
+                                 : "No matches.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
                         }
                     }
-                    if !localGroups.isEmpty {
-                        if !ccGroups.isEmpty { Divider().padding(.vertical, 2) }
-                        sectionHeader("Local")
-                        ForEach(localGroups) { group in
-                            customerSection(group)
-                        }
-                    }
-
-                    if groups.isEmpty {
-                        Text(customers.isEmpty
-                             ? "No customers yet — add one below."
-                             : "No matches.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                    }
+                    .padding(.vertical, 4)
                 }
-                .padding(.vertical, 4)
+                .frame(minHeight: 120, maxHeight: 360)
+                .onChange(of: highlightedID) { _, id in
+                    if let id { proxy.scrollTo(id, anchor: .center) }
+                }
             }
-            .frame(minHeight: 120, maxHeight: 360)
 
             if onCreateCustomer != nil {
                 Divider()
@@ -231,7 +240,10 @@ struct CustomerProjectPicker: View {
             TextField("Search customers or projects", text: $query)
                 .textFieldStyle(.plain)
                 .focused($searchFocused)
-                .onSubmit { commitFirstMatch() }
+                .onSubmit { commitHighlightedOrFirst() }
+                .onKeyPress(.downArrow) { moveHighlight(1); return .handled }
+                .onKeyPress(.upArrow) { moveHighlight(-1); return .handled }
+                .onChange(of: query) { _, _ in highlightedID = nil }
             if !query.isEmpty {
                 Button {
                     query = ""
@@ -251,9 +263,7 @@ struct CustomerProjectPicker: View {
     private var clearRow: some View {
         let isSelected = selectedCustomerID.isEmpty
         Button {
-            selectedCustomerID = ""
-            selectedProjectID = ""
-            isPresented = false
+            commit(.clear)
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "checkmark")
@@ -270,7 +280,8 @@ struct CustomerProjectPicker: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
+        .background(rowBackground(isSelected: isSelected, navID: NavEntry.clear.id))
+        .id(NavEntry.clear.id)
     }
 
     @ViewBuilder
@@ -358,9 +369,7 @@ struct CustomerProjectPicker: View {
     private func customerRow(_ customer: Customer) -> some View {
         let isSelected = selectedCustomerID == customer.id && selectedProjectID.isEmpty
         Button {
-            selectedCustomerID = customer.id
-            selectedProjectID = ""
-            isPresented = false
+            commit(.customer(customer))
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "checkmark")
@@ -383,16 +392,15 @@ struct CustomerProjectPicker: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
+        .background(rowBackground(isSelected: isSelected, navID: NavEntry.customer(customer).id))
+        .id(NavEntry.customer(customer).id)
     }
 
     @ViewBuilder
     private func projectRow(customer: Customer, project: Project) -> some View {
         let isSelected = selectedCustomerID == customer.id && selectedProjectID == project.id
         Button {
-            selectedCustomerID = customer.id
-            selectedProjectID = project.id
-            isPresented = false
+            commit(.project(customer, project))
         } label: {
             HStack(spacing: 6) {
                 Spacer().frame(width: 12)
@@ -413,7 +421,13 @@ struct CustomerProjectPicker: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
+        .background(rowBackground(isSelected: isSelected, navID: NavEntry.project(customer, project).id))
+        .id(NavEntry.project(customer, project).id)
+    }
+
+    private func rowBackground(isSelected: Bool, navID: String) -> Color {
+        if highlightedID == navID { return Color.accentColor.opacity(0.25) }
+        return isSelected ? Color.accentColor.opacity(0.12) : .clear
     }
 
     @ViewBuilder
@@ -524,6 +538,81 @@ struct CustomerProjectPicker: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
+    }
+
+    // MARK: - Keyboard navigation
+
+    /// One keyboard-selectable row in the popover. The `id` doubles as the
+    /// SwiftUI view id for highlight rendering and scroll-into-view.
+    private enum NavEntry {
+        case clear
+        case customer(Customer)
+        case project(Customer, Project)
+
+        var id: String {
+            switch self {
+            case .clear:               return "nav:clear"
+            case .customer(let c):     return "nav:c:\(c.id)"
+            case .project(let c, let p): return "nav:p:\(c.id):\(p.id)"
+            }
+        }
+    }
+
+    /// Selectable rows in the exact order the popover renders them: clear row,
+    /// then Command Center groups, then Local groups. The "+ New" affordances
+    /// are deliberately not navigable.
+    private func navEntries() -> [NavEntry] {
+        var out: [NavEntry] = []
+        if allowsClear { out.append(.clear) }
+        let groups = matchingGroups()
+        for group in groups.filter({ $0.customer.isExternal }) + groups.filter({ !$0.customer.isExternal }) {
+            out.append(.customer(group.customer))
+            for p in group.projects { out.append(.project(group.customer, p)) }
+        }
+        return out
+    }
+
+    /// Arrow-key step. With no highlight yet, ↓ lands on the first customer
+    /// (skipping the clear row), ↑ on the last row. Clamps at the ends.
+    private func moveHighlight(_ delta: Int) {
+        let entries = navEntries()
+        guard !entries.isEmpty else { return }
+        let ids = entries.map(\.id)
+        var index: Int
+        if let current = highlightedID, let i = ids.firstIndex(of: current) {
+            index = i + delta
+        } else if delta > 0 {
+            index = (allowsClear && entries.count > 1) ? 1 : 0
+        } else {
+            index = entries.count - 1
+        }
+        highlightedID = ids[max(0, min(entries.count - 1, index))]
+    }
+
+    private func commit(_ entry: NavEntry) {
+        switch entry {
+        case .clear:
+            selectedCustomerID = ""
+            selectedProjectID = ""
+        case .customer(let c):
+            selectedCustomerID = c.id
+            selectedProjectID = ""
+        case .project(let c, let p):
+            selectedCustomerID = c.id
+            selectedProjectID = p.id
+        }
+        isPresented = false
+    }
+
+    /// On Return: commit the arrow-key highlight when there is one, otherwise
+    /// fall back to the first/exact match.
+    private func commitHighlightedOrFirst() {
+        if let id = highlightedID,
+           let entry = navEntries().first(where: { $0.id == id }) {
+            commit(entry)
+            return
+        }
+        commitFirstMatch()
     }
 
     // MARK: - Actions

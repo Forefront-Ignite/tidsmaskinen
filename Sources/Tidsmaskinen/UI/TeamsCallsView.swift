@@ -122,6 +122,9 @@ struct TeamsCallsView: View {
                 },
                 onClear: {
                     save(session: segment.session, customerID: nil, projectID: nil, scope: .justThis)
+                },
+                onToggleIgnore: {
+                    setIgnored(session: segment.session, isIgnored: !segment.session.isIgnored)
                 }
             )
         }
@@ -203,7 +206,12 @@ struct TeamsCallsView: View {
                     }
                 }
                 Spacer()
-                if let c = customer {
+                if s.isIgnored {
+                    Label("Ignored", systemImage: "eye.slash")
+                        .labelStyle(.titleAndIcon)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if let c = customer {
                     HStack(spacing: 4) {
                         if attribution.fromRule {
                             Image(systemName: "wand.and.stars")
@@ -234,6 +242,7 @@ struct TeamsCallsView: View {
             .padding(.horizontal, 10)
             .contentShape(Rectangle())
             .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.controlBackgroundColor)))
+            .opacity(s.isIgnored ? 0.55 : 1)
         }
         .buttonStyle(.plain)
     }
@@ -398,6 +407,15 @@ struct TeamsCallsView: View {
             loadError = error.localizedDescription
         }
     }
+
+    private func setIgnored(session: MicSession, isIgnored: Bool) {
+        do {
+            try state.database.setMicSessionIgnored(id: session.id, isIgnored: isIgnored)
+            reload()
+        } catch {
+            loadError = error.localizedDescription
+        }
+    }
 }
 
 private struct CallDetailSheet: View {
@@ -412,6 +430,7 @@ private struct CallDetailSheet: View {
     let autoMatched: Bool
     let onSave: (String?, String?, AttributionScope) -> Void
     let onClear: () -> Void
+    let onToggleIgnore: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var selectedCustomerID: String = ""
@@ -569,6 +588,13 @@ private struct CallDetailSheet: View {
     private var footer: some View {
         HStack {
             Button("Cancel") { dismiss() }
+            Button(session.isIgnored ? "Un-ignore" : "Ignore call") {
+                onToggleIgnore()
+                dismiss()
+            }
+            .help(session.isIgnored
+                  ? "Bring this call back into Review and the report."
+                  : "Hide this call from Review and never count it in the report.")
             Spacer()
             if session.customerID != nil {
                 Button("Clear", role: .destructive) {

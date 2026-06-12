@@ -340,6 +340,7 @@ struct WeeklyReport {
         // skip ongoing sessions (no end yet) so a live call isn't counted.
         for session in micSessions {
             guard let endedAt = session.endedAt, endedAt > session.startedAt else { continue }
+            if session.isIgnored { continue }
             let result = matcher.attribute(micSession: session)
             guard result.customer != nil else { continue }
             let bucketID = rowKey(customer: result.customer, project: result.project)
