@@ -421,6 +421,9 @@ struct MicSession: Codable, FetchableRecord, MutablePersistableRecord, Identifia
     var slackChannel: String?
     var customerID: String?
     var projectID: String?
+    /// User chose "Ignore" for this session — hide it from Review and never
+    /// count it in the weekly report (mirrors `CalendarEvent.isIgnored`).
+    var isIgnored: Bool = false
     var createdAt: Date
     var updatedAt: Date
 
@@ -435,6 +438,7 @@ struct MicSession: Codable, FetchableRecord, MutablePersistableRecord, Identifia
         static let slackChannel = Column(CodingKeys.slackChannel)
         static let customerID = Column(CodingKeys.customerID)
         static let projectID = Column(CodingKeys.projectID)
+        static let isIgnored = Column(CodingKeys.isIgnored)
         static let updatedAt = Column(CodingKeys.updatedAt)
     }
 

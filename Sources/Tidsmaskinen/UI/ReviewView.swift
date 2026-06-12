@@ -731,8 +731,8 @@ struct ReviewView: View {
             ok = run { try state.database.setMeetingSeriesAttribution(seriesID: s.seriesMasterID, customerID: nil, projectID: nil, isIgnored: true) }
         case .event(let e):
             ok = run { try state.database.setCalendarEventIgnored(eventID: e.id, isIgnored: true) }
-        case .call:
-            ok = false   // calls aren't ignorable (canIgnore == false) — skip only
+        case .call(let session, _):
+            ok = run { try state.database.setMicSessionIgnored(id: session.id, isIgnored: true) }
         }
         if ok { resolved[unit.id] = "Ignored"; advance() }
     }
@@ -774,6 +774,7 @@ struct ReviewView: View {
         case .call(let session, _):
             ok = run {
                 try state.database.setMicSessionAttribution(id: session.id, customerID: nil, projectID: nil)
+                try state.database.setMicSessionIgnored(id: session.id, isIgnored: false)
                 if let channel = session.slackChannel {
                     for r in try state.database.allRules().filter({ $0.kind == .slackChannel && $0.pattern == channel }) {
                         try state.database.deleteRule(id: r.id)
@@ -974,13 +975,11 @@ enum ReviewUnit: Identifiable {
         }
     }
 
-    /// Whether "Ignore — don't ask again" applies. Repos and calls can only be
-    /// skipped (there's no persistent ignore for ad-hoc mic activity).
+    /// Whether "Ignore — don't ask again" applies. Repos can only be skipped.
     var canIgnore: Bool {
         switch self {
         case .signal(let s): return s.kind == .urlHost || s.kind == .appBundleID
-        case .hostGroup, .series, .event: return true
-        case .call: return false
+        case .hostGroup, .series, .event, .call: return true
         }
     }
 

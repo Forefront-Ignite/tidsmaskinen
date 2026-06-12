@@ -110,6 +110,7 @@ enum ReviewQueue {
             let extendedEvents = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions)
             for session in micSessions {
                 guard let endedAt = session.endedAt, endedAt > session.startedAt else { continue }
+                if session.isIgnored { continue }                                  // user said don't ask
                 if m.attribute(micSession: session).customer != nil { continue }   // already has a home
                 let adHoc = CallSegment.subtractEvents(
                     from: session.startedAt, to: endedAt, events: extendedEvents, minimumSeconds: 30

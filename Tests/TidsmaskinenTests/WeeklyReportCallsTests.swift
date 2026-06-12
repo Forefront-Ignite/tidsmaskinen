@@ -60,6 +60,17 @@ final class WeeklyReportCallsTests: XCTestCase {
         XCTAssertEqual(report.grandTotal, 0, accuracy: 0.001)
     }
 
+    /// An ignored call contributes nothing, even when it carries an attribution
+    /// (manual save or rule) — ignore wins.
+    func testIgnoredCallIsNotCounted() {
+        let m = RuleMatcher.make(customers: [customer("A")], projects: [], rules: [])
+        var mic = micSession("m1", from: at(2026, 4, 15, 13), to: at(2026, 4, 15, 13, 30), customerID: "A")
+        mic.isIgnored = true
+        let report = WeeklyReport.compute(
+            week: week, samples: [], micSessions: [mic], matcher: m, sampleIntervalSeconds: 15)
+        XCTAssertEqual(report.grandTotal, 0, accuracy: 0.001)
+    }
+
     /// Mic time fully inside a meeting is credited once (via the meeting), not
     /// added again as a call — the call's overlap with the meeting is subtracted.
     func testCallOverlappingMeetingIsNotDoubleCounted() {
