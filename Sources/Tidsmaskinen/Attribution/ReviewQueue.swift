@@ -108,12 +108,14 @@ enum ReviewQueue {
         if !micSessions.isEmpty {
             let rawEvents = try database.calendarEvents(in: interval)
             let extendedEvents = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions)
+            let owned = CalendarEvent.meetingMicSessionIDs(events: extendedEvents, micSessions: micSessions)
             for session in micSessions {
                 guard let endedAt = session.endedAt, endedAt > session.startedAt else { continue }
                 if session.isIgnored { continue }                                  // user said don't ask
                 if m.attribute(micSession: session).customer != nil { continue }   // already has a home
-                let adHoc = CallSegment.subtractEvents(
-                    from: session.startedAt, to: endedAt, events: extendedEvents, minimumSeconds: 30
+                let adHoc = CallSegment.adHocRanges(
+                    of: session, endedAt: endedAt, events: extendedEvents,
+                    owned: owned, minimumSeconds: 30
                 ).reduce(0.0) { $0 + $1.end.timeIntervalSince($1.start) }
                 if adHoc >= minSec { built.append(.call(session: session, seconds: adHoc)) }
             }

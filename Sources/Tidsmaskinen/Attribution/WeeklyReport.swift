@@ -331,13 +331,16 @@ struct WeeklyReport {
             ))
         }
 
-        // Ad-hoc call time: mic activity that isn't already covered by a
-        // (mic-extended) meeting. Meeting-overlapping mic time is credited via
-        // the events above, so we subtract the same extended events here to
-        // avoid double-counting; only genuinely impromptu calls (huddles,
-        // ad-hoc Teams/FaceTime) remain. Only attributed calls reach the report
-        // — unattributed call time shows up in the Review backlog instead. We
-        // skip ongoing sessions (no end yet) so a live call isn't counted.
+        // Ad-hoc call time: mic activity not already credited via a meeting.
+        // A meeting's *own* audio is credited by the event records above, so we
+        // subtract those meetings here to avoid double-counting — but only from
+        // the sessions each meeting actually owns. A call that merely happened
+        // during a booking (a Slack huddle after a Teams meeting ended early)
+        // keeps its full duration and lands on its own customer. Only attributed
+        // calls reach the report — unattributed call time shows up in the Review
+        // backlog instead. We skip ongoing sessions (no end yet) so a live call
+        // isn't counted.
+        let ownedMeetingMics = CalendarEvent.meetingMicSessionIDs(events: events, micSessions: micSessions)
         for session in micSessions {
             guard let endedAt = session.endedAt, endedAt > session.startedAt else { continue }
             if session.isIgnored { continue }
@@ -345,8 +348,9 @@ struct WeeklyReport {
             guard result.customer != nil else { continue }
             let bucketID = rowKey(customer: result.customer, project: result.project)
             let contributor = contributorInfo(forCall: session)
-            let remainders = CallSegment.subtractEvents(
-                from: session.startedAt, to: endedAt, events: events, minimumSeconds: 30
+            let remainders = CallSegment.adHocRanges(
+                of: session, endedAt: endedAt, events: events,
+                owned: ownedMeetingMics, minimumSeconds: 30
             )
             for r in remainders {
                 records.append(AttributedRecord(

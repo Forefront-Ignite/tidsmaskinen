@@ -284,27 +284,117 @@ struct CalendarEvent: Codable, FetchableRecord, MutablePersistableRecord, Identi
         max(0, Int(endAt.timeIntervalSince(startAt) / 60))
     }
 
+    /// How much a mic session must overlap a booking before it may *stretch*
+    /// it. Without this, a session that ends a few seconds into the next meeting
+    /// (a 9:49-10:00 huddle running 30s past a 10:00 booking) would drag that
+    /// meeting's start backwards. Ownership itself has no such floor — see
+    /// `meetingMicSessionIDs`.
+    static let meetingMicOverlapSeconds: TimeInterval = 120
+
+    /// The mic sessions that count as a meeting's *own* audio, keyed by event id.
+    ///
+    /// A booking only owns sessions on the platform it is held on: a
+    /// `teamsForBusiness` event is attended in Teams, so a Slack huddle that
+    /// starts inside the booking is a *different call* — the meeting ended
+    /// early and you took a huddle — and must not be swallowed by the block.
+    /// Meetings with no typed provider (in-person, dial-in, a Meet link buried
+    /// in the body) own every overlapping session, preserving prior behaviour.
+    ///
+    /// Any overlap at all is enough. `meetingMicOverlapSeconds` deliberately
+    /// does *not* apply here: it guards stretching, and using it for ownership
+    /// too would leave a sub-2-minute fragment of a meeting's own audio
+    /// unsubtracted, surfacing it as a phantom ad-hoc call and a Review item.
+    ///
+    /// Ignored meetings own nothing — they contribute no time themselves, so
+    /// letting one absorb a call would delete that call's hours outright.
+    ///
+    /// A meeting can own several sessions: mic access drops and resumes mid-call
+    /// often enough that one booking maps to two or three Teams sessions.
+    ///
+    /// Safe to call with either raw or `withMicOverrun`-extended events — the
+    /// answer is the same, and consumers pass whichever they have. `MicMonitor`
+    /// keeps a single open session (`endSession()` always precedes
+    /// `beginSession()`), so sessions never overlap; an event's extension is by
+    /// construction covered by a session that event already owns, and a serial
+    /// session is disjoint from it. Any *other* session therefore overlaps the
+    /// extended bounds exactly as much as it overlaps the booked ones. If
+    /// `MicMonitor` ever tracks concurrent sessions this stops holding, and
+    /// callers must switch to the raw booked events.
+    static func meetingMicSessionIDs(events: [CalendarEvent],
+                                     micSessions: [MicSession],
+                                     now: Date = Date(),
+                                     minimumOverlapSeconds: TimeInterval = 0) -> [String: Set<String>] {
+        var owned: [String: Set<String>] = [:]
+        for event in events where !event.isIgnored {
+            for mic in micSessions where event.micPlatformMatches(mic) {
+                let micEnd = mic.endedAt ?? now
+                let overlapStart = max(mic.startedAt, event.startAt)
+                let overlapEnd = min(micEnd, event.endAt)
+                let overlap = overlapEnd.timeIntervalSince(overlapStart)
+                // Strictly positive, so sessions that merely abut a boundary
+                // (they always do — MicMonitor closes one as it opens the next)
+                // aren't claimed.
+                guard overlap > 0, overlap >= minimumOverlapSeconds else { continue }
+                owned[event.id, default: []].insert(mic.id)
+            }
+        }
+        return owned
+    }
+
+    /// True when `session` could be this meeting's own audio. Only Teams and
+    /// Skype bookings can be typed from Graph today; every other provider
+    /// matches anything.
+    ///
+    /// The test is *positive evidence of a rival platform*, not absence of
+    /// Teams. A Teams meeting joined from the browser records `com.google.chrome`
+    /// (or Safari/Brave/Arc/Edge), and an unrecognised or empty app list says
+    /// nothing either way — treating any of those as a mismatch would strip a
+    /// real meeting of its own audio, bill the same hour twice, and drop the
+    /// join-early/run-late tails. Only an app that is definitely some *other*
+    /// platform rules the session out.
+    func micPlatformMatches(_ session: MicSession) -> Bool {
+        switch onlineMeetingProvider {
+        case "teamsForBusiness", "skypeForBusiness":
+            let apps = session.voipApps
+            if apps.contains(where: { $0.hasPrefix("com.microsoft.teams") || $0.contains("skype") }) {
+                return true
+            }
+            return !apps.contains(where: Self.isRivalVoipApp)
+        default:
+            return true
+        }
+    }
+
+    /// Bundle IDs that unambiguously identify a non-Teams calling platform.
+    /// Browsers are excluded on purpose — they host Teams as readily as anything
+    /// else. Note a session's app list is a growing union (`MicMonitor` merges
+    /// overlapping recorders), so a session that ever held Teams stays Teams.
+    static func isRivalVoipApp(_ bundleID: String) -> Bool {
+        bundleID.contains("slack") || bundleID.contains("zoom") || bundleID.contains("webex")
+            || bundleID.contains("discord") || bundleID.contains("facetime")
+            || bundleID.hasPrefix("cisco-systems.spark")
+    }
+
     /// Stretch each event's effective time range to absorb adjacent mic
     /// activity, so meeting under/overshoot inherits the meeting's
     /// attribution and rolls into Timeline + weekly report without manual
-    /// intervention. A mic session that overlaps the booked event extends the
-    /// event back to its start (joined early) and forward to its end (ran
-    /// long), capped at the previous/next event boundary so back-to-back
-    /// meetings don't bleed into each other.
+    /// intervention. A mic session the meeting *owns* extends the event back to
+    /// its start (joined early) and forward to its end (ran long), capped at the
+    /// previous/next event boundary so back-to-back meetings don't bleed into
+    /// each other. Sessions the meeting doesn't own — a huddle on another
+    /// platform taken during the booking — can't stretch it.
     ///
     /// Returns in-memory copies — does not mutate persisted rows.
     static func withMicOverrun(events: [CalendarEvent],
                                 micSessions: [MicSession],
                                 now: Date = Date()) -> [CalendarEvent] {
         guard !events.isEmpty, !micSessions.isEmpty else { return events }
-        // A mic session must overlap the event by at least this many seconds
-        // to count as real participation. Without this, an unrelated mic
-        // session that ends a few seconds into the next meeting (e.g. a
-        // 9:49-10:00 Slack huddle ending 30s after a 10:00 meeting starts)
-        // gets absorbed whole into that meeting.
-        let minOverlapSeconds: TimeInterval = 120
+        // Stretching needs real participation, not just any overlap.
+        let owned = meetingMicSessionIDs(events: events, micSessions: micSessions, now: now,
+                                         minimumOverlapSeconds: meetingMicOverlapSeconds)
         var extended = events.sorted { $0.startAt < $1.startAt }
         for i in extended.indices {
+            guard let mine = owned[extended[i].id] else { continue }
             let originalStart = extended[i].startAt
             let originalEnd = extended[i].endAt
             // Cap against the (possibly already extended) neighbor on each
@@ -313,11 +403,8 @@ struct CalendarEvent: Codable, FetchableRecord, MutablePersistableRecord, Identi
             let nextStart = i + 1 < extended.count ? extended[i + 1].startAt : Date.distantFuture
             var newStart = originalStart
             var newEnd = originalEnd
-            for mic in micSessions {
+            for mic in micSessions where mine.contains(mic.id) {
                 let micEnd = mic.endedAt ?? now
-                let overlapStart = max(mic.startedAt, originalStart)
-                let overlapEnd = min(micEnd, originalEnd)
-                guard overlapEnd.timeIntervalSince(overlapStart) >= minOverlapSeconds else { continue }
                 if mic.startedAt < originalStart {
                     newStart = min(newStart, max(mic.startedAt, prevEnd))
                 }

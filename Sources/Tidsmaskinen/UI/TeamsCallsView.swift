@@ -67,6 +67,22 @@ struct CallSegment: Identifiable, Equatable, Hashable {
         }
         return remainders.filter { $0.end.timeIntervalSince($0.start) >= minimumSeconds }
     }
+
+    /// The slices of `session` that are genuinely ad-hoc: the session minus only
+    /// the meetings it actually *is*. `owned` comes from
+    /// `CalendarEvent.meetingMicSessionIDs`. A booking the session merely
+    /// happened *during* — a Slack huddle taken after a Teams meeting ended
+    /// early — is not subtracted, so it stays visible instead of disappearing
+    /// into the block and being credited to the meeting's customer.
+    static func adHocRanges(of session: MicSession,
+                            endedAt: Date,
+                            events: [CalendarEvent],
+                            owned: [String: Set<String>],
+                            minimumSeconds: TimeInterval) -> [TimeRange] {
+        let ownMeetings = events.filter { owned[$0.id]?.contains(session.id) == true }
+        return subtractEvents(from: session.startedAt, to: endedAt,
+                              events: ownMeetings, minimumSeconds: minimumSeconds)
+    }
 }
 
 struct TeamsCallsView: View {
@@ -78,9 +94,11 @@ struct TeamsCallsView: View {
     @State private var matcher: RuleMatcher?
     @State private var loadError: String?
     @State private var attributing: CallSegment?
-    /// How many sessions were hidden because they were *fully* covered by
-    /// calendar events. Surfaced in the empty state so the user knows time
-    /// isn't being silently lost.
+    /// How many sessions were hidden because they were a meeting's own audio,
+    /// fully covered by the meetings that own them. Surfaced in the empty state
+    /// so the user knows time isn't being silently lost. Sessions dropped merely
+    /// for being shorter than the 30s flicker floor are NOT counted here — they
+    /// have no calendar explanation, so claiming they moved to Meetings lies.
     @State private var hiddenByCalendarOverlap: Int = 0
 
     var body: some View {
@@ -334,20 +352,24 @@ struct TeamsCallsView: View {
             // left is genuinely ad-hoc and shows up here.
             let rawEvents = try state.database.calendarEvents(in: scope.interval)
             let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: raw)
+            let owned = CalendarEvent.meetingMicSessionIDs(events: events, micSessions: raw)
             var emitted: [CallSegment] = []
             var fullyHidden = 0
             for s in raw {
                 let sStart = s.startedAt
                 let sEnd = s.endedAt ?? Date()
                 guard sEnd > sStart else { continue }
-                let remainders = CallSegment.subtractEvents(
-                    from: sStart,
-                    to: sEnd,
+                let remainders = CallSegment.adHocRanges(
+                    of: s,
+                    endedAt: sEnd,
                     events: events,
+                    owned: owned,
                     minimumSeconds: 30
                 )
                 if remainders.isEmpty {
-                    fullyHidden += 1
+                    // Only claim "shown under Meetings" when a meeting really
+                    // took it; an under-30s session was just flicker.
+                    if owned.values.contains(where: { $0.contains(s.id) }) { fullyHidden += 1 }
                     continue
                 }
                 for (i, r) in remainders.enumerated() {
