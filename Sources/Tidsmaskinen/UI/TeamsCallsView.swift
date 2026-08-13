@@ -67,6 +67,22 @@ struct CallSegment: Identifiable, Equatable, Hashable {
         }
         return remainders.filter { $0.end.timeIntervalSince($0.start) >= minimumSeconds }
     }
+
+    /// The slices of `session` that are genuinely ad-hoc: the session minus only
+    /// the meetings it actually *is*. `owned` comes from
+    /// `CalendarEvent.meetingMicSessionIDs`. A booking the session merely
+    /// happened *during* — a Slack huddle taken after a Teams meeting ended
+    /// early — is not subtracted, so it stays visible instead of disappearing
+    /// into the block and being credited to the meeting's customer.
+    static func adHocRanges(of session: MicSession,
+                            endedAt: Date,
+                            events: [CalendarEvent],
+                            owned: [String: Set<String>],
+                            minimumSeconds: TimeInterval) -> [TimeRange] {
+        let ownMeetings = events.filter { owned[$0.id]?.contains(session.id) == true }
+        return subtractEvents(from: session.startedAt, to: endedAt,
+                              events: ownMeetings, minimumSeconds: minimumSeconds)
+    }
 }
 
 struct TeamsCallsView: View {
@@ -334,16 +350,18 @@ struct TeamsCallsView: View {
             // left is genuinely ad-hoc and shows up here.
             let rawEvents = try state.database.calendarEvents(in: scope.interval)
             let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: raw)
+            let owned = CalendarEvent.meetingMicSessionIDs(events: events, micSessions: raw)
             var emitted: [CallSegment] = []
             var fullyHidden = 0
             for s in raw {
                 let sStart = s.startedAt
                 let sEnd = s.endedAt ?? Date()
                 guard sEnd > sStart else { continue }
-                let remainders = CallSegment.subtractEvents(
-                    from: sStart,
-                    to: sEnd,
+                let remainders = CallSegment.adHocRanges(
+                    of: s,
+                    endedAt: sEnd,
                     events: events,
+                    owned: owned,
                     minimumSeconds: 30
                 )
                 if remainders.isEmpty {

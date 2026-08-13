@@ -19,17 +19,20 @@ final class WeeklyReportCallsTests: XCTestCase {
         Customer(id: id, name: id.uppercased(), color: nil, createdAt: Date())
     }
 
-    private func micSession(_ id: String, from: Date, to: Date, customerID: String?) -> MicSession {
-        MicSession(id: id, startedAt: from, endedAt: to, voipAppsCSV: "com.tinyspeck.slackmacgap",
+    private func micSession(_ id: String, from: Date, to: Date, customerID: String?,
+                            app: String = "com.tinyspeck.slackmacgap") -> MicSession {
+        MicSession(id: id, startedAt: from, endedAt: to, voipAppsCSV: app,
                    participant: nil, slackChannel: nil, customerID: customerID, projectID: nil,
                    createdAt: Date(), updatedAt: Date())
     }
 
-    private func event(_ id: String, from: Date, to: Date, customerID: String?) -> CalendarEvent {
+    private func event(_ id: String, from: Date, to: Date, customerID: String?,
+                       provider: String? = nil) -> CalendarEvent {
         CalendarEvent(id: id, iCalUID: nil, subject: "Meeting", bodyPreview: nil,
                       startAt: from, endAt: to, isAllDay: false,
                       organizerEmail: nil, organizerName: nil, rsvpStatus: "accepted",
-                      isOnlineMeeting: false, onlineMeetingProvider: nil, attendeeDomainsCSV: nil,
+                      isOnlineMeeting: provider != nil, onlineMeetingProvider: provider,
+                      attendeeDomainsCSV: nil,
                       location: nil, verifiedAttended: false, customerID: customerID, projectID: nil,
                       eventType: "singleInstance", seriesMasterID: nil, isIgnored: false,
                       createdAt: Date(), updatedAt: Date())
@@ -80,6 +83,40 @@ final class WeeklyReportCallsTests: XCTestCase {
         let report = WeeklyReport.compute(
             week: week, samples: [], events: [e], micSessions: [mic], matcher: m, sampleIntervalSeconds: 15)
         // 1.0h from the meeting, nothing extra from the fully-overlapping call.
+        XCTAssertEqual(rowHours(report, customerID: "A"), 1.0, accuracy: 0.001)
+        XCTAssertEqual(report.grandTotal, 1.0, accuracy: 0.001)
+    }
+
+    /// A Teams meeting that ended early, followed by a Slack huddle for another
+    /// customer inside the booked block. The huddle is not the meeting's audio,
+    /// so it keeps its full duration and lands on its own customer instead of
+    /// being swallowed by the booking.
+    func testHuddleDuringTeamsMeetingIsCountedSeparately() {
+        let m = RuleMatcher.make(customers: [customer("A"), customer("B")], projects: [], rules: [])
+        let e = event("e1", from: at(2026, 4, 15, 13), to: at(2026, 4, 15, 15),
+                      customerID: "A", provider: "teamsForBusiness")
+        let teams = micSession("m1", from: at(2026, 4, 15, 13), to: at(2026, 4, 15, 13, 15),
+                               customerID: nil, app: "com.microsoft.teams2")
+        let huddle = micSession("m2", from: at(2026, 4, 15, 13, 20), to: at(2026, 4, 15, 14, 20),
+                                customerID: "B")
+        let report = WeeklyReport.compute(
+            week: week, samples: [], events: [e], micSessions: [teams, huddle],
+            matcher: m, sampleIntervalSeconds: 15)
+        XCTAssertEqual(rowHours(report, customerID: "A"), 2.0, accuracy: 0.001)
+        XCTAssertEqual(rowHours(report, customerID: "B"), 1.0, accuracy: 0.001)
+    }
+
+    /// The flip side: a Teams meeting's own Teams audio is still absorbed, so
+    /// pinning it can't double-count the booked time.
+    func testTeamsAudioInsideTeamsMeetingIsNotDoubleCounted() {
+        let m = RuleMatcher.make(customers: [customer("A")], projects: [], rules: [])
+        let e = event("e1", from: at(2026, 4, 15, 13), to: at(2026, 4, 15, 14),
+                      customerID: "A", provider: "teamsForBusiness")
+        let teams = micSession("m1", from: at(2026, 4, 15, 13), to: at(2026, 4, 15, 13, 50),
+                               customerID: "A", app: "com.microsoft.teams2")
+        let report = WeeklyReport.compute(
+            week: week, samples: [], events: [e], micSessions: [teams],
+            matcher: m, sampleIntervalSeconds: 15)
         XCTAssertEqual(rowHours(report, customerID: "A"), 1.0, accuracy: 0.001)
         XCTAssertEqual(report.grandTotal, 1.0, accuracy: 0.001)
     }
