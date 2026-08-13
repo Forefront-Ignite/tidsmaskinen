@@ -94,9 +94,11 @@ struct TeamsCallsView: View {
     @State private var matcher: RuleMatcher?
     @State private var loadError: String?
     @State private var attributing: CallSegment?
-    /// How many sessions were hidden because they were *fully* covered by
-    /// calendar events. Surfaced in the empty state so the user knows time
-    /// isn't being silently lost.
+    /// How many sessions were hidden because they were a meeting's own audio,
+    /// fully covered by the meetings that own them. Surfaced in the empty state
+    /// so the user knows time isn't being silently lost. Sessions dropped merely
+    /// for being shorter than the 30s flicker floor are NOT counted here — they
+    /// have no calendar explanation, so claiming they moved to Meetings lies.
     @State private var hiddenByCalendarOverlap: Int = 0
 
     var body: some View {
@@ -365,7 +367,9 @@ struct TeamsCallsView: View {
                     minimumSeconds: 30
                 )
                 if remainders.isEmpty {
-                    fullyHidden += 1
+                    // Only claim "shown under Meetings" when a meeting really
+                    // took it; an under-30s session was just flicker.
+                    if owned.values.contains(where: { $0.contains(s.id) }) { fullyHidden += 1 }
                     continue
                 }
                 for (i, r) in remainders.enumerated() {
