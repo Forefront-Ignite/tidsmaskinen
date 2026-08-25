@@ -21,12 +21,10 @@ actor CommandCenterClient {
         return response.clients
     }
 
-    /// `GET /planning/projects?status=active`. We filter prospects locally so
-    /// the user can flip `includeProspects` without re-fetching.
+    /// `GET /planning/engagements?status=active` — CC renamed projects to
+    /// engagements and now returns a bare array.
     func listProjects() async throws -> [CommandCenter.Project] {
-        let response: CommandCenter.ListProjectsResponse =
-            try await get(path: "/planning/projects", query: ["status": "active"])
-        return response.projects
+        try await get(path: "/planning/engagements", query: ["status": "active"])
     }
 
     // MARK: - Plumbing

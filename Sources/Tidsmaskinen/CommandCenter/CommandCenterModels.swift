@@ -15,16 +15,17 @@ enum CommandCenter {
         let id: String
         let name: String
         let clientId: String?
-        let engagementType: String  // "tm" | "fixed_price" | "retainer" | "prospect" | "internal"
+        let engagementType: String  // "retainer" | "project_fixed" | "project_tnm" | "internal"
         let status: String
         let color: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, name, clientId, status, color
+            case engagementType = "type"
+        }
     }
 
     struct ListClientsResponse: Codable {
         let clients: [Client]
-    }
-
-    struct ListProjectsResponse: Codable {
-        let projects: [Project]
     }
 }
