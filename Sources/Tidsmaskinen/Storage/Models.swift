@@ -568,45 +568,92 @@ struct MicSession: Codable, FetchableRecord, MutablePersistableRecord, Identifia
         return nil
     }
 
-    /// The channel a huddle belonged to, taken **only** from `Huddle: <channel>`
-    /// titles. Plain channel-navigation windows (`<channel> (Channel) …`) are
-    /// deliberately ignored: a channel you merely clicked into during a call is
-    /// not the call's channel. Returns nil for DM huddles (`Huddle: @person`)
-    /// and for any session with no channel-huddle title at all — those simply
-    /// aren't channel huddles, and guessing from navigation produces false
-    /// attributions. Ties break on frequency.
-    static func bestSlackChannel(fromTitles titles: [String]) -> String? {
-        var huddle: [String: Int] = [:]
-        for raw in titles {
-            let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard t.hasPrefix("Huddle:"), let name = parseSlackChannel(fromTitle: t) else { continue }
-            huddle[name, default: 0] += 1
+    /// Slack's built-in views, which use the same bare title shape as a huddle
+    /// window but name no conversation.
+    private static let slackViewNames: Set<String> = [
+        "threads", "new message", "drafts & sent", "activity", "later", "canvases",
+        "files", "templates", "automations", "slack connect", "huddles", "home",
+        "signal", "search", "saved items", "mentions & reactions", "all dms",
+        "people", "apps", "more"
+    ]
+
+    /// The conversation a Slack *huddle window* names, and whether it's a
+    /// channel. Slack has used two title formats:
+    ///
+    ///   `Huddle: nfc-internal – Forefront Ignite – Slack 🎤`  (until Aug 2026)
+    ///   `Huddle: @Victor Vadelius – Forefront Ignite – Slack 🎤`
+    ///   `Victor Vadelius - Forefront Ignite - Slack`          (current)
+    ///
+    /// The current format dropped the `Huddle:` prefix and the `@`/`#` marker,
+    /// so the huddle window is identified by what it *lacks*: main-window
+    /// titles always carry a `(DM)`/`(Channel)` suffix, are tagged `[Main]`
+    /// while a second window exists, and may carry an `N new items` counter —
+    /// a huddle title has none of those. Channel vs person is then decided by
+    /// shape: Slack forces channel names to lowercase with no spaces, so
+    /// anything with a capital or a space is a person.
+    /// ponytail: shape heuristic — an all-lowercase display name reads as a
+    /// channel. Revisit if Slack ever re-marks huddle titles.
+    static func parseSlackHuddleTitle(fromTitle title: String) -> (name: String, isChannel: Bool)? {
+        // Slack mixes en/em dashes with hyphens across the two formats.
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "–", with: "-")
+            .replacingOccurrences(of: "—", with: "-")
+        var name: String
+        var explicitPerson = false
+
+        if t.hasPrefix("Huddle:") {
+            let rest = String(t.dropFirst("Huddle:".count))
+            name = (rest.components(separatedBy: " - ").first ?? rest)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.hasPrefix("@") {
+                name = String(name.dropFirst()).trimmingCharacters(in: .whitespaces)
+                explicitPerson = true
+            }
+        } else {
+            guard !t.contains("[Main]"), !t.contains("(DM)"), !t.contains("(Channel)"),
+                  t.range(of: #" - \d+ new items? - "#, options: .regularExpression) == nil
+            else { return nil }
+            // `<name> - <workspace> - Slack` (plus optional trailing emoji).
+            let parts = t.components(separatedBy: " - ")
+            guard parts.count >= 3, parts[parts.count - 1].hasPrefix("Slack") else { return nil }
+            name = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            if slackViewNames.contains(name.lowercased()) { return nil }
         }
-        return huddle.max(by: { $0.value < $1.value })?.key
+
+        if name.hasPrefix("#") { name = String(name.dropFirst()) }
+        else if explicitPerson { return name.isEmpty ? nil : (name, false) }
+        else if name.isEmpty { return nil }
+        else {
+            // Channel names are lowercase and space-free; display names aren't.
+            let isChannel = name.range(of: #"^[a-z0-9][a-z0-9._-]*$"#,
+                                       options: .regularExpression) != nil
+            return (name, isChannel)
+        }
+        return name.isEmpty ? nil : (name, true)
     }
 
-    /// Extracts the other person from a 1:1 Slack huddle title
-    /// (`Huddle: @Victor Vadelius – …` → `Victor Vadelius`). Returns nil for
-    /// channel huddles (`Huddle: nfc-internal`) and non-huddle titles — only DM
-    /// huddles name a person.
-    static func parseSlackHuddlePerson(fromTitle title: String) -> String? {
-        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard t.hasPrefix("Huddle:") else { return nil }
-        var rest = String(t.dropFirst("Huddle:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
-        if let sep = rest.range(of: #"\s[–—-]\s"#, options: .regularExpression) {
-            rest = String(rest[..<sep.lowerBound])
-        }
-        rest = rest.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard rest.hasPrefix("@") else { return nil } // DM huddles only
-        let name = String(rest.dropFirst()).trimmingCharacters(in: .whitespaces)
-        return name.isEmpty ? nil : name
+    /// The channel a huddle belonged to, taken **only** from huddle-window
+    /// titles. Plain channel-navigation windows (`<channel> (Channel) …`) are
+    /// deliberately ignored: a channel you merely clicked into during a call is
+    /// not the call's channel. Returns nil for DM huddles and for any session
+    /// with no channel-huddle title at all — those simply aren't channel
+    /// huddles, and guessing from navigation produces false attributions.
+    /// Ties break on frequency.
+    static func bestSlackChannel(fromTitles titles: [String]) -> String? {
+        bestSlackHuddleName(fromTitles: titles, channels: true)
     }
 
     /// Most-frequent 1:1 huddle counterpart across the session's Slack titles.
     static func bestSlackHuddlePerson(fromTitles titles: [String]) -> String? {
+        bestSlackHuddleName(fromTitles: titles, channels: false)
+    }
+
+    private static func bestSlackHuddleName(fromTitles titles: [String], channels: Bool) -> String? {
         var counts: [String: Int] = [:]
         for raw in titles {
-            if let name = parseSlackHuddlePerson(fromTitle: raw) { counts[name, default: 0] += 1 }
+            guard let parsed = parseSlackHuddleTitle(fromTitle: raw),
+                  parsed.isChannel == channels else { continue }
+            counts[parsed.name, default: 0] += 1
         }
         return counts.max(by: { $0.value < $1.value })?.key
     }

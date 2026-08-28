@@ -411,6 +411,39 @@ struct AppDatabase {
                 t.add(column: "isIgnored", .boolean).notNull().defaults(to: false)
             }
         }
+        migrator.registerMigration("v21_backfill_new_format_slack_huddles") { db in
+            // Slack stopped prefixing huddle windows with "Huddle:" in Aug 2026
+            // (now plain `<name> - <workspace> - Slack`), so every huddle since
+            // landed with no channel and no participant — unlabeled in the Calls
+            // tab and un-auto-attributable by slackChannel rules. Re-parse those
+            // sessions with the format-agnostic parser. Only rows that got
+            // nothing are touched; correctly-labeled history is left alone.
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT id, startedAt, endedAt FROM mic_sessions
+                WHERE voipAppsCSV LIKE '%slack%' AND voipAppsCSV NOT LIKE '%teams%'
+                  AND participant IS NULL AND slackChannel IS NULL
+                """)
+            for row in rows {
+                let id: String = row["id"]
+                let start: Date = row["startedAt"]
+                let end: Date = row["endedAt"] ?? start
+                let titles = try String.fetchAll(db, sql: """
+                    SELECT windowTitle FROM activity_samples
+                    WHERE appBundleID LIKE '%slack%' AND windowTitle IS NOT NULL
+                      AND capturedAt >= ? AND capturedAt <= ?
+                    """, arguments: [start, end])
+                if let channel = MicSession.bestSlackChannel(fromTitles: titles) {
+                    try db.execute(
+                        sql: "UPDATE mic_sessions SET slackChannel = ? WHERE id = ?",
+                        arguments: [channel, id])
+                } else if let person = MicSession.bestSlackHuddlePerson(fromTitles: titles) {
+                    try db.execute(
+                        sql: "UPDATE mic_sessions SET participant = ? WHERE id = ?",
+                        arguments: [person, id])
+                }
+            }
+        }
+
         try migrator.migrate(dbQueue)
     }
 
