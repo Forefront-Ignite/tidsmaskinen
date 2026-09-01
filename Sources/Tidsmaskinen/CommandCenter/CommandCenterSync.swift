@@ -31,12 +31,21 @@ actor CommandCenterSync {
     }
 
     func runSync() async throws -> CommandCenterSyncResult {
-        var result = CommandCenterSyncResult(startedAt: Date(), finishedAt: Date())
-
         async let clientsTask = client.listClients()
         async let projectsTask = client.listProjects()
         let (ccClients, ccProjects) = try await (clientsTask, projectsTask)
+        let result = try reconcile(clients: ccClients, projects: ccProjects)
+        AppSettings.setCommandCenterLastSyncAt(result.finishedAt)
+        return result
+    }
 
+    /// The DB half of a sync pass, split out from the fetch so it is testable
+    /// without a network or a keychain token.
+    func reconcile(
+        clients ccClients: [CommandCenter.Client],
+        projects ccProjects: [CommandCenter.Project]
+    ) throws -> CommandCenterSyncResult {
+        var result = CommandCenterSyncResult(startedAt: Date(), finishedAt: Date())
         let now = Date()
         var customerByExternalID: [String: Customer] = [:]
 
@@ -70,17 +79,20 @@ actor CommandCenterSync {
             }
         }
 
-        let keptClientIDs = Set(ccClients.map { $0.id })
-        result.clientsArchived = try database.archiveMissingCustomers(
-            source: .commandCenter,
-            keepingExternalIDs: keptClientIDs
-        )
+        var keptClientIDs = Set(ccClients.map { $0.id })
 
         // ---- Projects
         var keptProjectIDs = Set<String>()
         for cc in ccProjects {
+            // Closed engagements fall out of keptProjectIDs and archive below —
+            // the rules and reports pointing at them must still resolve.
+            if cc.status == "closed" { continue }
+
             // A project can only land in our DB if its parent client also did.
-            // Skip orphans rather than inventing a stub customer.
+            // `/planning/clients?status=active` hides prospect/inactive clients,
+            // so adopt the parent from the engagement's own joined clientName
+            // rather than dropping the engagement — otherwise a preliminary deal
+            // on a not-yet-active client is invisible in Tidsmaskinen.
             guard let clientId = cc.clientId else { continue }
             let parentLookup: Customer?
             if let cached = customerByExternalID[clientId] {
@@ -88,7 +100,27 @@ actor CommandCenterSync {
             } else {
                 parentLookup = try database.customer(externalSource: .commandCenter, externalID: clientId)
             }
-            guard let parent = parentLookup else { continue }
+            let parent: Customer
+            if let found = parentLookup {
+                parent = found
+            } else if let clientName = cc.clientName {
+                let adopted = Customer(
+                    id: UUID().uuidString,
+                    name: clientName,
+                    color: nil,
+                    createdAt: now,
+                    externalSource: ExternalSource.commandCenter.rawValue,
+                    externalID: clientId,
+                    externalSyncedAt: now
+                )
+                try database.upsert(adopted)
+                customerByExternalID[clientId] = adopted
+                result.clientsImported += 1
+                parent = adopted
+            } else {
+                continue
+            }
+            keptClientIDs.insert(clientId)
             keptProjectIDs.insert(cc.id)
 
             if var existing = try database.project(externalSource: .commandCenter, externalID: cc.id) {
@@ -133,8 +165,14 @@ actor CommandCenterSync {
             keepingExternalIDs: keptProjectIDs
         )
 
+        // After the project loop: keptClientIDs now also holds clients adopted
+        // via an engagement, which must not be archived back out.
+        result.clientsArchived = try database.archiveMissingCustomers(
+            source: .commandCenter,
+            keepingExternalIDs: keptClientIDs
+        )
+
         result.finishedAt = Date()
-        AppSettings.setCommandCenterLastSyncAt(result.finishedAt)
         return result
     }
 }

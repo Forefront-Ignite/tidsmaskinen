@@ -21,10 +21,13 @@ actor CommandCenterClient {
         return response.clients
     }
 
-    /// `GET /planning/engagements?status=active` — CC renamed projects to
-    /// engagements and now returns a bare array.
+    /// `GET /planning/engagements` — CC renamed projects to engagements and now
+    /// returns a bare array. Deliberately *unfiltered*: CC labels a `planned`
+    /// engagement "Preliminär", and preliminary work is still work you report
+    /// time on, so it belongs in the picker. `closed` is dropped in `reconcile`
+    /// instead, where it archives rather than disappears.
     func listProjects() async throws -> [CommandCenter.Project] {
-        try await get(path: "/planning/engagements", query: ["status": "active"])
+        try await get(path: "/planning/engagements")
     }
 
     // MARK: - Plumbing
