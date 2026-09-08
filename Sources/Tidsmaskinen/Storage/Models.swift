@@ -185,6 +185,18 @@ struct Rule: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, E
     }
 }
 
+/// Providers sharing the session activity pipeline. Existing table/type names stay
+/// stable so historical Claude sessions and their attribution remain intact.
+enum CodingAgentProvider: String, Codable, DatabaseValueConvertible, CaseIterable {
+    case claude, codex
+
+    var displayName: String { self == .claude ? "Claude Code" : "Codex" }
+
+    func storedSessionID(_ rawID: String) -> String {
+        self == .claude ? rawID : "codex:\(rawID)"
+    }
+}
+
 struct ClaudeSession: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
     var id: String              // session_id from the hook payload
     var cwd: String?
@@ -200,6 +212,8 @@ struct ClaudeSession: Codable, FetchableRecord, MutablePersistableRecord, Identi
     var projectID: String?
     var createdAt: Date
     var updatedAt: Date
+
+    var provider: CodingAgentProvider = .claude
 
     static let databaseTableName = "claude_sessions"
 

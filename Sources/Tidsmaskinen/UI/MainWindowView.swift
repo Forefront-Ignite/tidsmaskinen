@@ -28,7 +28,7 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
         case .debug:          return "Debug"
         case .settings:       return "Settings"
         case .calendar:       return "Calendar"
-        case .claudeSessions: return "Claude Sessions"
+        case .claudeSessions: return "Coding Sessions"
         case .diagnostics:    return "Diagnostics"
         case .samples:        return "Raw Samples"
         }

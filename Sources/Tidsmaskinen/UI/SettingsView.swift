@@ -19,7 +19,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .general:      return "Appearance, startup and updates"
         case .tracking:     return "How activity is sampled"
         case .calendar:     return "Meeting import & Microsoft account"
-        case .integrations: return "Command Center & Claude Code"
+        case .integrations: return "Command Center & coding agents"
         case .ignored:      return "Hosts and apps you’ve muted"
         }
     }
@@ -357,7 +357,19 @@ struct SettingsView: View {
             commandCenterSection
         }
         Section("Claude Code") {
-            claudeCodeSection
+            AgentHookSettingsView(provider: .claude)
+        }
+        Section("Codex (OpenAI)") {
+            AgentHookSettingsView(provider: .codex)
+        }
+        Section("Coding session activity") {
+            Stepper(value: $claudeIdleMinutes, in: 1...60, step: 1) {
+                LabeledContent("Session idle threshold") {
+                    Text("\(claudeIdleMinutes) min").monospacedDigit()
+                }
+            }
+            Text("Applies to both Claude Code and Codex. Only the first \(claudeIdleMinutes) minutes of a gap between hook events count as active time.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -531,9 +543,6 @@ struct SettingsView: View {
         return components.url
     }
 
-    @State private var hookState: HookInstaller.InstallState = HookInstaller.currentState()
-    @State private var hookActionError: String?
-
     private var launchAtLoginBinding: Binding<Bool> {
         Binding(
             get: { launchAtLogin },
@@ -547,81 +556,6 @@ struct SettingsView: View {
                 launchAtLogin = LoginItemManager.isEnabled
             }
         )
-    }
-
-    @ViewBuilder
-    private var claudeCodeSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                switch hookState {
-                case .installed(let path):
-                    Label("Hooks installed", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(Color.green)
-                    Spacer()
-                    Text(path)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                case .notInstalled:
-                    Label("Hooks not installed", systemImage: "circle.dashed")
-                        .foregroundStyle(.secondary)
-                case .stale(let installed, _):
-                    Label("Hooks point to a stale path", systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    Spacer()
-                    Text(installed)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                case .error(let msg):
-                    Label(msg, systemImage: "xmark.circle.fill")
-                        .foregroundStyle(.red)
-                }
-            }
-
-            HStack {
-                Button {
-                    do {
-                        hookState = try HookInstaller.install()
-                        hookActionError = nil
-                    } catch {
-                        hookActionError = error.localizedDescription
-                    }
-                } label: {
-                    Label("Install / refresh hooks", systemImage: "square.and.arrow.down")
-                }
-                Button(role: .destructive) {
-                    do {
-                        hookState = try HookInstaller.uninstall()
-                        hookActionError = nil
-                    } catch {
-                        hookActionError = error.localizedDescription
-                    }
-                } label: {
-                    Label("Uninstall", systemImage: "trash")
-                }
-                .disabled(hookState == .notInstalled)
-            }
-
-            if let err = hookActionError {
-                Text(err).font(.caption).foregroundStyle(.red)
-            }
-
-            Stepper(value: $claudeIdleMinutes, in: 1...60, step: 1) {
-                LabeledContent("Session idle threshold") {
-                    Text("\(claudeIdleMinutes) min").monospacedDigit()
-                }
-            }
-            Text("A Claude Code session is considered idle after this many minutes without a hook event. Idle gaps don't contribute to billable hours — only the first \(claudeIdleMinutes) min of any silent stretch counts.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Text("Writes to ~/.claude/settings.json. Other hook entries you've added are preserved — only our SessionStart / SessionEnd / UserPromptSubmit / Stop lines are added or removed. Hook events end up in claude-events.jsonl and are ingested live.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
     }
 
     private var presetBinding: Binding<GraphPreset> {
@@ -658,5 +592,82 @@ struct SettingsView: View {
         let remainder = seconds % 60
         if remainder == 0 { return "\(minutes) min" }
         return "\(minutes) min \(remainder) s"
+    }
+}
+
+private struct AgentHookSettingsView: View {
+    let provider: CodingAgentProvider
+    @State private var hookState: HookInstaller.InstallState = .notInstalled
+    @State private var hookActionError: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                switch hookState {
+                case .installed(let path):
+                    Label("Hooks configured", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(Color.green)
+                    Spacer()
+                    Text(path)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                case .notInstalled:
+                    Label("Hooks not installed", systemImage: "circle.dashed")
+                        .foregroundStyle(.secondary)
+                case .stale(let installed, _):
+                    Label("Hooks need refreshing", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    Text(installed)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                case .error(let msg):
+                    Label(msg, systemImage: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                }
+            }
+
+            HStack {
+                Button {
+                    do {
+                        hookState = try HookInstaller.install(provider: provider)
+                        hookActionError = nil
+                    } catch {
+                        hookActionError = error.localizedDescription
+                    }
+                } label: {
+                    Label("Install / refresh hooks", systemImage: "square.and.arrow.down")
+                }
+                Button(role: .destructive) {
+                    do {
+                        hookState = try HookInstaller.uninstall(provider: provider)
+                        hookActionError = nil
+                    } catch {
+                        hookActionError = error.localizedDescription
+                    }
+                } label: {
+                    Label("Uninstall", systemImage: "trash")
+                }
+                .disabled(hookState == .notInstalled)
+            }
+
+            if let err = hookActionError {
+                Text(err).font(.caption).foregroundStyle(.red)
+            }
+
+            Text("Tracks active time, prompt counts and project attribution from new sessions.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("Hook configuration: \(HookInstaller.settingsPath(for: provider).path)")
+                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            if provider == .codex {
+                Text("After installing or refreshing, restart Codex and review and trust the Tidsmaskinen hooks using /hooks in the Codex CLI. Requires a Codex version with lifecycle hook support.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .onAppear { hookState = HookInstaller.currentState(provider: provider) }
     }
 }

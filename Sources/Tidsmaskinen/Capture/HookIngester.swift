@@ -160,6 +160,7 @@ final class HookIngester {
         let timestamp: String
         let eventType: String
         let payload: Payload?
+        let provider: CodingAgentProvider?
     }
 
     private struct Payload: Decodable {
@@ -173,9 +174,12 @@ final class HookIngester {
     func handleLine(_ line: String) {
         guard let data = line.data(using: .utf8) else { return }
         guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data) else { return }
-        guard let sessionID = envelope.payload?.session_id else { return }
+        guard let rawSessionID = envelope.payload?.session_id, !rawSessionID.isEmpty,
+              ["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "Interrupt"].contains(envelope.eventType),
+              let ts = parseISO(envelope.timestamp) else { return }
+        let provider = envelope.provider ?? .claude
+        let sessionID = provider.storedSessionID(rawSessionID)
 
-        let ts = parseISO(envelope.timestamp) ?? Date()
         let idleThreshold = TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60)
 
         do {
@@ -210,7 +214,8 @@ final class HookIngester {
                 customerID: nil,
                 projectID: nil,
                 createdAt: Date(),
-                updatedAt: Date()
+                updatedAt: Date(),
+                provider: provider
             )
 
             // Refresh cwd / transcript if newer payload has them.
@@ -229,7 +234,7 @@ final class HookIngester {
             // capped by idleThreshold so long idle gaps don't get billed.
             let isActivityEvent: Bool
             switch envelope.eventType {
-            case "SessionStart", "UserPromptSubmit", "Stop", "SessionEnd":
+            case "SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "Interrupt":
                 isActivityEvent = true
             default:
                 isActivityEvent = false

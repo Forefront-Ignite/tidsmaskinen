@@ -189,4 +189,67 @@ final class HookIngesterTests: XCTestCase {
         XCTAssertEqual(s.activeSeconds, 300 + 120, accuracy: 0.001,
                        "after resurrection, gaps bill from this morning's activity")
     }
+    func testCodexLifecycleUsesSeparateIDAndSharedAccounting() throws {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        func codex(_ event: String, _ seconds: Double) {
+            let raw = line(event, start.addingTimeInterval(seconds))
+            ingester.handleLine(raw.replacingOccurrences(of: "\"payload\":", with: "\"provider\":\"codex\",\"payload\":"))
+        }
+        ingester.handleLine(line("SessionStart", start))
+        codex("SessionStart", 0)
+        codex("UserPromptSubmit", 30)
+        codex("Interrupt", 90)
+        codex("UserPromptSubmit", 120)
+        codex("Stop", 720) // gap capped at 300s
+        codex("SessionEnd", 720)
+        let captured = try XCTUnwrap(try session("codex:sess-1"))
+        XCTAssertEqual(captured.provider, .codex)
+        XCTAssertEqual(captured.promptCount, 2)
+        XCTAssertEqual(captured.activeSeconds, 420, accuracy: 0.001)
+        XCTAssertEqual(captured.endedAt, start.addingTimeInterval(720))
+        let legacy = try XCTUnwrap(try session())
+        XCTAssertEqual(legacy.provider, .claude)
+        XCTAssertEqual(legacy.promptCount, 0)
+        XCTAssertEqual(legacy.activeSeconds, 0)
+        let deltas = try db.claudeActiveDeltas(in: DateInterval(start: start, duration: 1000))
+        XCTAssertEqual(deltas.reduce(0) { $0 + $1.gainedSeconds }, 420, accuracy: 0.001)
+        XCTAssertTrue(deltas.allSatisfy { $0.sessionID == captured.id })
+    }
+
+    func testCodexActivityReachesTimelineAndWeeklyReport() throws {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        for (event, offset) in [("SessionStart", 0.0), ("UserPromptSubmit", 60.0), ("SessionEnd", 180.0)] {
+            let raw = line(event, start.addingTimeInterval(offset))
+            ingester.handleLine(raw.replacingOccurrences(of: "\"payload\":", with: "\"provider\":\"codex\",\"payload\":"))
+        }
+        let customer = Customer(id: "customer", name: "Customer", color: nil, createdAt: start)
+        try db.upsert(customer)
+        try db.setClaudeSessionAttribution(sessionID: "codex:sess-1", customerID: customer.id, projectID: nil)
+        let captured = try XCTUnwrap(try session("codex:sess-1"))
+        let day = Calendar.current.dateInterval(of: .day, for: start)!
+        let deltas = try db.claudeActiveDeltas(in: day)
+        let matcher = RuleMatcher.make(customers: [customer], projects: [], rules: [])
+        let timeline = TimelineBuilder.build(day: day, samples: [], events: [], sessions: [captured],
+                                             claudeDeltas: deltas, matcher: matcher, sampleIntervalSeconds: 15,
+                                             claudeIdleThresholdSeconds: 300)
+        XCTAssertEqual(timeline.claudeCode.count, 1)
+        XCTAssertTrue(timeline.claudeCode[0].title.hasPrefix("Codex ·"))
+        XCTAssertEqual(timeline.claudeCode[0].attribution.customer?.id, customer.id)
+        let week = Calendar.weekStartingMonday().currentWeekInterval(reference: start)
+        let report = WeeklyReport.compute(week: week, samples: [], sessions: [captured], claudeDeltas: deltas,
+                                          matcher: matcher, sampleIntervalSeconds: 15)
+        // The grid rounds to quarter hours; activeHours retains precise time.
+        XCTAssertEqual(report.activeHours, 180.0 / 3600, accuracy: 0.001)
+        XCTAssertEqual(report.rows.count, 1)
+        let contributors = report.breakdownsByRowID.values.flatMap { $0.topContributors }
+        XCTAssertEqual(contributors.first?.kindLabel, "Codex")
+    }
+
+    func testInvalidProviderOrTimestampDoesNotCreateSession() throws {
+        ingester.handleLine(#"{"timestamp":"invalid","eventType":"SessionStart","provider":"codex","payload":{"session_id":"bad"}}"#)
+        ingester.handleLine(#"{"timestamp":"2026-09-08T12:00:00Z","eventType":"SessionStart","provider":"unknown","payload":{"session_id":"bad"}}"#)
+        XCTAssertNil(try session("codex:bad"))
+        XCTAssertNil(try session("bad"))
+    }
+
 }

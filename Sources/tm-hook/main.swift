@@ -7,7 +7,7 @@ if ProcessInfo.processInfo.environment["TM_SKIP_HOOKS"] == "1" {
     exit(0)
 }
 
-// tm-hook — tiny Swift CLI invoked by Claude Code hooks.
+// tm-hook — tiny Swift CLI invoked by Claude Code and Codex lifecycle hooks.
 // Reads JSON payload from stdin, appends one structured line to
 // ~/Library/Application Support/Tidsmaskinen/claude-events.jsonl
 // where the Tidsmaskinen menu-bar app tails it via FSEvents.
@@ -15,23 +15,34 @@ if ProcessInfo.processInfo.environment["TM_SKIP_HOOKS"] == "1" {
 // Usage from ~/.claude/settings.json:
 //   "SessionStart": [{ "command": "/path/to/Tidsmaskinen.app/Contents/MacOS/tm-hook SessionStart" }]
 //
-// Exits silently on errors — a misbehaving hook must never break Claude Code.
+// Exits silently on errors — a misbehaving hook must never interrupt the coding agent.
 
 let args = CommandLine.arguments
-let eventType = args.count > 1 ? args[1] : "Unknown"
+// Legacy invocation: tm-hook SessionStart. Codex: tm-hook --provider codex SessionStart.
+let provider: String
+let eventType: String
+if args.count == 4, args[1] == "--provider", ["claude", "codex"].contains(args[2]) {
+    provider = args[2]
+    eventType = args[3]
+} else if args.count == 2 {
+    provider = "claude"
+    eventType = args[1]
+} else {
+    exit(0)
+}
+guard ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "Interrupt"].contains(eventType) else { exit(0) }
 
 let stdinData = FileHandle.standardInput.readDataToEndOfFile()
 
 // Decode the incoming payload as JSON. If it isn't valid JSON, drop it on
 // the floor (better than corrupting the JSONL log with a forged line).
-let payloadObject: Any
-if stdinData.isEmpty {
-    payloadObject = NSNull()
-} else if let parsed = try? JSONSerialization.jsonObject(with: stdinData,
-                                                          options: [.fragmentsAllowed]) {
-    payloadObject = parsed
-} else {
-    exit(0)
+guard let payload = try? JSONSerialization.jsonObject(with: stdinData) as? [String: Any],
+      let sessionID = payload["session_id"] as? String, !sessionID.isEmpty else { exit(0) }
+// Retain only attribution metadata. Prompts, replies and tool contents are not
+// needed for time tracking and must not be copied into the event log.
+var payloadObject: [String: Any] = ["session_id": sessionID]
+for key in ["cwd", "transcript_path"] {
+    if let value = payload[key] as? String { payloadObject[key] = value }
 }
 
 let isoFormatter = ISO8601DateFormatter()
@@ -40,6 +51,7 @@ let timestamp = isoFormatter.string(from: Date())
 
 let envelope: [String: Any] = [
     "timestamp": timestamp,
+    "provider": provider,
     "eventType": eventType,
     "payload": payloadObject
 ]

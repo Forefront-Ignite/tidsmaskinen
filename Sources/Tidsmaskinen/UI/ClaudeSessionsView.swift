@@ -16,9 +16,14 @@ struct ClaudeSessionsView: View {
             if sessions.isEmpty {
                 ContentUnavailableView("No sessions in this range",
                                        systemImage: "terminal",
-                                       description: Text("Install the hooks in Settings → Claude Code, then start a Claude Code session in any project. Use the range picker to look further back."))
+                                       description: Text("Install the Claude Code or Codex hooks in Settings → Integrations, then start a session in any project. Use the range picker to look further back."))
             } else {
                 Table(sessions) {
+                    TableColumn("Agent") { s in
+                        Text(s.provider.displayName).font(.caption)
+                    }
+                    .width(90)
+
                     TableColumn("Started") { s in
                         VStack(alignment: .leading, spacing: 2) {
                             Text(s.startedAt.formatted(date: .abbreviated, time: .standard))
@@ -88,7 +93,7 @@ struct ClaudeSessionsView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Claude Code sessions").font(.title3.bold())
+                Text("Coding sessions").font(.title3.bold())
                 Spacer()
                 Text("Total: \(totalCount)")
                     .font(.caption)

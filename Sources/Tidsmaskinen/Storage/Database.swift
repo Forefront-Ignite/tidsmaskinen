@@ -444,6 +444,12 @@ struct AppDatabase {
             }
         }
 
+        migrator.registerMigration("v22_coding_agent_provider") { db in
+            try db.alter(table: "claude_sessions") { t in
+                t.add(column: "provider", .text).notNull().defaults(to: "claude")
+            }
+        }
+
         try migrator.migrate(dbQueue)
     }
 

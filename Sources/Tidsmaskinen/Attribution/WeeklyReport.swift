@@ -201,7 +201,7 @@ struct WeeklyReport {
                 case .samples: return "App activity"
                 case .events:  return "Calendar"
                 case .calls:   return "Calls"
-                case .claude:  return "Claude Code"
+                case .claude:  return "Coding agents"
                 }
             }
 
@@ -651,9 +651,9 @@ struct WeeklyReport {
     private static func contributorInfo(forClaudeSession session: ClaudeSession) -> ContributorInfo {
         if let remote = session.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: remote) {
             return ContributorInfo(
-                id: "claude:\(slug)",
+                id: "\(session.provider.rawValue):\(slug)",
                 label: slug,
-                kindLabel: "Claude · repo",
+                kindLabel: "\(session.provider.displayName) · repo",
                 systemImage: "wand.and.stars",
                 eventID: nil,
                 seriesMasterID: nil
@@ -662,9 +662,9 @@ struct WeeklyReport {
         if let path = session.gitRepoPath {
             let name = (path as NSString).lastPathComponent
             return ContributorInfo(
-                id: "claude:\(path)",
+                id: "\(session.provider.rawValue):\(path)",
                 label: name,
-                kindLabel: "Claude · repo",
+                kindLabel: "\(session.provider.displayName) · repo",
                 systemImage: "wand.and.stars",
                 eventID: nil,
                 seriesMasterID: nil
@@ -673,18 +673,18 @@ struct WeeklyReport {
         if let cwd = session.cwd {
             let name = (cwd as NSString).lastPathComponent
             return ContributorInfo(
-                id: "claude:cwd:\(cwd)",
+                id: "\(session.provider.rawValue):cwd:\(cwd)",
                 label: name,
-                kindLabel: "Claude · cwd",
+                kindLabel: "\(session.provider.displayName) · cwd",
                 systemImage: "wand.and.stars",
                 eventID: nil,
                 seriesMasterID: nil
             )
         }
         return ContributorInfo(
-            id: "claude:session:\(session.id)",
-            label: "Claude session",
-            kindLabel: "Claude",
+            id: "\(session.provider.rawValue):session:\(session.id)",
+            label: "\(session.provider.displayName) session",
+            kindLabel: session.provider.displayName,
             systemImage: "wand.and.stars",
             eventID: nil,
             seriesMasterID: nil

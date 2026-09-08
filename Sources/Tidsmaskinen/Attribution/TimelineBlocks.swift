@@ -10,7 +10,7 @@ struct TimelineBlock: Identifiable {
             switch self {
             case .calendar:    return "Calendar"
             case .foreground:  return "Foreground"
-            case .claudeCode:  return "Claude Code"
+            case .claudeCode:  return "Coding agents"
             }
         }
     }
@@ -117,7 +117,7 @@ enum TimelineBuilder {
             let attribution = matcher.attribute(session: session)
             let override = (session.customerID != nil)
             let titlePath = session.gitRepoPath ?? session.cwd ?? "(no cwd)"
-            let title = (titlePath as NSString).lastPathComponent
+            let title = "\(session.provider.displayName) · \((titlePath as NSString).lastPathComponent)"
             let subtitle = session.gitRemoteURL ?? session.cwd
 
             let claudeSignal: TimelineBlock.RuleSignal? = session.gitRemoteURL
