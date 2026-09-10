@@ -66,6 +66,8 @@ enum TimelineBuilder {
     /// false (the default), ignored calendar events are dropped entirely;
     /// when true, they're emitted so the Timeline can render them faded so
     /// the user can recover from an accidental ignore.
+    /// Ignored repos are also omitted from foreground and coding-agent tracks
+    /// unless `includeIgnoredRepos` is true (the Timeline's "Show hidden").
     static func build(day: DateInterval,
                       samples: [ActivitySample],
                       events: [CalendarEvent],
@@ -74,7 +76,11 @@ enum TimelineBuilder {
                       matcher: RuleMatcher,
                       sampleIntervalSeconds: Int,
                       claudeIdleThresholdSeconds: TimeInterval,
-                      includeIgnoredEvents: Bool = false) -> DayBundle {
+                      includeIgnoredEvents: Bool = false,
+                      includeIgnoredRepos: Bool = false) -> DayBundle {
+
+        let samples = includeIgnoredRepos ? samples : samples.filter { !matcher.isRepoIgnored(remoteURL: $0.gitRemoteURL) }
+        let sessions = includeIgnoredRepos ? sessions : sessions.filter { !matcher.isRepoIgnored(remoteURL: $0.gitRemoteURL) }
 
         // ---- Calendar ----
         let calendarBlocks: [TimelineBlock] = events.compactMap { event -> TimelineBlock? in

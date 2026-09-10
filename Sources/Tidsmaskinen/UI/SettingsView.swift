@@ -20,7 +20,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .tracking:     return "How activity is sampled"
         case .calendar:     return "Meeting import & Microsoft account"
         case .integrations: return "Command Center & coding agents"
-        case .ignored:      return "Hosts and apps you’ve muted"
+        case .ignored:      return "Repos, hosts and apps you’ve ignored"
         }
     }
     var icon: String {
@@ -379,21 +379,21 @@ struct SettingsView: View {
             if hiddenSignals.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Nothing ignored").font(.body.weight(.semibold))
-                    Text("In Review, choose “Ignore” on shared hosts (github.com, google.com) or anything that isn’t client work — it won’t be asked again. Ignored meetings are managed in Review and My day.")
+                    Text("In Review or Discover, choose “Ignore” on private git repos, shared hosts or anything that isn’t client work — it won’t be asked again. Ignored meetings are managed in Review and My day.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 6)
             } else {
                 ForEach(hiddenSignals) { signal in
                     HStack(spacing: 10) {
-                        Image(systemName: signal.kind == .appBundleID ? "app" : "globe")
+                        Image(systemName: signal.kind.systemImage)
                             .foregroundStyle(.secondary)
                         Text(signal.value).font(.body.monospaced()).lineLimit(1).truncationMode(.middle)
                         Spacer()
                         Button("Un-ignore") { unhide(signal) }
                     }
                 }
-                Text("Ignored hosts and apps are excluded from Review and the Timeline.")
+                Text("Ignored hosts and apps are excluded from Review and the Timeline. Ignored repos also exclude their app and coding-agent activity from reports, for all dates. Recorded data is kept so you can un-ignore later.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

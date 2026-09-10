@@ -429,7 +429,9 @@ struct ReviewView: View {
                             .buttonStyle(.plain).foregroundStyle(.secondary)
                             .font(.system(size: 13, weight: .medium))
                     }
-                    Text("Ignore hides it permanently — the Always / Just-this-period choice only affects attribution.")
+                    Text(unit.isRepo
+                         ? "Ignore excludes this repo from Review, Timeline and reports for all dates. Restore it in Settings → Ignored."
+                         : "Ignore hides it permanently — the Always / Just-this-period choice only affects attribution.")
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
             }
@@ -745,13 +747,19 @@ struct ReviewView: View {
             let kind = ruleKind(s.kind)
             let pattern = (s.kind == .urlPath && !s.value.contains("*")) ? s.value + "*" : s.value
             ok = run {
-                for r in try state.database.allRules().filter({ $0.kind == kind && $0.pattern == pattern }) {
-                    try state.database.deleteRule(id: r.id)
+                let ignored = try state.database.allHiddenSignals().filter { h in
+                    guard let hk = hiddenKind(s.kind) else { return false }
+                    return h.matches(kind: hk, value: s.value)
                 }
-                if let hk = hiddenKind(s.kind) {
-                    for h in try state.database.allHiddenSignals().filter({ $0.kind == hk && $0.value == s.value }) {
-                        try state.database.unhide(id: h.id)
+                // Undoing Ignore must preserve rules that existed before it
+                // (including assignments for other weeks).
+                if ignored.isEmpty {
+                    for r in try state.database.allRules().filter({ $0.kind == kind && $0.pattern == pattern }) {
+                        try state.database.deleteRule(id: r.id)
                     }
+                }
+                for h in ignored {
+                    try state.database.unhide(id: h.id)
                 }
             }
         case .hostGroup(let host, _):
@@ -812,6 +820,7 @@ struct ReviewView: View {
 
     private func hiddenKind(_ k: AppDatabase.SignalAggregate.Kind) -> HiddenSignal.Kind? {
         switch k {
+        case .gitRepoSlug: return .gitRepoSlug
         case .appBundleID: return .appBundleID
         case .urlHost:     return .urlHost
         default:           return nil
@@ -975,10 +984,15 @@ enum ReviewUnit: Identifiable {
         }
     }
 
-    /// Whether "Ignore — don't ask again" applies. Repos can only be skipped.
+    var isRepo: Bool {
+        if case .signal(let s) = self { return s.kind == .gitRepoSlug }
+        return false
+    }
+
+    /// Whether "Ignore — don't ask again" applies.
     var canIgnore: Bool {
         switch self {
-        case .signal(let s): return s.kind == .urlHost || s.kind == .appBundleID
+        case .signal(let s): return s.kind == .gitRepoSlug || s.kind == .urlHost || s.kind == .appBundleID
         case .hostGroup, .series, .event, .call: return true
         }
     }

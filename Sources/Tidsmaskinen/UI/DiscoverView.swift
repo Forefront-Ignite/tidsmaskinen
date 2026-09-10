@@ -200,6 +200,7 @@ struct DiscoverView: View {
 
     private func isHidden(_ item: AppDatabase.SignalAggregate) -> Bool {
         switch item.kind {
+        case .gitRepoSlug: return matcher.isRepoIgnored(slug: item.value)
         case .appBundleID: return hiddenApps.contains(item.value)
         case .urlHost:     return hiddenHosts.contains(item.value)
         default:           return false
@@ -259,11 +260,12 @@ struct DiscoverView: View {
     }
 
     private func canHide(_ item: AppDatabase.SignalAggregate) -> Bool {
-        item.kind == .appBundleID || item.kind == .urlHost
+        hiddenSignalKind(for: item) != nil
     }
 
     private func hiddenSignalKind(for item: AppDatabase.SignalAggregate) -> HiddenSignal.Kind? {
         switch item.kind {
+        case .gitRepoSlug: return .gitRepoSlug
         case .appBundleID: return .appBundleID
         case .urlHost:     return .urlHost
         default:           return nil
@@ -283,9 +285,10 @@ struct DiscoverView: View {
 
     private func unhide(_ item: AppDatabase.SignalAggregate) {
         guard let kind = hiddenSignalKind(for: item) else { return }
-        if let record = hidden.first(where: { $0.kind == kind && $0.value == item.value }) {
+        let records = hidden.filter { $0.matches(kind: kind, value: item.value) }
+        if !records.isEmpty {
             do {
-                try state.database.unhide(id: record.id)
+                for record in records { try state.database.unhide(id: record.id) }
                 reload()
             } catch {
                 loadError = error.localizedDescription
@@ -339,7 +342,7 @@ struct DiscoverView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Text("Hidden apps and browser hosts are excluded from the Timeline unless you enable “Show hidden”.")
+                Text("Hidden items are excluded from the Timeline unless you enable “Show hidden”. Ignored repos are also excluded from Review and reports. Un-ignore to include them again.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -442,7 +445,7 @@ struct DiscoverView: View {
                 Button {
                     unhide(item)
                 } label: {
-                    Label("Unhide", systemImage: "eye")
+                    Label(item.kind == .gitRepoSlug ? "Un-ignore" : "Unhide", systemImage: "eye")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -451,11 +454,15 @@ struct DiscoverView: View {
                     Button {
                         hide(item)
                     } label: {
-                        Image(systemName: "eye.slash")
+                        Label(item.kind == .gitRepoSlug ? "Ignore repo" : "Hide item", systemImage: "eye.slash")
+                            .labelStyle(.iconOnly)
                     }
                     .buttonStyle(.borderless)
                     .controlSize(.small)
-                    .help("Hide this \(item.kind == .appBundleID ? "app" : "host") from Discover and Timeline")
+                    .accessibilityLabel(item.kind == .gitRepoSlug ? "Ignore repo" : "Hide item")
+                    .help(item.kind == .gitRepoSlug
+                        ? "Ignore this repo in Discover, Review, Timeline and reports. Restore it in Settings → Ignored."
+                        : "Hide this \(item.kind == .appBundleID ? "app" : "host") from Discover and Timeline")
                 }
                 Button(attribution.customer == nil ? "Attribute…" : "Change…") {
                     assignTarget = item
@@ -913,11 +920,12 @@ struct DiscoverView: View {
             let rules = try state.database.allRules()
             let seriesAttrs = try state.database.allMeetingSeriesAttributions()
             self.seriesAttributionsByID = Dictionary(uniqueKeysWithValues: seriesAttrs.map { ($0.seriesMasterID, $0) })
+            self.hidden = try state.database.allHiddenSignals()
             self.matcher = RuleMatcher.make(customers: customers,
                                             projects: projects,
                                             rules: rules,
-                                            series: seriesAttrs)
-            self.hidden = try state.database.allHiddenSignals()
+                                            series: seriesAttrs,
+                                            hiddenSignals: hidden)
             // Eager-load path detail for urlHosts whose own attribution is empty so we can:
             //   - hide the parent "Unassigned" tag when every child is assigned
             //   - honor customer/unassigned filters that look at child rows
@@ -966,4 +974,3 @@ struct DiscoverView: View {
         }
     }
 }
-

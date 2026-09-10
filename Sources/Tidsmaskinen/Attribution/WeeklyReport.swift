@@ -308,6 +308,7 @@ struct WeeklyReport {
         records.reserveCapacity(samples.count + events.count + claudeDeltas.count + sessions.count)
 
         for sample in samples where !sample.isIdle {
+            if matcher.isRepoIgnored(remoteURL: sample.gitRemoteURL) { continue }
             let result = matcher.attribute(sample)
             records.append(AttributedRecord(
                 bucketID: rowKey(customer: result.customer, project: result.project),
@@ -363,7 +364,8 @@ struct WeeklyReport {
             }
         }
 
-        let sessionByID = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0) })
+        let includedSessions = sessions.filter { !matcher.isRepoIgnored(remoteURL: $0.gitRemoteURL) }
+        let sessionByID = Dictionary(uniqueKeysWithValues: includedSessions.map { ($0.id, $0) })
         var creditedSessionIDs = Set<String>()
         for delta in claudeDeltas {
             guard let session = sessionByID[delta.sessionID], delta.gainedSeconds > 0 else { continue }
@@ -379,7 +381,7 @@ struct WeeklyReport {
         }
         // Fallback: pre-v10 sessions with no deltas — treat amortized active as
         // a single interval starting at session start.
-        for session in sessions where !creditedSessionIDs.contains(session.id) {
+        for session in includedSessions where !creditedSessionIDs.contains(session.id) {
             let active = session.amortizedActiveSeconds(idleThresholdSeconds: idleThresholdSeconds)
             guard active > 0 else { continue }
             let result = matcher.attribute(session: session)

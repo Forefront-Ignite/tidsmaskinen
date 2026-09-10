@@ -820,16 +820,15 @@ struct AppDatabase {
         }
     }
 
-    /// Hide an app bundle ID or browser host. No-op if already hidden.
+    /// Ignore a repo, app, browser host or URL path. No-op if already hidden.
     func hideSignal(kind: HiddenSignal.Kind, value: String) throws {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         try dbQueue.write { db in
             let existing = try HiddenSignal
-                .filter(HiddenSignal.Columns.kind == kind.rawValue
-                        && HiddenSignal.Columns.value == trimmed)
-                .fetchOne(db)
-            if existing != nil { return }
+                .filter(HiddenSignal.Columns.kind == kind.rawValue)
+                .fetchAll(db)
+            if existing.contains(where: { $0.matches(kind: kind, value: trimmed) }) { return }
             var record = HiddenSignal(
                 id: UUID().uuidString,
                 kind: kind,

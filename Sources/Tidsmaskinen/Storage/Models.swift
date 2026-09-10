@@ -489,9 +489,19 @@ struct ActivitySample: Codable, FetchableRecord, MutablePersistableRecord, Ident
 
 struct HiddenSignal: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
     enum Kind: String, Codable, Hashable {
+        case gitRepoSlug
         case appBundleID
         case urlHost
         case urlPath
+
+        var systemImage: String {
+            switch self {
+            case .gitRepoSlug: return "chevron.left.forwardslash.chevron.right"
+            case .appBundleID: return "app"
+            case .urlHost: return "globe"
+            case .urlPath: return "link"
+            }
+        }
     }
 
     var id: String
@@ -500,6 +510,12 @@ struct HiddenSignal: Codable, FetchableRecord, MutablePersistableRecord, Identif
     var hiddenAt: Date
 
     static let databaseTableName = "hidden_signals"
+
+    func matches(kind: Kind, value: String) -> Bool {
+        self.kind == kind && (kind == .gitRepoSlug
+            ? self.value.lowercased() == value.lowercased()
+            : self.value == value)
+    }
 
     enum Columns {
         static let id = Column(CodingKeys.id)

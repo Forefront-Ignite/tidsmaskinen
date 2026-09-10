@@ -29,7 +29,15 @@ TCC permissions (Accessibility, Automation, Microphone) only persist for the sig
 - Optional Microsoft Graph calendar sync
 - Optional Claude Code and Codex session ingest via shell hooks (`tm-hook`)
 - Attributes signals to a `Customer · Project` via user-defined rules
+- Ignores private git repos from Review, Timeline and reports; restore them in Settings → Ignored
 - Outputs a weekly grid you can paste into Forefront's time-report tool
+
+To ignore a repo, click its eye-slash button in **Discover → Git repos**, or
+choose **Ignore — don't ask again** on its Review card. This applies to existing
+and future foreground and coding-agent activity identified by that repo, for all
+dates. Recorded data and attribution rules are kept; **Settings → Ignored →
+Un-ignore** includes it again. This excludes repo activity from reports without
+stopping capture or deleting its local history.
 
 ## What it deliberately does NOT do
 

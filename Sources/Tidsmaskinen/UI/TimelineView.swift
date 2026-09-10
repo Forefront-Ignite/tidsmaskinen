@@ -1057,14 +1057,15 @@ struct TimelineView: View {
             projects = try state.database.allProjects()
             let rules = try state.database.allRules()
             let allSeries = try state.database.allMeetingSeriesAttributions()
+            let hidden = try state.database.allHiddenSignals()
             let matcher = RuleMatcher.make(
                 customers: customers,
                 projects: projects,
                 rules: rules,
-                series: allSeries
+                series: allSeries,
+                hiddenSignals: hidden
             )
             hasIgnoredMeetings = events.contains { matcher.attribute(event: $0).isIgnored }
-            let hidden = try state.database.allHiddenSignals()
             hasHiddenSignals = !hidden.isEmpty
             let samples: [ActivitySample]
             if showHidden || hidden.isEmpty {
@@ -1087,7 +1088,8 @@ struct TimelineView: View {
                 matcher: matcher,
                 sampleIntervalSeconds: AppSettings.sampleIntervalSeconds,
                 claudeIdleThresholdSeconds: TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60),
-                includeIgnoredEvents: showHidden
+                includeIgnoredEvents: showHidden,
+                includeIgnoredRepos: showHidden
             )
             recomputeDerived()
             loadError = nil

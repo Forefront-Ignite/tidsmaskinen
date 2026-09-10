@@ -50,19 +50,23 @@ struct RuleMatcher {
     let projectsByID: [String: Project]
     let rulesByKind: [Rule.Kind: [Rule]]
     let seriesAttributionsByID: [String: MeetingSeriesAttribution]
+    let ignoredRepoSlugs: Set<String>
 
     static func load(from db: AppDatabase) throws -> RuleMatcher {
         let customers = try db.allCustomers()
         let projects = try db.allProjects()
         let rules = try db.allRules()
         let series = try db.allMeetingSeriesAttributions()
-        return make(customers: customers, projects: projects, rules: rules, series: series)
+        let hiddenSignals = try db.allHiddenSignals()
+        return make(customers: customers, projects: projects, rules: rules, series: series,
+                    hiddenSignals: hiddenSignals)
     }
 
     static func make(customers: [Customer],
                      projects: [Project],
                      rules: [Rule],
-                     series: [MeetingSeriesAttribution] = []) -> RuleMatcher {
+                     series: [MeetingSeriesAttribution] = [],
+                     hiddenSignals: [HiddenSignal] = []) -> RuleMatcher {
         let byID = Dictionary(uniqueKeysWithValues: customers.map { ($0.id, $0) })
         let projByID = Dictionary(uniqueKeysWithValues: projects.map { ($0.id, $0) })
         let byKind = Dictionary(grouping: rules, by: { $0.kind })
@@ -75,8 +79,23 @@ struct RuleMatcher {
             customersByID: byID,
             projectsByID: projByID,
             rulesByKind: byKind,
-            seriesAttributionsByID: seriesByID
+            seriesAttributionsByID: seriesByID,
+            ignoredRepoSlugs: Set(hiddenSignals.filter { $0.kind == .gitRepoSlug }.map { $0.value.lowercased() })
         )
+    }
+
+    /// Exact repo identity, case-insensitive like repo attribution rules. Ignore
+    /// applies across dates and remote formats, without hiding sibling repos.
+    func isRepoIgnored(slug: String) -> Bool {
+        ignoredRepoSlugs.contains(slug.lowercased())
+    }
+
+    /// Consumers skip ignored activity before attribution, so even a broad rule
+    /// or manual override cannot add private repo time to the report.
+    func isRepoIgnored(remoteURL: String?) -> Bool {
+        guard !ignoredRepoSlugs.isEmpty,
+              let remoteURL, let slug = Self.gitSlug(fromRemote: remoteURL) else { return false }
+        return isRepoIgnored(slug: slug)
     }
 
     func attribute(_ sample: ActivitySample) -> AttributionResult {

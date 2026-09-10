@@ -40,8 +40,9 @@ enum ReviewQueue {
         let allProjects = try database.allProjects()
         let rules = try database.allRules()
         let seriesAttrs = try database.allMeetingSeriesAttributions()
-        let m = RuleMatcher.make(customers: allCustomers, projects: allProjects, rules: rules, series: seriesAttrs)
         let hidden = try database.allHiddenSignals()
+        let m = RuleMatcher.make(customers: allCustomers, projects: allProjects, rules: rules,
+                                 series: seriesAttrs, hiddenSignals: hidden)
         let hiddenHosts = Set(hidden.filter { $0.kind == .urlHost }.map { $0.value })
         let hiddenPaths = Set(hidden.filter { $0.kind == .urlPath }.map { $0.value })
 
@@ -60,6 +61,7 @@ enum ReviewQueue {
         for agg in baseAggs {
             switch agg.kind {
             case .gitRepoSlug:
+                if m.isRepoIgnored(slug: agg.value) { continue }
                 if agg.totalSeconds < minSec { continue }
                 if m.attribute(kind: .gitRepoSlug, value: agg.value, at: at).customer == nil {
                     built.append(.signal(agg))
