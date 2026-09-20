@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Security
 
 /// Moves the running app into `~/Applications` so Sparkle can update it
 /// without an admin prompt.
@@ -195,10 +196,19 @@ enum AppRelocator {
     /// An unresolved outcome is re-checked for a few seconds: a privileged
     /// command can outlive the Apple event that reported a timeout.
     private static func moveLanded(from bundleURL: URL, to target: URL, waitingUpTo seconds: Int = 0) -> Bool {
-        guard bundleURL.resolvingSymlinksInPath() != target.resolvingSymlinksInPath() else { return true }
         let fm = FileManager.default
+        // Nothing relocates when the app is already in place and only its
+        // ownership needed repairing, so identical paths prove nothing on
+        // their own: a cancelled prompt would otherwise look like success and
+        // relaunch the app for no reason. The repair having taken effect is
+        // the evidence there.
+        let inPlace = bundleURL.resolvingSymlinksInPath() == target.resolvingSymlinksInPath()
         for attempt in 0...max(0, seconds) {
-            if fm.fileExists(atPath: target.path) && !fm.fileExists(atPath: bundleURL.path) { return true }
+            if inPlace {
+                if !updatesNeedAdmin(target) { return true }
+            } else if fm.fileExists(atPath: target.path) && !fm.fileExists(atPath: bundleURL.path) {
+                return true
+            }
             if attempt < seconds { Thread.sleep(forTimeInterval: 1) }
         }
         return false
@@ -215,12 +225,24 @@ enum AppRelocator {
     /// take. Anything unrecognised is left alone rather than deleted.
     static func destinationRefusal(at target: URL,
                                    ourVersion: String,
-                                   ourBundleID: String?) -> (title: String, detail: String)? {
+                                   ourBundleID: String?,
+                                   isSignedLikeUs: (URL) -> Bool = signedLikeUs) -> (title: String, detail: String)? {
         guard FileManager.default.fileExists(atPath: target.path) else { return nil }
         guard let bundle = Bundle(url: target), bundle.bundleIdentifier == ourBundleID else {
             return ("Something else is already there",
                     """
                     \(target.path) exists and isn't a copy of Tidsmaskinen, so it won't be touched.
+
+                    Move or rename it, then try again.
+                    """)
+        }
+        // Any bundle can claim our identifier, and root is about to delete this
+        // path, so the claim has to be backed by our own signing identity.
+        guard isSignedLikeUs(target) else {
+            return ("That copy can't be verified",
+                    """
+                    \(target.path) says it is Tidsmaskinen but isn't signed like this copy, so it \
+                    won't be touched.
 
                     Move or rename it, then try again.
                     """)
@@ -248,6 +270,23 @@ enum AppRelocator {
                     """)
         }
         return nil
+    }
+
+    /// Whether the bundle at `url` satisfies this app's own designated
+    /// requirement, i.e. is the same app from the same signing identity.
+    nonisolated static func signedLikeUs(_ url: URL) -> Bool {
+        var selfCode: SecCode?
+        var selfStatic: SecStaticCode?
+        var requirement: SecRequirement?
+        var candidate: SecStaticCode?
+        guard SecCodeCopySelf([], &selfCode) == errSecSuccess, let selfCode,
+              SecCodeCopyStaticCode(selfCode, [], &selfStatic) == errSecSuccess, let selfStatic,
+              SecCodeCopyDesignatedRequirement(selfStatic, [], &requirement) == errSecSuccess,
+              let requirement,
+              SecStaticCodeCreateWithPath(url as CFURL, [], &candidate) == errSecSuccess,
+              let candidate
+        else { return false }
+        return SecStaticCodeCheckValidity(candidate, [], requirement) == errSecSuccess
     }
 
     static func bundleVersion(of bundle: Bundle) -> String {

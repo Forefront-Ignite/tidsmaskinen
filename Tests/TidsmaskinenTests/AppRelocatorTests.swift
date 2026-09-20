@@ -97,7 +97,8 @@ final class AppRelocatorTests: XCTestCase {
         // our app has to stop the move rather than be replaced.
         let stranger = try makeBundle(in: root)
         let refusal = AppRelocator.destinationRefusal(at: stranger, ourVersion: "1.0",
-                                                      ourBundleID: "se.forefront.tidsmaskinen")
+                                                      ourBundleID: "se.forefront.tidsmaskinen",
+                                                      isSignedLikeUs: { _ in true })
         XCTAssertEqual(refusal?.title, "Something else is already there")
     }
 
@@ -106,7 +107,8 @@ final class AppRelocatorTests: XCTestCase {
         try writeInfoPlist(in: bundle, version: "0.3.15", bundleID: "se.forefront.tidsmaskinen")
         // 0.3.9 is the older copy here; a lexical compare would get this backwards.
         let refusal = AppRelocator.destinationRefusal(at: bundle, ourVersion: "0.3.9",
-                                                      ourBundleID: "se.forefront.tidsmaskinen")
+                                                      ourBundleID: "se.forefront.tidsmaskinen",
+                                                      isSignedLikeUs: { _ in true })
         XCTAssertEqual(refusal?.title, "A newer Tidsmaskinen is already installed")
     }
 
@@ -114,7 +116,23 @@ final class AppRelocatorTests: XCTestCase {
         let bundle = try makeBundle(in: root)
         try writeInfoPlist(in: bundle, version: "0.3.9", bundleID: "se.forefront.tidsmaskinen")
         XCTAssertNil(AppRelocator.destinationRefusal(at: bundle, ourVersion: "0.3.15",
-                                                     ourBundleID: "se.forefront.tidsmaskinen"))
+                                                     ourBundleID: "se.forefront.tidsmaskinen",
+                                                     isSignedLikeUs: { _ in true }))
+    }
+
+    func testDestinationClaimingOurIdentifierWithoutOurSignatureIsRefused() throws {
+        // CFBundleIdentifier is just a string any bundle can copy, and root is
+        // about to rm -rf this path.
+        let impostor = try makeBundle(in: root)
+        try writeInfoPlist(in: impostor, version: "0.0.1", bundleID: "se.forefront.tidsmaskinen")
+        let refusal = AppRelocator.destinationRefusal(at: impostor, ourVersion: "1.0",
+                                                      ourBundleID: "se.forefront.tidsmaskinen",
+                                                      isSignedLikeUs: { _ in false })
+        XCTAssertEqual(refusal?.title, "That copy can't be verified")
+    }
+
+    func testUnsignedDirectoryDoesNotPassTheRealSignatureCheck() throws {
+        XCTAssertFalse(AppRelocator.signedLikeUs(try makeBundle(in: root)))
     }
 
     private func writeInfoPlist(in bundle: URL, version: String, bundleID: String) throws {
