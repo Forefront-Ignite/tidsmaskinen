@@ -47,7 +47,17 @@ final class AppState: ObservableObject {
     private var reviewBacklogGeneration = 0
     static let reviewBacklogMaxAge: TimeInterval = 5 * 60
 
+    /// Sparkle asserts if the updater is started twice, and SwiftUI can build
+    /// AppState more than once, so each instance tracks its own controller.
+    private var updaterStarted: Bool
     private var cancellables = Set<AnyCancellable>()
+
+    /// Starts the held-back Sparkle updater, once.
+    private func startUpdaterIfNeeded() {
+        guard !updaterStarted else { return }
+        updaterStarted = true
+        updaterController.startUpdater()
+    }
     private var commandCenterAutoSyncTask: Task<Void, Never>?
 
     init() {
@@ -65,19 +75,23 @@ final class AppState: ObservableObject {
         self.commandCenter = ccClient
         self.commandCenterSync = CommandCenterSync(database: database, client: ccClient)
         // A pending relocation holds the updater back: an update that installs
-        // while the user is still approving the move would be writing to the
-        // bundle we're about to move out from under it. AppRelocator starts it
-        // as soon as it knows the app is staying put.
-        let movePending = AppRelocator.isMovePending
+        // while the user is still approving the move would be writing into the
+        // bundle that is about to be replaced. AppRelocator broadcasts once it
+        // knows the app is staying put.
+        let holdUpdater = AppRelocator.shouldHoldUpdater
         self.updaterController = SPUStandardUpdaterController(
-            startingUpdater: !movePending,
+            startingUpdater: !holdUpdater,
             updaterDelegate: nil,
             userDriverDelegate: nil
         )
-        if movePending {
-            let controller = self.updaterController
-            AppRelocator.startUpdater = { controller.startUpdater() }
-        }
+        self.updaterStarted = !holdUpdater
+
+        // Every instance listens: the transient ones are discarded, and the
+        // retained one must not be left with a stopped updater.
+        NotificationCenter.default.publisher(for: AppRelocator.didSettle)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.startUpdaterIfNeeded() }
+            .store(in: &cancellables)
 
         // Forward nested ObservableObject changes so views observing AppState
         // (e.g. MenuBarView, CalendarView) repaint when sync state changes.

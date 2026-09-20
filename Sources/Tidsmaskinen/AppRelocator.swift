@@ -19,11 +19,26 @@ enum AppRelocator {
     static let userApplications = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Applications", isDirectory: true)
 
-    /// Starts the Sparkle updater once relocation is settled. `AppState` holds
-    /// it back while a move is pending so an update can't install into — or
-    /// replace — the bundle we are about to move, which an Admin By Request
-    /// approval can leave in flight for minutes.
-    static var startUpdater: (() -> Void)?
+    /// Posted once relocation is settled and the app is staying put.
+    /// `AppState` holds its updater back until then, so an update can't
+    /// install into a bundle that is about to be replaced — an Admin By
+    /// Request approval can leave that pending for minutes. A broadcast
+    /// rather than a callback: SwiftUI builds `AppState` more than once during
+    /// startup, and a single slot would leave the retained one stopped.
+    static let didSettle = Notification.Name("AppRelocatorDidSettle")
+
+    /// False once relocation is settled, so an `AppState` built afterwards
+    /// starts its updater immediately instead of waiting for a notification
+    /// that has already been posted.
+    private(set) static var isHoldingUpdater = false
+
+    /// Whether a freshly built updater should wait. Reading it marks the hold,
+    /// so the notification is posted even if `run()` never gets that far.
+    static var shouldHoldUpdater: Bool {
+        guard isMovePending else { return false }
+        isHoldingUpdater = true
+        return true
+    }
 
     /// True when `run()` would offer to move this install. Read by `AppState`
     /// before it builds the updater, and re-checked inside `run()`; nothing
@@ -100,45 +115,49 @@ enum AppRelocator {
         // and re-register from the new location after relaunch.
         let hadLoginItem = LoginItemManager.isEnabled
         if hadLoginItem { try? LoginItemManager.setEnabled(false) }
+
+        // Copy first, unprivileged. Writing into the user's own home needs no
+        // rights at all, which keeps every root operation off paths the user
+        // (or anything running as them) can swap.
         do {
-            try move(bundleURL, to: target)
+            try placeCopy(of: bundleURL, at: target)
         } catch {
-            // The error says what the Apple event reported; only the filesystem
-            // says what happened. An event timeout can fire while the
-            // privileged command goes on to complete, and treating that as a
-            // cancellation would strand the login item and hooks on a bundle
-            // that is no longer there.
-            if !moveLanded(from: bundleURL, to: target, waitingUpTo: waitForMoveSeconds(after: error)) {
-                defer { releaseUpdater() }
-                if case RelocationError.cancelled = error {
-                    if hadLoginItem { try? LoginItemManager.setEnabled(true) }
-                    return
-                }
-                // The command may still be waiting on an approval and land
-                // after we give up. Leave the repair pending so the next launch
-                // repoints the login item and hooks either way; it is a no-op
-                // when nothing moved after all.
-                AppSettings.defaults.set(hadLoginItem, forKey: SettingsKey.relocationRestoreLoginItem)
-                if hadLoginItem { try? LoginItemManager.setEnabled(true) }
-                showFailure("Couldn't move Tidsmaskinen", error.localizedDescription)
-                return
-            }
+            if hadLoginItem { try? LoginItemManager.setEnabled(true) }
+            showFailure("Couldn't copy Tidsmaskinen", error.localizedDescription)
+            return releaseUpdater()
         }
+
+        // All root has left to do is drop the old copy, and only because
+        // removing an entry from /Applications needs write access there.
+        do {
+            try runAsAdmin(removeCommand(for: bundleURL))
+        } catch {
+            // Nothing was handed over yet, so undo our copy rather than leave
+            // two installs behind. We own it, so this needs no rights either.
+            try? FileManager.default.removeItem(at: target)
+            if hadLoginItem { try? LoginItemManager.setEnabled(true) }
+            defer { releaseUpdater() }
+            if case RelocationError.cancelled = error { return }
+            showFailure("Couldn't remove the old copy", error.localizedDescription)
+            return
+        }
+
         AppSettings.defaults.set(hadLoginItem, forKey: SettingsKey.relocationRestoreLoginItem)
         do {
             try relaunch(target)
         } catch {
-            // The bundle has moved; the pending flag restores the login item
-            // on the next launch from the new location.
-            showFailure("Tidsmaskinen was moved to ~/Applications",
-                        "Quit Tidsmaskinen and open it again from ~/Applications. (\(error.localizedDescription))")
+            // The copy is in place and the old one is gone; the pending flag
+            // repoints the login item and hooks on the next launch.
+            showFailure("Tidsmaskinen is now in ~/Applications",
+                        "Open it from ~/Applications to carry on. (\(error.localizedDescription))")
             releaseUpdater()
         }
     }
 
     private static func releaseUpdater() {
-        startUpdater?()
-        startUpdater = nil
+        guard isHoldingUpdater else { return }
+        isHoldingUpdater = false
+        NotificationCenter.default.post(name: didSettle, object: nil)
     }
 
     /// Mirrors Sparkle's check: no admin needed only when the bundle and its
@@ -151,89 +170,28 @@ enum AppRelocator {
         return owner != getuid()
     }
 
-    /// Shell command that moves the bundle into `~/Applications` and gives it
-    /// to the current user. Runs as root, so it also fixes a root-owned copy.
-    ///
-    /// `rm -rf` clears any stale copy at the target: `mv` can't replace a
-    /// non-empty directory, and two bundles with this bundle ID would leave
-    /// Launch Services picking between them arbitrarily. It runs as part of the
-    /// privileged command so nothing is deleted unless the user approved the
-    /// move. A failed chown afterwards is not fatal: the next launch lands in
-    /// the chown-only branch and repairs it.
-    static func moveCommand(from bundleURL: URL, to target: URL) -> String {
-        let parent = shellQuoted(target.deletingLastPathComponent().path)
-        let targetPath = shellQuoted(target.path)
-        let sourcePath = shellQuoted(bundleURL.path)
-        let inPlace = bundleURL.resolvingSymlinksInPath() == target.resolvingSymlinksInPath()
-        // Everything `run()` checked, it checked before the approval, which an
-        // Admin By Request request can leave pending for minutes. Anything able
-        // to write in the home folder could swap a component for a symlink in
-        // that window and aim these root commands elsewhere, so re-check as
-        // root immediately before acting. This narrows the window to the gap
-        // between test and command; closing it entirely would mean not driving
-        // the move through a shell at all.
-        var checks = ["[ -L \(parent) ]", "[ ! -d \(parent) ]", "[ -L \(targetPath) ]"]
-        if !inPlace { checks.append("[ -L \(sourcePath) ]") }
-        let refuse = "if \(checks.joined(separator: " || ")); then "
-            + "echo 'Your Applications folder changed while the request was pending." 
-            + " Nothing was moved.' >&2; exit 1; fi; "
-        // Sparkle checks the parent folder too, so a root-owned ~/Applications
-        // would keep every update prompting even after the bundle itself is
-        // ours. Not recursive: it must not touch other apps living there.
-        // chown alone leaves the mode bits, so a 0555 folder stays unwritable
-        // and Sparkle would keep asking. u+rwx is what its check actually reads.
-        let own = "chown \(getuid()):\(getgid()) \(parent); chmod u+rwx \(parent); "
-            + "chown -R \(getuid()):\(getgid()) \(targetPath)"
-        if inPlace { return refuse + own }
-        return refuse + "rm -rf \(targetPath) && mv -f \(sourcePath) \(targetPath) "
-            + "&& { \(own) || true; }"
+    /// The only step that needs rights: removing the entry from
+    /// `/Applications`. That folder is `root:admin`, so nothing running as the
+    /// user can swap this path between the check and the command, which is
+    /// what made an elevated move across `~/Applications` unsafe. `rm -rf`
+    /// deletes symlinks rather than following them, so contents can't redirect
+    /// it either.
+    static func removeCommand(for bundleURL: URL) -> String {
+        "rm -rf \(shellQuoted(bundleURL.path))"
     }
 
-    /// AppleScript that runs `command` as root. The long timeout covers an
-    /// Admin By Request approval that waits on a remote administrator.
-    static func adminScriptSource(for command: String) -> String {
-        let escaped = command
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        return """
-            with timeout of 3600 seconds
-                do shell script "\(escaped)" with administrator privileges
-            end timeout
-            """
-    }
-
-    private static func move(_ bundleURL: URL, to target: URL) throws {
-        try FileManager.default.createDirectory(at: userApplications, withIntermediateDirectories: true)
-        try runAsAdmin(moveCommand(from: bundleURL, to: target))
-    }
-
-    /// Whether the bundle actually arrived at `target` and left its old home.
-    /// An unresolved outcome is re-checked for a few seconds: a privileged
-    /// command can outlive the Apple event that reported a timeout.
-    private static func moveLanded(from bundleURL: URL, to target: URL, waitingUpTo seconds: Int = 0) -> Bool {
+    /// Copies the running bundle to `target` as the user. Replaces an existing
+    /// copy only after `destinationRefusal` has cleared it, and verifies the
+    /// result still carries our signature before anything is handed over to it.
+    private static func placeCopy(of bundleURL: URL, at target: URL) throws {
         let fm = FileManager.default
-        // Nothing relocates when the app is already in place and only its
-        // ownership needed repairing, so identical paths prove nothing on
-        // their own: a cancelled prompt would otherwise look like success and
-        // relaunch the app for no reason. The repair having taken effect is
-        // the evidence there.
-        let inPlace = bundleURL.resolvingSymlinksInPath() == target.resolvingSymlinksInPath()
-        for attempt in 0...max(0, seconds) {
-            if inPlace {
-                if !updatesNeedAdmin(target) { return true }
-            } else if fm.fileExists(atPath: target.path) && !fm.fileExists(atPath: bundleURL.path) {
-                return true
-            }
-            if attempt < seconds { Thread.sleep(forTimeInterval: 1) }
+        try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if fm.fileExists(atPath: target.path) { try fm.removeItem(at: target) }
+        try fm.copyItem(at: bundleURL, to: target)
+        guard signedLikeUs(target) else {
+            try? fm.removeItem(at: target)
+            throw RelocationError.failed("The copy in ~/Applications didn't come out intact.")
         }
-        return false
-    }
-
-    /// A reported timeout says nothing about whether the command ran, so give
-    /// it a moment to settle. A refusal is final and needs no wait.
-    private static func waitForMoveSeconds(after error: Error) -> Int {
-        if case RelocationError.cancelled = error { return 0 }
-        return 5
     }
 
     /// Why the destination must not be replaced, or nil when it is free to
@@ -311,6 +269,19 @@ enum AppRelocator {
     /// Numeric comparison, so 0.3.15 sorts above 0.3.9 rather than below it.
     static func isNewer(_ candidate: String, than current: String) -> Bool {
         candidate.compare(current, options: .numeric) == .orderedDescending
+    }
+
+    /// AppleScript that runs `command` as root. The long timeout covers an
+    /// Admin By Request approval that waits on a remote administrator.
+    static func adminScriptSource(for command: String) -> String {
+        let escaped = command
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return """
+            with timeout of 3600 seconds
+                do shell script "\(escaped)" with administrator privileges
+            end timeout
+            """
     }
 
     private static func runAsAdmin(_ command: String) throws {
