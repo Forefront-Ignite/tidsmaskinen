@@ -77,24 +77,12 @@ try? fm.createDirectory(at: dir,
                         attributes: [.posixPermissions: 0o700])
 let logURL = dir.appendingPathComponent("claude-events.jsonl")
 
-if !fm.fileExists(atPath: logURL.path) {
-    fm.createFile(atPath: logURL.path,
-                  contents: nil,
-                  attributes: [.posixPermissions: 0o600])
-} else {
-    // Belt-and-braces: tighten perms if a previous build created the file
-    // with the default umask.
-    try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logURL.path)
-}
-
-// Open with O_APPEND so concurrent writes from parallel Claude sessions don't
-// stomp on each other. POSIX guarantees atomic append for writes up to
-// PIPE_BUF (≥ 512 bytes on macOS); our envelopes can exceed that, but
-// O_APPEND still gives us "writes don't overlap" because the kernel updates
-// the file offset to EOF on each write.
+// O_CREAT avoids the check-then-create race: concurrent first hooks must
+// never truncate a log another hook has just created and written.
 let fd = open(logURL.path, O_WRONLY | O_APPEND | O_CREAT, 0o600)
 if fd < 0 { exit(0) }
 defer { close(fd) }
+_ = fchmod(fd, 0o600)
 _ = envelopeData.withUnsafeBytes { buf -> ssize_t in
     guard let base = buf.baseAddress else { return 0 }
     return write(fd, base, buf.count)

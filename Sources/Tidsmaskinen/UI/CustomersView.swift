@@ -160,12 +160,8 @@ struct CustomersView: View {
                     customerID: customer.id,
                     availableProjects: customerProjects
                 ) { rule in
-                    do {
-                        try state.database.upsert(rule)
-                        reload()
-                    } catch {
-                        loadError = error.localizedDescription
-                    }
+                    try state.database.upsert(rule)
+                    reload()
                 }
             }
         } else {
@@ -333,6 +329,9 @@ struct CustomersView: View {
     private func reload() {
         do {
             customers = try state.database.allCustomers()
+            if let selectedCustomerID, !customers.contains(where: { $0.id == selectedCustomerID }) {
+                self.selectedCustomerID = nil
+            }
             if let id = selectedCustomerID {
                 rules = try state.database.rules(forCustomer: id)
                 customerProjects = try state.database.projects(forCustomer: id)
@@ -440,7 +439,7 @@ private struct CustomerSidebarRow: View {
 private struct AddRuleSheet: View {
     let customerID: String
     let availableProjects: [Project]
-    let onSave: (Rule) -> Void
+    let onSave: (Rule) throws -> Void
 
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var state: AppState
@@ -448,6 +447,7 @@ private struct AddRuleSheet: View {
     @State private var pattern: String = ""
     @State private var priority: Int = 100
     @State private var projectID: String = ""
+    @State private var saveError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -488,6 +488,10 @@ private struct AddRuleSheet: View {
                 }
             }
 
+            if let saveError {
+                Text(saveError).font(.caption).foregroundStyle(.red)
+            }
+
             Stepper(value: $priority, in: 0...1000, step: 10) {
                 LabeledContent("Priority") {
                     Text("\(priority)").monospacedDigit()
@@ -511,8 +515,12 @@ private struct AddRuleSheet: View {
                         priority: priority,
                         createdAt: Date()
                     )
-                    onSave(r)
-                    dismiss()
+                    do {
+                        try onSave(r)
+                        dismiss()
+                    } catch {
+                        saveError = error.localizedDescription
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(pattern.trimmingCharacters(in: .whitespaces).isEmpty)

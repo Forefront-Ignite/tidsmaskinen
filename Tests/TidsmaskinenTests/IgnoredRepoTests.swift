@@ -46,6 +46,36 @@ final class IgnoredRepoTests: XCTestCase {
                                  matcher: RuleMatcher.load(from: db), sampleIntervalSeconds: 900)
     }
 
+    func testReportKeepsDeltaCrossingWeekBoundary() throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        try db.upsert(Customer(id: "work", name: "Work", color: nil, createdAt: start))
+        var agent = session("boundary", remote: workRemote, customerID: "work")
+        agent.startedAt = week.end.addingTimeInterval(-900)
+        agent.endedAt = week.end.addingTimeInterval(900)
+        agent.lastActivityAt = agent.endedAt
+        try db.upsertSession(agent)
+        try db.insertClaudeActiveDelta(sessionID: agent.id, occurredAt: agent.endedAt!, gainedSeconds: 1800)
+        XCTAssertEqual(try report(db).grandTotal, 0.25, accuracy: 0.001)
+        let nextWeek = DateInterval(start: week.end, duration: week.duration)
+        let next = try WeeklyReport.compute(week: nextWeek, samples: [], sessions: db.sessions(in: nextWeek),
+                                            claudeDeltas: db.claudeActiveDeltas(in: nextWeek),
+                                            matcher: RuleMatcher.load(from: db), sampleIntervalSeconds: 15)
+        XCTAssertEqual(next.grandTotal, 0.25, accuracy: 0.001)
+    }
+
+    func testAgentAggregatesOnlyCountActivityWithinRequestedWeek() throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        var agent = session("long-session", remote: workRemote)
+        agent.endedAt = week.end.addingTimeInterval(3600)
+        agent.activeSeconds = 1800
+        try db.upsertSession(agent)
+        try db.insertClaudeActiveDelta(sessionID: agent.id, occurredAt: start.addingTimeInterval(1800), gainedSeconds: 1800)
+        let nextWeek = DateInterval(start: week.end, duration: week.duration)
+        XCTAssertEqual(try db.sessionRepoAggregates(in: week, idleThresholdSeconds: 300).first?.totalSeconds, 1800)
+        XCTAssertTrue(try db.sessionRepoAggregates(in: nextWeek, idleThresholdSeconds: 300).isEmpty,
+                      "An open/long-running session does not repeat its lifetime activity in every week")
+    }
+
     func testIgnorePersistsAndMatchesRepoAcrossRemoteFormats() throws {
         let db = try AppDatabase.inMemoryForTesting()
         try db.hideSignal(kind: .gitRepoSlug, value: " Personal/private \n")

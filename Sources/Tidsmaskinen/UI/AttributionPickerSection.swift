@@ -5,9 +5,8 @@ import SwiftUI
 /// reattribute popover). The picker itself is the single source of truth for
 /// the CC/Local split, search, sync footer, and inline creation.
 ///
-/// Kept as a stable API so existing call sites don't have to change as the
-/// picker UX evolves. Hides the explicit label entirely when `showsLabel` is
-/// false (the call-site adds its own).
+/// Supplies the shared Command Center sync controls and optional label.
+/// Hides the label when the caller already provides one.
 struct AttributionPickerSection: View {
     let customers: [Customer]
     let projects: [Project]

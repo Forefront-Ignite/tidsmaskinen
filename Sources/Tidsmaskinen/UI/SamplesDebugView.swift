@@ -69,6 +69,7 @@ struct SamplesDebugView: View {
     @State private var samples: [ActivitySample] = []
     @State private var blocks: [SampleBlock] = []
     @State private var totalCount: Int = 0
+    @State private var loadError: String?
     @State private var grouped: Bool = true
     @State private var refreshTimer: Timer?
 
@@ -98,6 +99,11 @@ struct SamplesDebugView: View {
                 rawTable
             }
         }
+        .alert("Unable to load data", isPresented: Binding(
+            get: { loadError != nil }, set: { if !$0 { loadError = nil } }
+        )) {
+            Button("OK") { loadError = nil }
+        } message: { Text(loadError ?? "") }
         .onAppear {
             reload()
             let t = Timer(timeInterval: 5, repeats: true) { _ in
@@ -230,9 +236,9 @@ struct SamplesDebugView: View {
             samples = try state.database.recentSamples(limit: 500)
             blocks = SampleBlock.group(samples)
             totalCount = try state.database.sampleCount()
+            loadError = nil
         } catch {
-            samples = []
-            blocks = []
+            loadError = error.localizedDescription
         }
     }
 }

@@ -90,4 +90,40 @@ final class CommandCenterSyncTests: XCTestCase {
         XCTAssertEqual(result.projectsImported, 0)
         XCTAssertTrue(try db.allProjects().isEmpty)
     }
+    func testArchivedRowsReappearWithOriginalIDs() async throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        let sync = CommandCenterSync(database: db, client: CommandCenterClient())
+        let clients = [CommandCenter.Client(id: "c1", name: "Client", status: "active")]
+        let projects = [project(id: "e1", name: "Project", clientId: "c1", clientName: "Client")]
+        _ = try await sync.reconcile(clients: clients, projects: projects)
+        let customerID = try XCTUnwrap(db.allCustomers().first?.id)
+        let projectID = try XCTUnwrap(db.allProjects().first?.id)
+        _ = try await sync.reconcile(clients: [], projects: [])
+        XCTAssertTrue(try db.allCustomers().isEmpty)
+        XCTAssertTrue(try db.allProjects().isEmpty)
+
+        _ = try await sync.reconcile(clients: clients, projects: projects)
+        XCTAssertEqual(try db.allCustomers().map(\.id), [customerID])
+        XCTAssertEqual(try db.allProjects().map(\.id), [projectID])
+        XCTAssertEqual(try db.allCustomersIncludingArchived().count, 1)
+        XCTAssertEqual(try db.allProjectsIncludingArchived().count, 1)
+    }
+
+    func testReturningEngagementReactivatesAndRenamesItsArchivedParent() async throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        let sync = CommandCenterSync(database: db, client: CommandCenterClient())
+        _ = try await sync.reconcile(clients: [], projects: [
+            project(id: "e1", name: "Project", clientId: "c1", clientName: "Old name")
+        ])
+        let customerID = try XCTUnwrap(db.allCustomers().first?.id)
+        _ = try await sync.reconcile(clients: [], projects: [])
+
+        _ = try await sync.reconcile(clients: [], projects: [
+            project(id: "e1", name: "Project", clientId: "c1", clientName: "New name")
+        ])
+        XCTAssertEqual(try db.allCustomers().map(\.id), [customerID])
+        XCTAssertEqual(try db.allCustomers().map(\.name), ["New name"])
+        XCTAssertEqual(try db.allProjects().count, 1)
+    }
+
 }

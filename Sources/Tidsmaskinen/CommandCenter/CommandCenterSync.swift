@@ -101,7 +101,21 @@ actor CommandCenterSync {
                 parentLookup = try database.customer(externalSource: .commandCenter, externalID: clientId)
             }
             let parent: Customer
-            if let found = parentLookup {
+            if var found = parentLookup {
+                // An engagement may bring back a parent absent from the active-client feed.
+                var changed = false
+                if found.externalSource != ExternalSource.commandCenter.rawValue {
+                    found.externalSource = ExternalSource.commandCenter.rawValue
+                    changed = true
+                }
+                if let name = cc.clientName, found.name != name {
+                    found.name = name
+                    changed = true
+                }
+                found.externalSyncedAt = now
+                try database.upsert(found)
+                customerByExternalID[clientId] = found
+                if changed { result.clientsUpdated += 1 }
                 parent = found
             } else if let clientName = cc.clientName {
                 let adopted = Customer(

@@ -1,5 +1,19 @@
 # Tidsmaskinen — MacBook Activity Tracker for Weekly Time Reports
 
+## Current implementation status (reviewed 2026-09-19)
+
+The rest of this document is the original design proposal, not a feature checklist. Use the source and README for current behavior. In particular:
+
+- Capture, rules, timeline, weekly report, Microsoft Graph sync, Command Center sync, and Claude Code/Codex hooks are implemented.
+- Hook capture uses an append-only JSONL log and a file watcher/polling ingester. There is no Unix socket receiver or transcript-directory backup scanner.
+- Attribution is rule-based or manual. There is no Claude API fallback, suggestion service, timeline split/merge editor, or attendance verifier.
+- Concurrent work for different customers can count in parallel. Overlapping sources within a customer/project bucket are deduplicated. This is fixed behavior, not a settings toggle.
+- Idle foreground samples are excluded; calendar duration still counts while idle. The former idle-meeting and attendance toggles had no implementation and have been removed.
+- Calendar sync follows all Graph pages before reconciliation. RSVP filtering applies to saved history so changing the filter preserves assignments; cancelled events are excluded from the snapshot.
+- Review and Discover coexist in the main window. Customer/project assignment is available for every supported rule kind, not only repository rules.
+
+Original proposals below remain as design history; they are not promises of shipped functionality.
+
 ## Context
 
 You spend the week on a mix of customer meetings, coding for client projects, and ad-hoc research, and at the end of the week you have to reconstruct hours-per-customer-per-day from memory. The goal is a passive macOS menu-bar app that captures the signals that already identify "what customer is this?" — meeting attendees, git remotes, Chrome hosts, Claude Code project paths — and produces a reviewable weekly grid you can paste into your reporting tool.

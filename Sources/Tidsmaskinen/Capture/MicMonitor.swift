@@ -34,17 +34,9 @@ enum MicDebug {
     }
 }
 
-/// Polls the default audio input device to detect when the microphone is
-/// being used by any app (the same signal that drives the orange dot in the
-/// macOS menu bar). Surfaces start/end events for VoIP-like sessions and
-/// persists them as MicSession rows.
-///
-/// CoreAudio's `kAudioDevicePropertyDeviceIsRunningSomewhere` is the public
-/// indicator that *some* process is reading from the device — we don't get
-/// to know which one. So at session start we snapshot which known VoIP apps
-/// are running (Teams, Zoom, Slack, Webex, Discord, FaceTime). If none of
-/// them are running we still record the session but flag it as "Other mic
-/// activity" — that covers dictation, Voice Memos, Whisper, podcast tools.
+/// Polls CoreAudio's per-process input activity and records microphone sessions.
+/// Resolves helper processes to their owning app so call attribution reflects
+/// the app holding the microphone, including browsers and non-VoIP recorders.
 @MainActor
 final class MicMonitor {
     let database: AppDatabase
@@ -55,6 +47,7 @@ final class MicMonitor {
     private var pollInterval: TimeInterval = 5.0
 
     private var isRecording: Bool = false
+    private var isSleeping = false
     private var currentSessionID: String?
     private var currentSessionStart: Date?
     private var currentSessionRecorderBundles: Set<String> = []
@@ -119,6 +112,9 @@ final class MicMonitor {
         guard timer == nil else { return }
         if let other = Self.active, other !== self { return }
         Self.active = self
+        let notifications = NSWorkspace.shared.notificationCenter
+        notifications.addObserver(self, selector: #selector(handleSleep), name: NSWorkspace.willSleepNotification, object: nil)
+        notifications.addObserver(self, selector: #selector(handleWake), name: NSWorkspace.didWakeNotification, object: nil)
 
         MicDebug.log("MicMonitor.start() pollInterval=\(pollInterval)s")
 
@@ -136,6 +132,7 @@ final class MicMonitor {
     }
 
     func stop() {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
         if Self.active === self { Self.active = nil }
         timer?.invalidate()
         timer = nil
@@ -161,7 +158,21 @@ final class MicMonitor {
         isRecording = false
     }
 
+    // Internal so the sleep boundary can be checked without accessing real audio hardware.
+    @objc func handleSleep() {
+        isSleeping = true
+        endSession()
+        isRecording = false
+        gracePeriodEnds = nil
+    }
+
+    @objc private func handleWake() {
+        isSleeping = false
+        poll()
+    }
+
     private func poll() {
+        guard !isSleeping else { return }
         // Process-level signal is more accurate than `IsRunningSomewhere` on
         // the device, which stays true while an app is releasing the device.
         let recorders = currentInputRecorders()
@@ -206,7 +217,7 @@ final class MicMonitor {
         }
     }
 
-    private func beginSession(with recorders: [Recorder] = []) {
+    func beginSession(with recorders: [Recorder] = []) {
         let db = database
         let start = Date()
         // The caller passes the recorder set that triggered the transition;
@@ -299,71 +310,6 @@ final class MicMonitor {
             : nil
         let participant = teamsParticipant ?? slackPerson
         return (participant, slackChannel)
-    }
-
-    // MARK: - CoreAudio probe
-
-    private func micIsRunningSomewhere() -> Bool {
-        // Query every audio device that has an INPUT stream. The default-input
-        // device alone isn't enough — Slack huddles in particular can hold the
-        // mic open on a non-default device while macOS still shows the orange
-        // dot. We OR the IsRunningSomewhere flag across all input-capable
-        // devices and return true if any one of them is hot.
-        for deviceID in allInputCapableAudioDevices() {
-            var isRunning: UInt32 = 0
-            var size = UInt32(MemoryLayout<UInt32>.size)
-            var address = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain)
-            let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &isRunning)
-            if status == noErr, isRunning != 0 { return true }
-        }
-        return false
-    }
-
-    /// Returns every audio device on the system that has at least one input
-    /// stream (i.e. could be acting as a microphone).
-    private func allInputCapableAudioDevices() -> [AudioDeviceID] {
-        var listAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        var dataSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
-            AudioObjectID(kAudioObjectSystemObject),
-            &listAddress, 0, nil, &dataSize) == noErr, dataSize > 0 else { return [] }
-        let deviceCount = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
-        var devices = [AudioDeviceID](repeating: 0, count: deviceCount)
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &listAddress, 0, nil, &dataSize, &devices) == noErr else { return [] }
-
-        return devices.filter { hasInputStreams($0) }
-    }
-
-    private func hasInputStreams(_ deviceID: AudioDeviceID) -> Bool {
-        var streamsAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreams,
-            mScope: kAudioObjectPropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMain)
-        var streamsSize: UInt32 = 0
-        let status = AudioObjectGetPropertyDataSize(deviceID, &streamsAddress, 0, nil, &streamsSize)
-        return status == noErr && streamsSize > 0
-    }
-
-    private func defaultInputDevice() -> AudioDeviceID? {
-        var deviceID: AudioDeviceID = 0
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        let status = AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address, 0, nil, &size, &deviceID)
-        guard status == noErr, deviceID != 0 else { return nil }
-        return deviceID
     }
 
     // MARK: - Per-process audio attribution (macOS 14.2+)

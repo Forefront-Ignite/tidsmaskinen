@@ -65,6 +65,7 @@ actor GraphClient {
     private static let graphBase = "https://graph.microsoft.com/v1.0"
 
     private var tokens: GraphTokens?
+    private let session: URLSession
 
     /// Read live so changes in Settings take effect without restarting the actor.
     private var clientID: String { AppSettings.graphClientID }
@@ -73,7 +74,13 @@ actor GraphClient {
     }
 
     init() {
+        self.session = .shared
         self.tokens = KeychainStore.getCodable(GraphTokens.self, account: Self.tokensAccount)
+    }
+
+    init(session: URLSession, tokens: GraphTokens) {
+        self.session = session
+        self.tokens = tokens
     }
 
     // MARK: - Public API
@@ -91,12 +98,12 @@ actor GraphClient {
         var req = URLRequest(url: URL(string: "\(authorityBase)/devicecode")!)
         req.httpMethod = "POST"
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let body = formEncoded([
+        let body = Self.formEncoded([
             "client_id": clientID,
             "scope": Self.scope
         ])
         req.httpBody = body.data(using: .utf8)
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await session.data(for: req)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw GraphError.deviceCodeFailed(Self.errorBody(data))
         }
@@ -115,10 +122,9 @@ actor GraphClient {
                 let tokens = try await exchangeDeviceCode(deviceCode)
                 return tokens
             } catch GraphError.authorizationPending {
-                currentInterval = baseInterval
                 continue
             } catch let GraphError.tokenError(message) where message.contains("slow_down") {
-                currentInterval = baseInterval + 5
+                currentInterval += 5
                 continue
             }
         }
@@ -128,13 +134,13 @@ actor GraphClient {
         var req = URLRequest(url: URL(string: "\(authorityBase)/token")!)
         req.httpMethod = "POST"
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let body = formEncoded([
+        let body = Self.formEncoded([
             "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
             "client_id": clientID,
             "device_code": deviceCode
         ])
         req.httpBody = body.data(using: .utf8)
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await session.data(for: req)
         let http = response as? HTTPURLResponse
         if http?.statusCode == 200 {
             return try await persistTokenResponse(data: data, fallbackRefresh: nil)
@@ -157,14 +163,14 @@ actor GraphClient {
         var req = URLRequest(url: URL(string: "\(authorityBase)/token")!)
         req.httpMethod = "POST"
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let body = formEncoded([
+        let body = Self.formEncoded([
             "grant_type": "refresh_token",
             "client_id": clientID,
             "refresh_token": current.refreshToken,
             "scope": Self.scope
         ])
         req.httpBody = body.data(using: .utf8)
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await session.data(for: req)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw GraphError.tokenRefreshFailed(Self.errorBody(data))
         }
@@ -185,7 +191,7 @@ actor GraphClient {
         let token = try await ensureValidAccessToken()
         var req = URLRequest(url: URL(string: "\(Self.graphBase)/me")!)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await session.data(for: req)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw GraphError.meFetchFailed(Self.errorBody(data))
         }
@@ -205,7 +211,7 @@ actor GraphClient {
         return me
     }
 
-    /// Fetch calendar events between start and end (UTC). Filters by RSVP per AppSettings.
+    /// Fetch a complete calendar snapshot; RSVP filtering happens on local reads.
     func fetchCalendarView(start: Date, end: Date) async throws -> [CalendarEvent] {
         let token = try await ensureValidAccessToken()
         let me = try? await me()
@@ -220,20 +226,45 @@ actor GraphClient {
             URLQueryItem(name: "endDateTime", value: isoOut.string(from: end)),
             URLQueryItem(name: "$top", value: "200"),
             URLQueryItem(name: "$orderby", value: "start/dateTime"),
-            URLQueryItem(name: "$select", value: "id,iCalUId,subject,bodyPreview,start,end,isAllDay,organizer,attendees,responseStatus,location,isOnlineMeeting,onlineMeetingProvider,type,seriesMasterId,createdDateTime,lastModifiedDateTime")
+            URLQueryItem(name: "$select", value: "id,iCalUId,subject,bodyPreview,start,end,isAllDay,isCancelled,organizer,attendees,responseStatus,location,isOnlineMeeting,onlineMeetingProvider,type,seriesMasterId,createdDateTime,lastModifiedDateTime")
         ]
-        var req = URLRequest(url: components.url!)
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        req.setValue("outlook.timezone=\"UTC\"", forHTTPHeaderField: "Prefer")
-
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-            throw GraphError.calendarFetchFailed(Self.errorBody(data))
+        var nextURL = components.url
+        var visited = Set<URL>()
+        var allEvents: [CalendarEvent] = []
+        while let url = nextURL {
+            // Never send the bearer token to an untrusted pagination destination.
+            guard url.scheme == "https", url.host == "graph.microsoft.com",
+                  url.port == nil || url.port == 443,
+                  visited.insert(url).inserted else {
+                throw GraphError.calendarFetchFailed("Invalid or repeated calendar page URL.")
+            }
+            var req = URLRequest(url: url)
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            req.setValue("outlook.timezone=\"UTC\"", forHTTPHeaderField: "Prefer")
+            let (data, response) = try await session.data(for: req)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                throw GraphError.calendarFetchFailed(Self.errorBody(data))
+            }
+            let parsed = try JSONDecoder().decode(GraphCalendarViewResponse.self, from: data)
+            for event in parsed.value {
+                guard let converted = event.toCalendarEvent(userDomain: userDomain) else {
+                    // A partial snapshot would make CalendarSync delete valid local rows.
+                    throw GraphError.calendarFetchFailed("An event has invalid start/end dates.")
+                }
+                if event.isCancelled != true {
+                    allEvents.append(converted)
+                }
+            }
+            if let link = parsed.nextLink {
+                guard let url = URL(string: link) else {
+                    throw GraphError.calendarFetchFailed("Invalid calendar page URL.")
+                }
+                nextURL = url
+            } else {
+                nextURL = nil
+            }
         }
-
-        let parsed = try JSONDecoder().decode(GraphCalendarViewResponse.self, from: data)
-        let allEvents = parsed.value.compactMap { $0.toCalendarEvent(userDomain: userDomain) }
-        return allEvents.filter { Self.passesRSVPFilter($0.rsvpStatus, AppSettings.meetingRSVPFilter) }
+        return allEvents
     }
 
     // MARK: - Private helpers
@@ -256,10 +287,11 @@ actor GraphClient {
         return new
     }
 
-    private func formEncoded(_ params: [String: String]) -> String {
-        params.map { key, value in
-            let k = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
-            let v = value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? value
+    static func formEncoded(_ params: [String: String]) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        return params.map { key, value in
+            let k = key.addingPercentEncoding(withAllowedCharacters: allowed) ?? key
+            let v = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
             return "\(k)=\(v)"
         }.joined(separator: "&")
     }
@@ -278,17 +310,6 @@ actor GraphClient {
             return s.count > 400 ? String(s.prefix(400)) + "…" : s
         }
         return "(empty body)"
-    }
-
-    private static func passesRSVPFilter(_ status: String, _ filter: MeetingRSVPFilter) -> Bool {
-        switch filter {
-        case .acceptedOnly:
-            return status == "accepted" || status == "organizer"
-        case .acceptedAndTentative:
-            return status == "accepted" || status == "organizer" || status == "tentativelyAccepted"
-        case .all:
-            return true
-        }
     }
 }
 
@@ -339,6 +360,12 @@ private struct OAuthError: Codable {
 
 private struct GraphCalendarViewResponse: Codable {
     let value: [GraphEvent]
+    let nextLink: String?
+
+    enum CodingKeys: String, CodingKey {
+        case value
+        case nextLink = "@odata.nextLink"
+    }
 }
 
 private struct GraphEvent: Codable {
@@ -349,6 +376,7 @@ private struct GraphEvent: Codable {
     let start: GraphDateTime
     let end: GraphDateTime
     let isAllDay: Bool?
+    let isCancelled: Bool?
     let organizer: GraphRecipient?
     let attendees: [GraphAttendee]?
     let responseStatus: GraphResponseStatus?

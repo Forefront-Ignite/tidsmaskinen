@@ -28,6 +28,7 @@ struct ReviewView: View {
     @State private var cursor: Int = 0          // position in the snapshot
     @State private var loadError: String?
     @State private var didInitialLoad = false
+    @State private var initialLookupTask: Task<Void, Never>?
     @State private var scope: AttrScope = .always
     @State private var weekStart: Date = Calendar.weekStartingMonday().currentWeekInterval().start
     @State private var selectedDay: Date? = nil    // nil = whole selected week
@@ -93,6 +94,7 @@ struct ReviewView: View {
     @discardableResult
     private func consumeReviewTarget() -> Bool {
         guard let target = state.reviewTargetWeekStart else { return false }
+        initialLookupTask?.cancel()
         state.reviewTargetWeekStart = nil
         selectedDay = nil
         if target != weekStart { weekStart = target }
@@ -109,7 +111,9 @@ struct ReviewView: View {
         let sampleInterval = AppSettings.sampleIntervalSeconds
         let idleMinutes = AppSettings.claudeIdleThresholdMinutes
         let reviewMin = AppSettings.reviewMinMinutes
-        Task { @MainActor in
+        let lookupPeriod = period
+        initialLookupTask?.cancel()
+        initialLookupTask = Task { @MainActor in
             let oldest = await Task.detached(priority: .userInitiated) { () -> Date? in
                 (try? ReviewQueue.rolling(
                     database: db, now: now,
@@ -118,6 +122,10 @@ struct ReviewView: View {
                     idleThresholdSeconds: TimeInterval(idleMinutes * 60),
                     minMinutes: reviewMin))?.oldestOpenWeekStart
             }.value
+            // Navigation or an explicit menu-bar target takes precedence over
+            // this initial lookup. Never discard work begun while it ran.
+            guard !Task.isCancelled, period == lookupPeriod, cursor == 0,
+                  resolved.isEmpty, pathResolved.isEmpty else { return }
             if let oldest, oldest != weekStart {
                 weekStart = oldest   // onChange(weekStart) → reload
             } else {
@@ -149,11 +157,23 @@ struct ReviewView: View {
                 // An explicit target (from the menu bar) already picked the
                 // week, so just load it.
                 if hadTarget { reload() } else { landOnOldestOpenWeek() }
+            } else {
+                reload()
             }
         }
+        .onDisappear { initialLookupTask?.cancel() }
         .onChange(of: state.reviewTargetWeekStart) { _, _ in _ = consumeReviewTarget() }
-        .onChange(of: weekStart) { _, _ in reload() }
-        .onChange(of: selectedDay) { _, _ in reload() }
+        .onChange(of: weekStart) { _, _ in
+            initialLookupTask?.cancel()
+            // A day belongs to its displayed week. Keeping the previous day's
+            // filter would show (and edit) the old week under the new heading.
+            selectedDay = nil
+            reload()
+        }
+        .onChange(of: selectedDay) { _, _ in
+            initialLookupTask?.cancel()
+            reload()
+        }
         // Refresh when new activity lands, but only before the user has started
         // acting — so a live snapshot doesn't wipe in-session resolutions/cursor.
         .onChange(of: state.sampleCount) { _, _ in
@@ -861,11 +881,7 @@ struct ReviewView: View {
             // pickers and resolved-state checks.
             let allCustomers = try state.database.allCustomers()
             let allProjects = try state.database.allProjects()
-            let rules = try state.database.allRules()
-            let seriesAttrs = try state.database.allMeetingSeriesAttributions()
-            let m = RuleMatcher.make(customers: allCustomers, projects: allProjects, rules: rules, series: seriesAttrs)
-
-            self.matcher = m
+            self.matcher = try RuleMatcher.load(from: state.database)
             self.customers = allCustomers
             self.projects = allProjects
             self.units = built

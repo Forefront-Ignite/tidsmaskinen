@@ -5,6 +5,7 @@ import XCTest
 final class HookIngesterTests: XCTestCase {
     var db: AppDatabase!
     var ingester: HookIngester!
+    private var previousIdleThreshold: Any?
 
     /// idleThreshold used throughout: default is 5 minutes (300s). Pin it so the
     /// gap-capping assertions are deterministic regardless of the host's saved settings.
@@ -12,9 +13,19 @@ final class HookIngesterTests: XCTestCase {
 
     override func setUp() async throws {
         try await super.setUp()
+        previousIdleThreshold = AppSettings.defaults.object(forKey: SettingsKey.claudeIdleThresholdMinutes)
         AppSettings.defaults.set(5, forKey: SettingsKey.claudeIdleThresholdMinutes)
         db = try AppDatabase.inMemoryForTesting()
         ingester = HookIngester(database: db)
+    }
+
+    override func tearDown() async throws {
+        if let previousIdleThreshold {
+            AppSettings.defaults.set(previousIdleThreshold, forKey: SettingsKey.claudeIdleThresholdMinutes)
+        } else {
+            AppSettings.defaults.removeObject(forKey: SettingsKey.claudeIdleThresholdMinutes)
+        }
+        try await super.tearDown()
     }
 
     // MARK: helpers
@@ -250,6 +261,31 @@ final class HookIngesterTests: XCTestCase {
         ingester.handleLine(#"{"timestamp":"2026-09-08T12:00:00Z","eventType":"SessionStart","provider":"unknown","payload":{"session_id":"bad"}}"#)
         XCTAssertNil(try session("codex:bad"))
         XCTAssertNil(try session("bad"))
+    }
+
+    func testCappedGapStaysAtStartOfIdlePeriod() throws {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        ingester.handleLine(line("SessionStart", start))
+        ingester.handleLine(line("UserPromptSubmit", start.addingTimeInterval(24 * 3600)))
+        let deltas = try db.claudeActiveDeltas(in: DateInterval(start: start, duration: 48 * 3600))
+        let delta = try XCTUnwrap(deltas.first)
+        XCTAssertEqual(deltas.count, 1)
+        XCTAssertEqual(delta.gainedSeconds, 300)
+        XCTAssertEqual(delta.occurredAt, start.addingTimeInterval(300),
+                       "an overnight gap must not move yesterday's activity into today")
+    }
+
+    func testOutOfOrderEventCannotRewindAndRebillActivity() throws {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        ingester.handleLine(line("SessionStart", start))
+        ingester.handleLine(line("Stop", start.addingTimeInterval(120)))
+        ingester.handleLine(line("UserPromptSubmit", start.addingTimeInterval(60)))
+        ingester.handleLine(line("SessionEnd", start.addingTimeInterval(180)))
+        let captured = try XCTUnwrap(try session())
+        XCTAssertEqual(captured.activeSeconds, 180)
+        XCTAssertEqual(captured.lastActivityAt, start.addingTimeInterval(180))
+        let deltas = try db.claudeActiveDeltas(in: DateInterval(start: start, duration: 1000))
+        XCTAssertEqual(deltas.reduce(0) { $0 + $1.gainedSeconds }, 180)
     }
 
 }

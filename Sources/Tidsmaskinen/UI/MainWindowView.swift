@@ -65,23 +65,6 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
         }
     }
 
-    var tint: Color {
-        switch self {
-        case .weeklyReport:   return .blue
-        case .timeline:       return .orange
-        case .review:         return Color(hex: "#5b54ff") ?? .indigo
-        case .discover:       return .teal
-        case .calls:          return .green
-        case .customers:      return .purple
-        case .debug:          return .secondary
-        case .settings:       return .gray
-        case .calendar:       return .teal
-        case .claudeSessions: return .pink
-        case .diagnostics:    return .red
-        case .samples:        return .secondary
-        }
-    }
-
     enum Group: String, CaseIterable, Identifiable {
         case reports, sources, system
         var id: String { rawValue }

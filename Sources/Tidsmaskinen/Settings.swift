@@ -3,10 +3,7 @@ import Foundation
 enum SettingsKey {
     static let sampleIntervalSeconds = "sampleIntervalSeconds"
     static let idleThresholdSeconds = "idleThresholdSeconds"
-    static let trackIdleDuringMeetings = "trackIdleDuringMeetings"
     static let meetingRSVPFilter = "meetingRSVPFilter"
-    static let verifyMeetingAttendance = "verifyMeetingAttendance"
-    static let parallelAttribution = "parallelAttribution"
     static let graphClientID = "graphClientID"
     static let graphTenantID = "graphTenantID"
     static let calendarAutoSyncMinutes = "calendarAutoSyncMinutes"
@@ -64,6 +61,17 @@ enum MeetingRSVPFilter: String, CaseIterable, Identifiable {
     case acceptedAndTentative
     case all
 
+    func includes(_ status: String) -> Bool {
+        switch self {
+        case .acceptedOnly:
+            return status == "accepted" || status == "organizer"
+        case .acceptedAndTentative:
+            return status == "accepted" || status == "organizer" || status == "tentativelyAccepted"
+        case .all:
+            return true
+        }
+    }
+
     var id: String { rawValue }
     var label: String {
         switch self {
@@ -92,26 +100,12 @@ enum AppSettings {
         return v <= 0 ? 300 : v
     }
 
-    static var trackIdleDuringMeetings: Bool {
-        if defaults.object(forKey: SettingsKey.trackIdleDuringMeetings) == nil { return true }
-        return defaults.bool(forKey: SettingsKey.trackIdleDuringMeetings)
-    }
-
     static var meetingRSVPFilter: MeetingRSVPFilter {
         guard let raw = defaults.string(forKey: SettingsKey.meetingRSVPFilter),
               let value = MeetingRSVPFilter(rawValue: raw) else {
             return .acceptedAndTentative
         }
         return value
-    }
-
-    static var verifyMeetingAttendance: Bool {
-        defaults.bool(forKey: SettingsKey.verifyMeetingAttendance)
-    }
-
-    static var parallelAttribution: Bool {
-        if defaults.object(forKey: SettingsKey.parallelAttribution) == nil { return true }
-        return defaults.bool(forKey: SettingsKey.parallelAttribution)
     }
 
     // MARK: Graph

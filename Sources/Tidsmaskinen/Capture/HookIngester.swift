@@ -9,8 +9,6 @@ final class HookIngester {
     let database: AppDatabase
     private var fileURL: URL!
     private var stream: DispatchSourceFileSystemObject?
-    private var fileHandle: FileHandle?
-    private var watcherFD: Int32 = -1
     private var pollTimer: Timer?
     private var sleepObserver: NSObjectProtocol?
 
@@ -33,18 +31,10 @@ final class HookIngester {
                 withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700])
             let url = dir.appendingPathComponent(Self.eventLogFilename)
-            if !FileManager.default.fileExists(atPath: url.path) {
-                FileManager.default.createFile(
-                    atPath: url.path,
-                    contents: nil,
-                    attributes: [.posixPermissions: 0o600])
-            } else {
-                // Tighten perms in case an earlier build created the file with
-                // the default umask.
-                try? FileManager.default.setAttributes(
-                    [.posixPermissions: 0o600],
-                    ofItemAtPath: url.path)
-            }
+            let fd = open(url.path, O_WRONLY | O_CREAT, 0o600)
+            guard fd >= 0 else { return }
+            _ = fchmod(fd, 0o600)
+            close(fd)
             self.fileURL = url
 
             attachWatcher()
@@ -76,9 +66,6 @@ final class HookIngester {
     func stop() {
         stream?.cancel()
         stream = nil
-        if watcherFD >= 0 { close(watcherFD); watcherFD = -1 }
-        try? fileHandle?.close()
-        fileHandle = nil
         pollTimer?.invalidate()
         pollTimer = nil
         if let sleepObserver {
@@ -90,7 +77,6 @@ final class HookIngester {
     private func attachWatcher() {
         let fd = open(fileURL.path, O_EVTONLY)
         guard fd >= 0 else { return }
-        watcherFD = fd
         let src = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,
             eventMask: [.write, .extend, .rename, .delete],
@@ -98,12 +84,8 @@ final class HookIngester {
         src.setEventHandler { [weak self] in
             Task { @MainActor in self?.readPending() }
         }
-        src.setCancelHandler { [weak self] in
-            if let fd = self?.watcherFD, fd >= 0 {
-                close(fd)
-                self?.watcherFD = -1
-            }
-        }
+        // Close the descriptor owned by this source, not a later watcher's descriptor.
+        src.setCancelHandler { close(fd) }
         src.resume()
         stream = src
     }
@@ -117,7 +99,7 @@ final class HookIngester {
             // when persisting the new offset — reusing the pre-truncation value
             // would store base+consumed instead of consumed, causing endless
             // reprocessing on subsequent reads.
-            let savedOffset: UInt64 = UInt64(UserDefaults.standard.integer(forKey: Self.lastOffsetKey))
+            let savedOffset: UInt64 = UInt64(max(0, UserDefaults.standard.integer(forKey: Self.lastOffsetKey)))
             let endOffset = try handle.seekToEnd()
             let seekBase: UInt64
             if endOffset < savedOffset {
@@ -184,6 +166,10 @@ final class HookIngester {
 
         do {
             let existing = try database.session(id: sessionID)
+            // Concurrent hook processes can append out of timestamp order. Never
+            // rewind the activity cursor and bill the same gap a second time.
+            if let last = existing?.lastActivityAt, ts < last { return }
+            if let ended = existing?.endedAt, ts < ended { return }
             // A closed session can legitimately resurrect: a long-lived `claude` session that
             // survived an overnight sleep was closed by sleep-finalization, but the user may keep
             // working in it the next morning under the same session_id. Genuine continuation
@@ -232,25 +218,17 @@ final class HookIngester {
 
             // Activity accounting — every recognised event extends activeSeconds,
             // capped by idleThreshold so long idle gaps don't get billed.
-            let isActivityEvent: Bool
-            switch envelope.eventType {
-            case "SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "Interrupt":
-                isActivityEvent = true
-            default:
-                isActivityEvent = false
-            }
             var gainedSeconds: Double = 0
-            if isActivityEvent {
-                // On resurrection the gap is the entire sleep span; billing it (even capped at
-                // idleThreshold) is exactly the ghost gap we want to avoid. Treat the resurrecting
-                // event as a fresh activity start instead.
-                if let last = session.lastActivityAt, !wasClosed {
-                    let gap = max(0, ts.timeIntervalSince(last))
-                    gainedSeconds = min(gap, idleThreshold)
-                    session.activeSeconds += gainedSeconds
-                }
-                session.lastActivityAt = ts
+            var activeUntil = ts
+            // A reopened session starts fresh; the sleep gap was already finalized.
+            if let last = session.lastActivityAt, !wasClosed {
+                gainedSeconds = min(ts.timeIntervalSince(last), idleThreshold)
+                session.activeSeconds += gainedSeconds
+                // Deltas describe [occurredAt - gainedSeconds, occurredAt]. The
+                // counted activity is at the start of an idle gap, not its end.
+                activeUntil = last.addingTimeInterval(gainedSeconds)
             }
+            session.lastActivityAt = ts
             if wasClosed {
                 session.endedAt = nil // reopen — the user is continuing this session
             }
@@ -271,7 +249,7 @@ final class HookIngester {
             if gainedSeconds > 0 {
                 try database.insertClaudeActiveDelta(
                     sessionID: sessionID,
-                    occurredAt: ts,
+                    occurredAt: activeUntil,
                     gainedSeconds: gainedSeconds)
             }
             onSessionChanged?(session)

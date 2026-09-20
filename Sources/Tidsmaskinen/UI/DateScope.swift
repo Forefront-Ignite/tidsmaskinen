@@ -23,6 +23,14 @@ enum DateScope: Equatable, Hashable {
         }
     }
 
+    /// Date used by day/week attribution actions for the visible scope.
+    var referenceDate: Date {
+        switch self {
+        case .day(let date): return date
+        case .lastDays: return Date()
+        }
+    }
+
     var isDay: Bool {
         if case .day = self { return true }
         return false

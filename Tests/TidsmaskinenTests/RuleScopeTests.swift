@@ -54,6 +54,56 @@ final class RuleScopeTests: XCTestCase {
         return db
     }
 
+    func testRemoteParsingPreservesRepositoryAcrossTransports() {
+        for remote in ["https://github.com/owner/repo.git", "git@github.com:owner/repo.git",
+                       "ssh://git@github.com:2222/owner/repo.git", "ssh://git@github.com/owner/repo.git",
+                       "github.com:owner/repo.git"] {
+            XCTAssertEqual(RuleMatcher.gitSlug(fromRemote: remote), "owner/repo", remote)
+            XCTAssertEqual(RuleMatcher.gitHost(fromRemote: remote), "github.com", remote)
+        }
+        XCTAssertNil(RuleMatcher.gitSlug(fromRemote: "/tmp/local-repo"))
+        XCTAssertNil(RuleMatcher.gitHost(fromRemote: "/tmp/local-repo"))
+    }
+
+    func testArchivedCustomersAndProjectsStillResolveHistoricalRules() throws {
+        let db = try seededDB()
+        var archivedCustomer = customer("archived")
+        archivedCustomer.externalSource = ExternalSource.commandCenterArchived.rawValue
+        archivedCustomer.externalID = "archived-customer"
+        var archivedProject = project("archived-project", "archived")
+        archivedProject.externalSource = ExternalSource.commandCenterArchived.rawValue
+        archivedProject.externalID = "archived-project"
+        try db.upsert(archivedCustomer)
+        try db.upsert(archivedProject)
+        try db.upsert(rule("test.com", customer: "archived", project: "archived-project", scope: .always, reference: w16wed))
+        let result = try RuleMatcher.load(from: db).attribute(kind: .urlHost, value: "test.com", at: w16wed)
+        XCTAssertEqual(result.customer?.id, "archived")
+        XCTAssertEqual(result.project?.id, "archived-project")
+        XCTAssertFalse(try db.allCustomers().contains { $0.id == "archived" })
+        XCTAssertFalse(try db.allProjects().contains { $0.id == "archived-project" })
+    }
+
+    func testReviewResolvesDailyRulesAndManualOverridesPerSample() throws {
+        let db = try seededDB()
+        func add(_ date: Date, customerID: String? = nil) throws {
+            _ = try db.insert(ActivitySample(id: nil, capturedAt: date, appBundleID: "browser", appName: "Browser",
+                                             windowTitle: nil, chromeURL: "https://test.com/work", chromeHost: "test.com",
+                                             gitRepoPath: nil, gitRemoteURL: nil, isIdle: false, customerID: customerID, projectID: nil))
+        }
+        try add(w16wed)
+        try add(w16thu, customerID: "A")
+        let interval = cal.currentWeekInterval(reference: w16wed)
+        try db.upsert(rule("test.com", customer: "A", scope: .today, reference: w16wed))
+        func queue() throws -> [ReviewUnit] {
+            try ReviewQueue.build(database: db, interval: interval, sampleIntervalSeconds: 900,
+                                  idleThresholdSeconds: 300, minMinutes: 5)
+        }
+        XCTAssertTrue(try queue().isEmpty, "Wednesday's rule and Thursday's manual save clear both samples")
+        try add(w16thu.addingTimeInterval(3600))
+        XCTAssertEqual(try queue().count, 1)
+        XCTAssertEqual(try queue().first?.totalSeconds, 900, "Only the unassigned sample remains")
+    }
+
     // MARK: - Matcher conflict resolution (most-precise window wins)
 
     func testPermanentRuleAppliesEveryWeek() {

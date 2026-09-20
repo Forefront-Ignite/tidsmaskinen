@@ -11,7 +11,7 @@ struct AssignmentSheet: View {
     let projects: [Project]
     let onCreateCustomer: (String) throws -> Customer
     let onCreateProject: (String, String) throws -> Project
-    let onSave: (String, String?, AttributionScope) -> Void
+    let onSave: (String, String?, AttributionScope) throws -> Void
 
     /// Initial selection. Pre-filling lets the picker open to the current
     /// attribution rather than to "Choose…".
@@ -79,15 +79,19 @@ struct AssignmentSheet: View {
     private var scopeHint: String {
         switch scope {
         case .always:   return "Creates a rule — future activity auto-attributes here."
-        case .thisWeek: return "Attributes only this week's matching activity."
-        case .today:    return "Attributes only today's matching activity."
+        case .thisWeek: return "Attributes matching activity in the selected week."
+        case .today:    return "Attributes matching activity on the selected day."
         case .justThis: return "Attributes just this — no rule is created."
         }
     }
 
     private func save() {
         guard !selectedCustomerID.isEmpty else { return }
-        onSave(selectedCustomerID, selectedProjectID.isEmpty ? nil : selectedProjectID, scope)
-        dismiss()
+        do {
+            try onSave(selectedCustomerID, selectedProjectID.isEmpty ? nil : selectedProjectID, scope)
+            dismiss()
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 }

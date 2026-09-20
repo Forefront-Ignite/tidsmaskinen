@@ -4,6 +4,7 @@ struct ClaudeSessionsView: View {
     @EnvironmentObject private var state: AppState
     @State private var sessions: [ClaudeSession] = []
     @State private var totalCount: Int = 0
+    @State private var loadError: String?
     @State private var refreshTimer: Timer?
     @State private var scope: DateScope = .lastDays(7)
 
@@ -74,6 +75,11 @@ struct ClaudeSessionsView: View {
                 }
             }
         }
+        .alert("Unable to load data", isPresented: Binding(
+            get: { loadError != nil }, set: { if !$0 { loadError = nil } }
+        )) {
+            Button("OK") { loadError = nil }
+        } message: { Text(loadError ?? "") }
         .onAppear {
             reload()
             let t = Timer(timeInterval: 5, repeats: true) { _ in
@@ -191,9 +197,9 @@ struct ClaudeSessionsView: View {
             let fetched = try state.database.sessions(in: scope.interval)
             sessions = fetched.sorted { $0.startedAt > $1.startedAt }
             totalCount = sessions.count
+            loadError = nil
         } catch {
-            sessions = []
-            totalCount = 0
+            loadError = error.localizedDescription
         }
     }
 

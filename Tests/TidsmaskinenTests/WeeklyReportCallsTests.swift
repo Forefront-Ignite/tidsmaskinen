@@ -42,6 +42,87 @@ final class WeeklyReportCallsTests: XCTestCase {
         report.rows.first { $0.id == customerID }?.totalHours ?? 0
     }
 
+    func testDeclinedMeetingDoesNotBillOrAbsorbCalls() {
+        let matcher = RuleMatcher.make(customers: [customer("A")], projects: [], rules: [])
+        var booking = event("declined", from: at(2026, 4, 15, 10), to: at(2026, 4, 15, 11), customerID: "A")
+        booking.rsvpStatus = "declined"
+        let mic = micSession("call", from: booking.startAt, to: booking.endAt, customerID: "A")
+        XCTAssertTrue(CalendarEvent.meetingMicSessionIDs(events: [booking], micSessions: [mic], matcher: matcher).isEmpty)
+        let report = WeeklyReport.compute(week: week, samples: [], events: [booking], micSessions: [mic],
+                                          matcher: matcher, sampleIntervalSeconds: 15)
+        XCTAssertEqual(report.grandTotal, 1)
+        XCTAssertEqual(report.breakdownsByRowID["A"]?.perDay(.events).reduce(0, +), 0)
+        XCTAssertEqual(report.breakdownsByRowID["A"]?.perDay(.calls).reduce(0, +), 1)
+    }
+
+    func testCallAndRuleSaveRollsBackTogether() throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        try db.upsert(customer("A"))
+        let id = try db.startMicSession(at: at(2026, 4, 15, 10), voipApps: [])
+        let invalidRule = Rule(id: "invalid", customerID: "missing", projectID: nil,
+                               kind: .slackChannel, pattern: "channel", priority: 100, createdAt: Date())
+        XCTAssertThrowsError(try db.setMicSessionAttribution(id: id, customerID: "A", projectID: nil, rule: invalidRule))
+        XCTAssertNil(try db.micSessions(in: week).first?.customerID)
+        XCTAssertTrue(try db.allRules().isEmpty)
+    }
+
+    func testIgnoredSeriesDoesNotAbsorbAttributedCall() {
+        let series = MeetingSeriesAttribution(seriesMasterID: "series", customerID: nil,
+                                              projectID: nil, isIgnored: true,
+                                              updatedAt: Date())
+        let matcher = RuleMatcher.make(customers: [customer("A")], projects: [], rules: [], series: [series])
+        var booking = event("e1", from: at(2026, 4, 15, 10), to: at(2026, 4, 15, 11), customerID: nil)
+        booking.seriesMasterID = "series"
+        let mic = micSession("m1", from: at(2026, 4, 15, 9, 30), to: at(2026, 4, 15, 11, 30), customerID: "A")
+        let extended = CalendarEvent.withMicOverrun(events: [booking], micSessions: [mic], matcher: matcher)
+        XCTAssertEqual(extended.first?.startAt, booking.startAt)
+        XCTAssertEqual(extended.first?.endAt, booking.endAt)
+        XCTAssertTrue(CalendarEvent.meetingMicSessionIDs(events: extended, micSessions: [mic], matcher: matcher).isEmpty)
+        let report = WeeklyReport.compute(week: week, samples: [], events: extended, micSessions: [mic],
+                                          matcher: matcher, sampleIntervalSeconds: 15)
+        XCTAssertEqual(report.grandTotal, 2, accuracy: 0.001)
+
+        // An explicitly assigned occurrence still overrides an ignored series.
+        booking.customerID = "A"
+        XCTAssertEqual(CalendarEvent.meetingMicSessionIDs(events: [booking], micSessions: [mic], matcher: matcher)[booking.id], [mic.id])
+    }
+
+    func testReviewDoesNotAskAboutIndividuallyIgnoredOrAssignedSeriesOccurrences() throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        try db.upsert(customer("A"))
+        var assigned = event("assigned", from: at(2026, 4, 15, 10), to: at(2026, 4, 15, 11), customerID: "A")
+        assigned.seriesMasterID = "series"
+        var ignored = event("ignored", from: at(2026, 4, 16, 10), to: at(2026, 4, 16, 11), customerID: nil)
+        ignored.seriesMasterID = "series"
+        ignored.isIgnored = true
+        try db.upsertEvents([assigned, ignored])
+        let queue = try ReviewQueue.build(database: db, interval: week, sampleIntervalSeconds: 15,
+                                          idleThresholdSeconds: 300, minMinutes: 5)
+        XCTAssertTrue(queue.isEmpty)
+    }
+
+    func testMicQueryIncludesBoundaryCrossingCalls() throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        let start = at(2026, 4, 15, 0)
+        let interval = DateInterval(start: start, duration: 86400)
+        let crossing = try db.startMicSession(at: start.addingTimeInterval(-1800), voipApps: [])
+        try db.endMicSession(id: crossing, endedAt: start.addingTimeInterval(1800), participant: nil, slackChannel: nil, voipApps: nil)
+        let before = try db.startMicSession(at: start.addingTimeInterval(-3600), voipApps: [])
+        try db.endMicSession(id: before, endedAt: start, participant: nil, slackChannel: nil, voipApps: nil)
+        XCTAssertEqual(try db.micSessions(in: interval).map(\.id), [crossing])
+    }
+
+    func testCalendarQueryIncludesBoundaryCrossingEvents() throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        let start = at(2026, 4, 15, 0)
+        let interval = DateInterval(start: start, duration: 86400)
+        let crossing = event("crossing", from: start.addingTimeInterval(-1800), to: start.addingTimeInterval(1800), customerID: nil)
+        let before = event("before", from: start.addingTimeInterval(-3600), to: start, customerID: nil)
+        let after = event("after", from: interval.end, to: interval.end.addingTimeInterval(1800), customerID: nil)
+        try db.upsertEvents([crossing, before, after])
+        XCTAssertEqual(try db.calendarEvents(in: interval).map(\.id), ["crossing"])
+    }
+
     /// An attributed ad-hoc call with no overlapping meeting contributes its
     /// full duration to its customer.
     func testAttributedCallAddsHours() {
@@ -163,7 +244,7 @@ final class WeeklyReportCallsTests: XCTestCase {
                       customerID: "A", provider: "teamsForBusiness")
         let frag = micSession("m1", from: at(2026, 4, 15, 13, 30), to: at(2026, 4, 15, 13, 31),
                               customerID: nil, app: "com.microsoft.teams2")
-        let owned = CalendarEvent.meetingMicSessionIDs(events: [e], micSessions: [frag])
+        let owned = CalendarEvent.meetingMicSessionIDs(events: [e], micSessions: [frag], matcher: .make(customers: [], projects: [], rules: []))
         XCTAssertEqual(owned["e1"], ["m1"])
         XCTAssertTrue(CallSegment.adHocRanges(of: frag, endedAt: frag.endedAt!, events: [e],
                                               owned: owned, minimumSeconds: 30).isEmpty)
@@ -177,7 +258,7 @@ final class WeeklyReportCallsTests: XCTestCase {
                       customerID: "A", provider: "teamsForBusiness")
         let huddle = micSession("m1", from: at(2026, 4, 15, 13, 50), to: at(2026, 4, 15, 14, 20),
                                 customerID: nil)
-        let out = CalendarEvent.withMicOverrun(events: [e], micSessions: [huddle])
+        let out = CalendarEvent.withMicOverrun(events: [e], micSessions: [huddle], matcher: .make(customers: [], projects: [], rules: []))
         XCTAssertEqual(out[0].endAt, at(2026, 4, 15, 14))
     }
 
@@ -188,7 +269,7 @@ final class WeeklyReportCallsTests: XCTestCase {
                       customerID: "A", provider: "teamsForBusiness")
         let teams = micSession("m1", from: at(2026, 4, 15, 13, 50), to: at(2026, 4, 15, 14, 20),
                                customerID: nil, app: "com.microsoft.teams2")
-        let out = CalendarEvent.withMicOverrun(events: [e], micSessions: [teams])
+        let out = CalendarEvent.withMicOverrun(events: [e], micSessions: [teams], matcher: .make(customers: [], projects: [], rules: []))
         XCTAssertEqual(out[0].endAt, at(2026, 4, 15, 14, 20))
     }
 
@@ -199,7 +280,7 @@ final class WeeklyReportCallsTests: XCTestCase {
                       customerID: "A", provider: "teamsForBusiness")
         let teams = micSession("m1", from: at(2026, 4, 15, 13, 59), to: at(2026, 4, 15, 14, 30),
                                customerID: nil, app: "com.microsoft.teams2")
-        let out = CalendarEvent.withMicOverrun(events: [e], micSessions: [teams])
+        let out = CalendarEvent.withMicOverrun(events: [e], micSessions: [teams], matcher: .make(customers: [], projects: [], rules: []))
         XCTAssertEqual(out[0].endAt, at(2026, 4, 15, 14))
     }
 

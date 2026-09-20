@@ -125,6 +125,8 @@ struct TeamsCallsView: View {
         .onAppear { reload() }
         .onChange(of: scope) { _, _ in reload() }
         .onChange(of: state.sampleCount) { _, _ in reload() }
+        .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload() }
+        .onChange(of: state.commandCenterLastSyncAt) { _, _ in reload() }
         .sheet(item: $attributing) { segment in
             let attribution = effective(for: segment.session)
             CallDetailSheet(
@@ -136,13 +138,13 @@ struct TeamsCallsView: View {
                 prefillProjectID: attribution.project?.id ?? "",
                 autoMatched: attribution.fromRule,
                 onSave: { customerID, projectID, scope in
-                    save(session: segment.session, customerID: customerID, projectID: projectID, scope: scope)
+                    try save(session: segment.session, customerID: customerID, projectID: projectID, scope: scope)
                 },
                 onClear: {
-                    save(session: segment.session, customerID: nil, projectID: nil, scope: .justThis)
+                    try save(session: segment.session, customerID: nil, projectID: nil, scope: .justThis)
                 },
                 onToggleIgnore: {
-                    setIgnored(session: segment.session, isIgnored: !segment.session.isIgnored)
+                    try setIgnored(session: segment.session, isIgnored: !segment.session.isIgnored)
                 }
             )
         }
@@ -345,14 +347,16 @@ struct TeamsCallsView: View {
 
     private func reload() {
         do {
-            let raw = try state.database.micSessions(in: scope.interval)
+            let interval = scope.interval
+            let raw = try state.database.micSessions(in: interval)
+            let matcher = try RuleMatcher.load(from: state.database)
             // Booked time lives under Meetings. Use the mic-extended event
             // bounds (so meeting over/undershoot is treated as part of the
             // meeting) and subtract that from each mic session. Whatever's
             // left is genuinely ad-hoc and shows up here.
             let rawEvents = try state.database.calendarEvents(in: scope.interval)
-            let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: raw)
-            let owned = CalendarEvent.meetingMicSessionIDs(events: events, micSessions: raw)
+            let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: raw, matcher: matcher)
+            let owned = CalendarEvent.meetingMicSessionIDs(events: events, micSessions: raw, matcher: matcher)
             var emitted: [CallSegment] = []
             var fullyHidden = 0
             for s in raw {
@@ -375,11 +379,14 @@ struct TeamsCallsView: View {
                 for (i, r) in remainders.enumerated() {
                     // Preserve the ongoing-session indicator only on the
                     // tail segment that actually reaches the live cursor.
-                    let isLive = s.endedAt == nil && r.end == sEnd
+                    let start = max(r.start, interval.start)
+                    let end = min(r.end, interval.end)
+                    guard end > start else { continue }
+                    let isLive = s.endedAt == nil && end == sEnd
                     emitted.append(CallSegment(
                         session: s,
-                        startedAt: r.start,
-                        endedAt: isLive ? nil : r.end,
+                        startedAt: start,
+                        endedAt: isLive ? nil : end,
                         segmentIndex: i
                     ))
                 }
@@ -388,7 +395,7 @@ struct TeamsCallsView: View {
             hiddenByCalendarOverlap = fullyHidden
             customers = try state.database.allCustomers()
             projects = try state.database.allProjects()
-            matcher = try RuleMatcher.load(from: state.database)
+            self.matcher = matcher
         } catch {
             loadError = error.localizedDescription
         }
@@ -406,37 +413,29 @@ struct TeamsCallsView: View {
         return (result.customer, result.project, result.matchingRule != nil)
     }
 
-    private func save(session: MicSession, customerID: String?, projectID: String?, scope: AttributionScope) {
-        do {
-            // Always pin this specific session.
-            try state.database.setMicSessionAttribution(
-                id: session.id,
-                customerID: customerID,
-                projectID: projectID
-            )
-            // Beyond "just this", also teach a Slack-channel rule (bounded by the
-            // session's day/week, or permanent) so future huddles in that channel
-            // auto-attribute. Only possible when the channel is known.
-            if scope.createsRule, let cid = customerID, let channel = session.slackChannel {
-                let (validFrom, validTo) = scope.bounds(reference: session.startedAt)
-                try state.database.upsertReplacingWindow(Rule(
-                    id: UUID().uuidString, customerID: cid, projectID: projectID,
-                    kind: .slackChannel, pattern: channel, priority: 100, createdAt: Date(),
-                    validFrom: validFrom, validTo: validTo))
-            }
-            reload()
-        } catch {
-            loadError = error.localizedDescription
+    private func save(session: MicSession, customerID: String?, projectID: String?, scope: AttributionScope) throws {
+        var rule: Rule?
+        // Beyond "just this", also teach a Slack-channel rule (bounded by the
+        // session's day/week, or permanent) so future huddles in that channel
+        // auto-attribute. Only possible when the channel is known.
+        if scope.createsRule, let cid = customerID, let channel = session.slackChannel {
+            let (validFrom, validTo) = scope.bounds(reference: session.startedAt)
+            rule = Rule(
+                id: UUID().uuidString, customerID: cid, projectID: projectID,
+                kind: .slackChannel, pattern: channel, priority: 100, createdAt: Date(),
+                validFrom: validFrom, validTo: validTo)
         }
+        // Pin the session and teach its optional rule together: neither should
+        // persist if the other write fails.
+        try state.database.setMicSessionAttribution(
+            id: session.id, customerID: customerID, projectID: projectID, rule: rule
+        )
+        reload()
     }
 
-    private func setIgnored(session: MicSession, isIgnored: Bool) {
-        do {
-            try state.database.setMicSessionIgnored(id: session.id, isIgnored: isIgnored)
-            reload()
-        } catch {
-            loadError = error.localizedDescription
-        }
+    private func setIgnored(session: MicSession, isIgnored: Bool) throws {
+        try state.database.setMicSessionIgnored(id: session.id, isIgnored: isIgnored)
+        reload()
     }
 }
 
@@ -450,9 +449,9 @@ private struct CallDetailSheet: View {
     /// True when the prefill came from a Slack-channel rule rather than a saved
     /// override — drives the "Save to pin it" hint.
     let autoMatched: Bool
-    let onSave: (String?, String?, AttributionScope) -> Void
-    let onClear: () -> Void
-    let onToggleIgnore: () -> Void
+    let onSave: (String?, String?, AttributionScope) throws -> Void
+    let onClear: () throws -> Void
+    let onToggleIgnore: () throws -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var selectedCustomerID: String = ""
@@ -611,8 +610,7 @@ private struct CallDetailSheet: View {
         HStack {
             Button("Cancel") { dismiss() }
             Button(session.isIgnored ? "Un-ignore" : "Ignore call") {
-                onToggleIgnore()
-                dismiss()
+                persist { try onToggleIgnore() }
             }
             .help(session.isIgnored
                   ? "Bring this call back into Review and the report."
@@ -620,18 +618,25 @@ private struct CallDetailSheet: View {
             Spacer()
             if session.customerID != nil {
                 Button("Clear", role: .destructive) {
-                    onClear()
-                    dismiss()
+                    persist { try onClear() }
                 }
             }
             Button("Save") {
                 let cid = selectedCustomerID.isEmpty ? nil : selectedCustomerID
                 let pid = selectedProjectID.isEmpty ? nil : selectedProjectID
-                onSave(cid, pid, scope)
-                dismiss()
+                persist { try onSave(cid, pid, scope) }
             }
             .keyboardShortcut(.defaultAction)
             .disabled(selectedCustomerID.isEmpty)
+        }
+    }
+
+    private func persist(_ action: () throws -> Void) {
+        do {
+            try action()
+            dismiss()
+        } catch {
+            loadError = error.localizedDescription
         }
     }
 

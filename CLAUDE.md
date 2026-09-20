@@ -61,7 +61,7 @@ Sources/Tidsmaskinen/
     ActivityMonitor.swift   # 15s sample loop; reads AppSettings; sleep/wake hooks; idle via CGEventSource
     Probes.swift            # AX focused-window title + AXDocument, allWindowTitles (every window of a pid, background-readable), Chrome URL via NSAppleScript, git root walker
   Storage/
-    Database.swift          # GRDB DatabaseQueue, migrations v1..v20, all CRUD + signal/meeting aggregations
+    Database.swift          # GRDB DatabaseQueue, versioned migrations, all CRUD + signal/meeting aggregations
     Models.swift            # ActivitySample, Customer, Project, Rule (+ slackChannel kind), CalendarEvent, MeetingSeriesAttribution, MicSession (+ slackChannel + parse helpers), ClaudeSession
   Attribution/
     RuleMatcher.swift       # samples: gitRepoSlug → gitRemoteHost → urlPath → urlHost → slackChannel → windowTitle → appBundleID. mic sessions: manual override → slackChannel rule. events: per-event ignore → per-event override → series ignore → series rule. Returns EventAttribution enum for events.
@@ -90,6 +90,8 @@ Never add `Co-Authored-By` trailers or AI-attribution footers (e.g. "🤖 Genera
 
 ## Conventions
 
+- **Compatibility policy (2026-09-19)**: prefer a clean change across the app and all callers over obsolete runtime compatibility branches. Preserve recorded history, manual assignments, and installed hooks; do not reset user data as cleanup. Keep schema migrations and historical readers where needed for retained data. New internal APIs should require the context they need instead of providing a fallback that silently restores incorrect old behavior.
+
 - **Settings**: anything user-tunable goes through `Settings.swift`. Add a key in `SettingsKey`, a default-respecting accessor in `AppSettings`, and a SwiftUI binding via `@AppStorage(SettingsKey.x)` in views.
 - **Schema changes**: register a new migration in `Database.swift` (`v4_…`, `v5_…`); never edit prior migrations. SQLite ALTER TABLE can add nullable columns and create indexes; can't add FK constraints — enforce those at the app level.
 - **Don't track ourselves**: `ActivityMonitor.captureNow()` skips when `frontmost.processIdentifier == ownPID`. Preserve this if you refactor.
@@ -115,7 +117,7 @@ Never add `Co-Authored-By` trailers or AI-attribution footers (e.g. "🤖 Genera
 
 ## Phases
 
-`plans/master-plan.md` defines the phased plan. Phases 1–4 (capture, rules + grid + Discover UX, MS Graph calendar) are landed, plus the post-Phase-4 attribution rework that swapped meeting-domain auto-matching for explicit per-series / per-event attribution (see "Meeting attribution" under Conventions). When you start work, check the master plan for current scope; do not invent new phases without updating the plan.
+`plans/master-plan.md` defines the phased plan. Capture, rules, reports, calendar sync, Claude/Codex hook ingestion, and explicit meeting attribution are implemented. The original master plan also contains unimplemented proposals (see its current-status section), plus the post-Phase-4 attribution rework that swapped meeting-domain auto-matching for explicit per-series / per-event attribution (see "Meeting attribution" under Conventions). When you start work, check the master plan for current scope; do not invent new phases without updating the plan.
 
 ## Releasing
 

@@ -38,10 +38,8 @@ struct SettingsView: View {
     @EnvironmentObject private var state: AppState
     @AppStorage(SettingsKey.sampleIntervalSeconds) private var sampleInterval: Int = 15
     @AppStorage(SettingsKey.idleThresholdSeconds) private var idleThreshold: Int = 300
-    @AppStorage(SettingsKey.trackIdleDuringMeetings) private var trackIdleDuringMeetings: Bool = true
     @AppStorage(SettingsKey.meetingRSVPFilter) private var rsvpFilterRaw: String = MeetingRSVPFilter.acceptedAndTentative.rawValue
-    @AppStorage(SettingsKey.verifyMeetingAttendance) private var verifyAttendance: Bool = false
-    @AppStorage(SettingsKey.parallelAttribution) private var parallelAttribution: Bool = true
+    @AppStorage(SettingsKey.graphPreset) private var graphPresetRaw: String = ""
     @AppStorage(SettingsKey.graphClientID) private var graphClientID: String = ""
     @AppStorage(SettingsKey.graphTenantID) private var graphTenantID: String = ""
     @AppStorage(SettingsKey.calendarAutoSyncMinutes) private var autoSyncMinutes: Int = 5
@@ -65,6 +63,7 @@ struct SettingsView: View {
 
     @State private var category: SettingsCategory = .general
     @State private var hiddenSignals: [HiddenSignal] = []
+    @State private var hiddenSignalsError: String?
     @State private var accessibilityTrusted: Bool = Probes.isAccessibilityTrusted(promptIfNeeded: false)
 
     var body: some View {
@@ -87,6 +86,10 @@ struct SettingsView: View {
         .onAppear { refreshCommandCenterCounts(); reloadHidden(); accessibilityTrusted = Probes.isAccessibilityTrusted(promptIfNeeded: false) }
         .onChange(of: state.commandCenterLastSyncAt) { _, _ in refreshCommandCenterCounts() }
         .onChange(of: category) { _, _ in reloadHidden() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            accessibilityTrusted = Probes.isAccessibilityTrusted(promptIfNeeded: false)
+            launchAtLogin = LoginItemManager.isEnabled
+        }
     }
 
     // MARK: - Two-pane scaffold
@@ -263,8 +266,7 @@ struct SettingsView: View {
         }
 
         Section("Attribution") {
-            Toggle("Parallel attribution", isOn: $parallelAttribution)
-            Text("Off: only one customer billed per minute. On: a meeting and concurrent coding both attribute to their own customers.")
+            Text("Meetings and concurrent work each contribute to their assigned customer. Reported hours can exceed elapsed time.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -288,9 +290,7 @@ struct SettingsView: View {
                     Text(filter.label).tag(filter)
                 }
             }
-            Toggle("Keep recording during meetings even when idle", isOn: $trackIdleDuringMeetings)
-            Toggle("Verify attendance from meeting-app activity", isOn: $verifyAttendance)
-            Text("Only events matching the RSVP filter are imported. Verification checks Zoom/Teams/Webex/Meet activity and adds a badge — it doesn't exclude events.")
+            Text("The RSVP filter controls which saved meetings appear in the app; changing it keeps your assignments. Meetings count for their booked duration even when you are idle; attendance is not verified.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Stepper(value: $autoSyncMinutes, in: 0...60, step: 1) {
@@ -376,6 +376,9 @@ struct SettingsView: View {
     @ViewBuilder
     private var ignoredPane: some View {
         Section("Ignored items") {
+            if let hiddenSignalsError {
+                Text(hiddenSignalsError).font(.caption).foregroundStyle(.red)
+            }
             if hiddenSignals.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Nothing ignored").font(.body.weight(.semibold))
@@ -400,7 +403,12 @@ struct SettingsView: View {
     }
 
     private func reloadHidden() {
-        hiddenSignals = (try? state.database.allHiddenSignals()) ?? []
+        do {
+            hiddenSignals = try state.database.allHiddenSignals()
+            hiddenSignalsError = nil
+        } catch {
+            hiddenSignalsError = error.localizedDescription
+        }
     }
 
     private func openAccessibilitySettings() {
@@ -414,7 +422,7 @@ struct SettingsView: View {
             try state.database.unhide(id: signal.id)
             reloadHidden()
         } catch {
-            // Non-fatal; surface nothing — the list simply won't change.
+            hiddenSignalsError = error.localizedDescription
         }
     }
 
@@ -460,7 +468,7 @@ struct SettingsView: View {
                     }
                     .font(.caption)
                 }
-                Text("Tokens are stored in the macOS Keychain and never leave this Mac.")
+                Text("Tokens are stored in the macOS Keychain and sent to the configured Command Center API to authenticate requests.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -561,13 +569,12 @@ struct SettingsView: View {
     private var presetBinding: Binding<GraphPreset> {
         Binding(
             get: {
-                let stored = AppSettings.defaults.string(forKey: SettingsKey.graphPreset)
-                if let stored, let preset = GraphPreset(rawValue: stored) { return preset }
+                if let preset = GraphPreset(rawValue: graphPresetRaw) { return preset }
                 let inferred = GraphPreset.match(clientID: AppSettings.graphClientID, tenantID: AppSettings.graphTenantID)
                 return inferred
             },
             set: { newValue in
-                AppSettings.defaults.set(newValue.rawValue, forKey: SettingsKey.graphPreset)
+                graphPresetRaw = newValue.rawValue
                 switch newValue {
                 case .custom:
                     break  // keep current text fields
