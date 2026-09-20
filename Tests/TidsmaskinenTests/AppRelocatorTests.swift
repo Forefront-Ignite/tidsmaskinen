@@ -50,6 +50,7 @@ final class AppRelocatorTests: XCTestCase {
             "rm -rf '/Users/o'\\''brien/Applications/Tidsmaskinen.app' "
             + "&& mv -f '/Applications/Tidsmaskinen.app' '/Users/o'\\''brien/Applications/Tidsmaskinen.app' "
             + "&& { chown \(getuid()):\(getgid()) '/Users/o'\\''brien/Applications'; "
+            + "chmod u+rwx '/Users/o'\\''brien/Applications'; "
             + "chown -R \(getuid()):\(getgid()) '/Users/o'\\''brien/Applications/Tidsmaskinen.app' || true; }"
         )
     }
@@ -59,6 +60,7 @@ final class AppRelocatorTests: XCTestCase {
         XCTAssertEqual(
             AppRelocator.moveCommand(from: target, to: target),
             "chown \(getuid()):\(getgid()) '/Users/me/Applications'; "
+            + "chmod u+rwx '/Users/me/Applications'; "
             + "chown -R \(getuid()):\(getgid()) '/Users/me/Applications/Tidsmaskinen.app'"
         )
     }
@@ -85,8 +87,45 @@ final class AppRelocatorTests: XCTestCase {
         XCTAssertFalse(AppRelocator.isNewer("0.3.15", than: "0.3.15"), "an equal version is not newer")
     }
 
-    func testNoVersionReportedForAnEmptyDestination() {
-        XCTAssertNil(AppRelocator.versionAtDestination(root.appendingPathComponent("Nothing.app")))
+    func testEmptyDestinationIsFreeToTake() {
+        XCTAssertNil(AppRelocator.destinationRefusal(at: root.appendingPathComponent("Nothing.app"),
+                                                     ourVersion: "1.0", ourBundleID: "se.forefront.tidsmaskinen"))
+    }
+
+    func testDestinationThatIsNotOurBundleIsNeverDeleted() throws {
+        // Root is about to rm -rf this path, so a same-named folder that isn't
+        // our app has to stop the move rather than be replaced.
+        let stranger = try makeBundle(in: root)
+        let refusal = AppRelocator.destinationRefusal(at: stranger, ourVersion: "1.0",
+                                                      ourBundleID: "se.forefront.tidsmaskinen")
+        XCTAssertEqual(refusal?.title, "Something else is already there")
+    }
+
+    func testNewerDestinationBlocksTheMove() throws {
+        let bundle = try makeBundle(in: root)
+        try writeInfoPlist(in: bundle, version: "0.3.15", bundleID: "se.forefront.tidsmaskinen")
+        // 0.3.9 is the older copy here; a lexical compare would get this backwards.
+        let refusal = AppRelocator.destinationRefusal(at: bundle, ourVersion: "0.3.9",
+                                                      ourBundleID: "se.forefront.tidsmaskinen")
+        XCTAssertEqual(refusal?.title, "A newer Tidsmaskinen is already installed")
+    }
+
+    func testOlderDestinationIsReplaceable() throws {
+        let bundle = try makeBundle(in: root)
+        try writeInfoPlist(in: bundle, version: "0.3.9", bundleID: "se.forefront.tidsmaskinen")
+        XCTAssertNil(AppRelocator.destinationRefusal(at: bundle, ourVersion: "0.3.15",
+                                                     ourBundleID: "se.forefront.tidsmaskinen"))
+    }
+
+    private func writeInfoPlist(in bundle: URL, version: String, bundleID: String) throws {
+        let contents = bundle.appendingPathComponent("Contents", isDirectory: true)
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        let plist: [String: Any] = ["CFBundleIdentifier": bundleID,
+                                    "CFBundleVersion": version,
+                                    "CFBundlePackageType": "APPL"]
+        try PropertyListSerialization
+            .data(fromPropertyList: plist, format: .xml, options: 0)
+            .write(to: contents.appendingPathComponent("Info.plist"))
     }
 
     func testAdminScriptEscapesShellCommandForAppleScript() {

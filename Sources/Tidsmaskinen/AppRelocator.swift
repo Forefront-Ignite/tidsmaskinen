@@ -46,20 +46,30 @@ enum AppRelocator {
     static func run() {
         finishPendingRelocation()
         guard isMovePending else { return releaseUpdater() }
-        let bundleURL = Bundle.main.bundleURL
-
-        let target = userApplications.appendingPathComponent(bundleURL.lastPathComponent)
-        // Duplicate bundle IDs make Launch Services pick a copy arbitrarily, so
-        // this older one can be opened by accident. Replacing the destination
-        // would then silently downgrade the install the user actually keeps.
-        if let newer = versionAtDestination(target), isNewer(newer, than: bundleVersion(of: Bundle.main)) {
-            showFailure("A newer Tidsmaskinen is already installed",
+        // Resolve symlinks before anything reaches a root shell: an
+        // ~/Applications symlinked to /Applications would otherwise compare as
+        // a different path, and the command would delete the running bundle
+        // and chown a system folder.
+        let bundleURL = Bundle.main.bundleURL.resolvingSymlinksInPath()
+        let parent = userApplications.resolvingSymlinksInPath()
+        let home = FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath()
+        guard parent.path.hasPrefix(home.path + "/") else {
+            showFailure("Can't move Tidsmaskinen automatically",
                         """
-                        Version \(newer) is in your home Applications folder, and this copy is older.
+                        Your Applications folder leads to \(parent.path), outside your home folder, so \
+                        moving there wouldn't stop the admin prompts.
 
-                        Quit this one and open the copy in ~/Applications instead. You can then drag \
-                        this older copy to the Trash.
+                        Move Tidsmaskinen by hand into a folder you own instead.
                         """)
+            return releaseUpdater()
+        }
+        let target = parent.appendingPathComponent(bundleURL.lastPathComponent)
+        // Root is about to delete whatever sits at the destination, so refuse
+        // anything that isn't plainly an older copy of this app.
+        if let refusal = destinationRefusal(at: target,
+                                            ourVersion: bundleVersion(of: Bundle.main),
+                                            ourBundleID: Bundle.main.bundleIdentifier) {
+            showFailure(refusal.title, refusal.detail)
             return releaseUpdater()
         }
 
@@ -97,10 +107,18 @@ enum AppRelocator {
             // privileged command goes on to complete, and treating that as a
             // cancellation would strand the login item and hooks on a bundle
             // that is no longer there.
-            if !moveLanded(from: bundleURL, to: target) {
-                if hadLoginItem { try? LoginItemManager.setEnabled(true) }
+            if !moveLanded(from: bundleURL, to: target, waitingUpTo: waitForMoveSeconds(after: error)) {
                 defer { releaseUpdater() }
-                if case RelocationError.cancelled = error { return }
+                if case RelocationError.cancelled = error {
+                    if hadLoginItem { try? LoginItemManager.setEnabled(true) }
+                    return
+                }
+                // The command may still be waiting on an approval and land
+                // after we give up. Leave the repair pending so the next launch
+                // repoints the login item and hooks either way; it is a no-op
+                // when nothing moved after all.
+                AppSettings.defaults.set(hadLoginItem, forKey: SettingsKey.relocationRestoreLoginItem)
+                if hadLoginItem { try? LoginItemManager.setEnabled(true) }
                 showFailure("Couldn't move Tidsmaskinen", error.localizedDescription)
                 return
             }
@@ -145,9 +163,12 @@ enum AppRelocator {
         // Sparkle checks the parent folder too, so a root-owned ~/Applications
         // would keep every update prompting even after the bundle itself is
         // ours. Not recursive: it must not touch other apps living there.
-        let own = "chown \(getuid()):\(getgid()) \(shellQuoted(target.deletingLastPathComponent().path)); "
+        let parent = shellQuoted(target.deletingLastPathComponent().path)
+        // chown alone leaves the mode bits, so a 0555 folder stays unwritable
+        // and Sparkle would keep asking. u+rwx is what its check actually reads.
+        let own = "chown \(getuid()):\(getgid()) \(parent); chmod u+rwx \(parent); "
             + "chown -R \(getuid()):\(getgid()) \(shellQuoted(target.path))"
-        if bundleURL.standardizedFileURL == target.standardizedFileURL { return own }
+        if bundleURL.resolvingSymlinksInPath() == target.resolvingSymlinksInPath() { return own }
         return "rm -rf \(shellQuoted(target.path)) && mv -f \(shellQuoted(bundleURL.path)) "
             + "\(shellQuoted(target.path)) && { \(own) || true; }"
     }
@@ -171,15 +192,62 @@ enum AppRelocator {
     }
 
     /// Whether the bundle actually arrived at `target` and left its old home.
-    private static func moveLanded(from bundleURL: URL, to target: URL) -> Bool {
-        guard bundleURL.standardizedFileURL != target.standardizedFileURL else { return true }
+    /// An unresolved outcome is re-checked for a few seconds: a privileged
+    /// command can outlive the Apple event that reported a timeout.
+    private static func moveLanded(from bundleURL: URL, to target: URL, waitingUpTo seconds: Int = 0) -> Bool {
+        guard bundleURL.resolvingSymlinksInPath() != target.resolvingSymlinksInPath() else { return true }
         let fm = FileManager.default
-        return fm.fileExists(atPath: target.path) && !fm.fileExists(atPath: bundleURL.path)
+        for attempt in 0...max(0, seconds) {
+            if fm.fileExists(atPath: target.path) && !fm.fileExists(atPath: bundleURL.path) { return true }
+            if attempt < seconds { Thread.sleep(forTimeInterval: 1) }
+        }
+        return false
     }
 
-    /// `CFBundleVersion` of an app bundle, or nil when there is nothing there.
-    static func versionAtDestination(_ target: URL) -> String? {
-        Bundle(url: target).map(bundleVersion(of:))
+    /// A reported timeout says nothing about whether the command ran, so give
+    /// it a moment to settle. A refusal is final and needs no wait.
+    private static func waitForMoveSeconds(after error: Error) -> Int {
+        if case RelocationError.cancelled = error { return 0 }
+        return 5
+    }
+
+    /// Why the destination must not be replaced, or nil when it is free to
+    /// take. Anything unrecognised is left alone rather than deleted.
+    static func destinationRefusal(at target: URL,
+                                   ourVersion: String,
+                                   ourBundleID: String?) -> (title: String, detail: String)? {
+        guard FileManager.default.fileExists(atPath: target.path) else { return nil }
+        guard let bundle = Bundle(url: target), bundle.bundleIdentifier == ourBundleID else {
+            return ("Something else is already there",
+                    """
+                    \(target.path) exists and isn't a copy of Tidsmaskinen, so it won't be touched.
+
+                    Move or rename it, then try again.
+                    """)
+        }
+        let theirs = bundleVersion(of: bundle)
+        if isNewer(theirs, than: ourVersion) {
+            return ("A newer Tidsmaskinen is already installed",
+                    """
+                    Version \(theirs) is in your home Applications folder, and this copy is older.
+
+                    Quit this one and open that copy instead. You can then drag this older copy to \
+                    the Trash.
+                    """)
+        }
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: ourBundleID ?? "")
+        if running.contains(where: {
+            $0.processIdentifier != ProcessInfo.processInfo.processIdentifier
+                && $0.bundleURL?.resolvingSymlinksInPath() == target.resolvingSymlinksInPath()
+        }) {
+            return ("That copy is already running",
+                    """
+                    Tidsmaskinen is already running from your home Applications folder.
+
+                    Use that copy, and drag this one to the Trash.
+                    """)
+        }
+        return nil
     }
 
     static func bundleVersion(of bundle: Bundle) -> String {
