@@ -143,10 +143,11 @@ final class WeeklyReportCallsTests: XCTestCase {
         ignored.isIgnored = true
         try db.upsertEvents([oneOff, occurrence, ignored])
 
-        for (interval, expected) in [(before, 1800.0), (after, 1800.0)] {
+        for interval in [before, after] {
             let listed = try XCTUnwrap(db.oneOffMeetingAggregates(in: interval).first)
             XCTAssertEqual(listed.id, "one-off")
-            XCTAssertEqual(listed.endAt.timeIntervalSince(listed.startAt), expected, accuracy: 1)
+            XCTAssertEqual(listed.startAt, oneOff.startAt)   // real bounds, so the row shows the true start
+            XCTAssertEqual(listed.seconds(within: interval), 1800, accuracy: 1)
         }
         XCTAssertEqual(try db.meetingSeriesAggregates(in: before).first?.totalSeconds ?? 0, 3600, accuracy: 1)
         XCTAssertEqual(try db.meetingSeriesAggregates(in: after).first?.totalSeconds ?? 0, 1800, accuracy: 1)

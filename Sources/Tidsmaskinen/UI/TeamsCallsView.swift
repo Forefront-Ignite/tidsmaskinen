@@ -359,6 +359,10 @@ struct TeamsCallsView: View {
             let owned = CalendarEvent.meetingMicSessionIDs(events: events, micSessions: raw, matcher: matcher)
             var emitted: [CallSegment] = []
             var fullyHidden = 0
+            // A rolling scope ends at "now" by construction (captured just
+            // before each `sEnd`), so it always reaches the live cursor; a day
+            // scope only does when that day is today.
+            let scopeReachesNow = !scope.isDay || interval.contains(Date())
             for s in raw {
                 let sStart = s.startedAt
                 let sEnd = s.endedAt ?? Date()
@@ -381,8 +385,9 @@ struct TeamsCallsView: View {
                     // tail segment that actually reaches the live cursor.
                     // Test the unclipped range: a rolling scope's `interval.end`
                     // was captured slightly before `sEnd`, so the clipped end
-                    // never equals the live cursor.
-                    let isLive = s.endedAt == nil && r.end == sEnd
+                    // never equals the live cursor. Under a past day the
+                    // segment is bounded by the day instead.
+                    let isLive = s.endedAt == nil && r.end == sEnd && scopeReachesNow
                     let start = max(r.start, interval.start)
                     let end = min(r.end, interval.end)
                     guard end > start else { continue }

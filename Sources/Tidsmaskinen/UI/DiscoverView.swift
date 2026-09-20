@@ -392,6 +392,9 @@ struct DiscoverView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
+            // A filter forces every host open, including attributed ones the
+            // eager loop in `reload` skips. Load on demand so the spinner resolves.
+            .onAppear { if hostPathDetails[host] == nil { loadPathDetails(forHost: host) } }
         }
     }
 
@@ -692,7 +695,7 @@ struct DiscoverView: View {
                 }
             }
             Spacer()
-            Text(formatHours(max(0, event.endAt.timeIntervalSince(event.startAt))))
+            Text(formatHours(event.seconds(within: scope.interval)))
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 70, alignment: .trailing)

@@ -400,6 +400,12 @@ struct CalendarEvent: Codable, FetchableRecord, MutablePersistableRecord, Identi
     /// platform taken during the booking — can't stretch it.
     ///
     /// Returns in-memory copies — does not mutate persisted rows.
+    /// Seconds of this event inside `interval`. Every surface that sums
+    /// meeting time for a period (Review, Discover, the report) clips this way.
+    func seconds(within interval: DateInterval) -> Double {
+        max(0, min(endAt, interval.end).timeIntervalSince(max(startAt, interval.start)))
+    }
+
     static func withMicOverrun(events: [CalendarEvent],
                                 micSessions: [MicSession],
                                 now: Date = Date(),

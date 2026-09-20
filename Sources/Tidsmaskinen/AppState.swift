@@ -42,6 +42,9 @@ final class AppState: ObservableObject {
     @Published private(set) var reviewBacklog: ReviewQueue.Rolling?
     private var reviewBacklogComputedAt: Date?
     private var reviewBacklogTask: Task<ReviewQueue.Rolling, Error>?
+    /// Bumped on invalidation so a computation started before a write can
+    /// neither be stored nor joined afterwards.
+    private var reviewBacklogGeneration = 0
     static let reviewBacklogMaxAge: TimeInterval = 5 * 60
 
     private var cancellables = Set<AnyCancellable>()
@@ -132,9 +135,13 @@ final class AppState: ObservableObject {
 
     // MARK: - Review backlog
 
-    /// Drops the cached rolling backlog so the next read recomputes it.
+    /// Drops the cached rolling backlog so the next read recomputes it. An
+    /// in-flight computation read the database before this write, so it is
+    /// detached from the cache too; its result is discarded when it lands.
     func invalidateReviewBacklog() {
         reviewBacklogComputedAt = nil
+        reviewBacklogGeneration += 1
+        reviewBacklogTask = nil
     }
 
     /// The rolling backlog, recomputed off the main actor when the cache is
@@ -145,6 +152,7 @@ final class AppState: ObservableObject {
             return cached
         }
         if let task = reviewBacklogTask { return try await task.value }
+        let generation = reviewBacklogGeneration
         let db = database
         let now = Date()
         let sampleInterval = AppSettings.sampleIntervalSeconds
@@ -158,8 +166,13 @@ final class AppState: ObservableObject {
                 minMinutes: minMinutes)
         }
         reviewBacklogTask = task
-        defer { reviewBacklogTask = nil }
+        defer { if reviewBacklogGeneration == generation { reviewBacklogTask = nil } }
         let result = try await task.value
+        guard reviewBacklogGeneration == generation else {
+            // A write landed while we computed. Recompute rather than hand
+            // back a snapshot that predates it.
+            return try await currentReviewBacklog()
+        }
         reviewBacklog = result
         reviewBacklogComputedAt = Date()
         return result

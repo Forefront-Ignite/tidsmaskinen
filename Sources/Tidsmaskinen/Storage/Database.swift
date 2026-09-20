@@ -1097,13 +1097,9 @@ struct AppDatabase {
         var id: String { seriesMasterID }
     }
 
-    /// Seconds of the event inside the interval. The Discover meeting lists
-    /// use overlap semantics and clipped totals, like Review and the report,
-    /// so a meeting crossing a day boundary agrees with them on both sides.
-    private static func clippedSeconds(_ event: CalendarEvent, in interval: DateInterval) -> Double {
-        max(0, min(event.endAt, interval.end).timeIntervalSince(max(event.startAt, interval.start)))
-    }
-
+    /// The Discover meeting lists use overlap semantics and totals clipped via
+    /// `CalendarEvent.seconds(within:)`, like Review and the report, so a
+    /// meeting crossing a day boundary agrees with them on both sides.
     private static func overlapping(_ interval: DateInterval) -> SQLExpression {
         CalendarEvent.Columns.endAt > interval.start && CalendarEvent.Columns.startAt < interval.end
     }
@@ -1131,7 +1127,7 @@ struct AppDatabase {
                 var counts: [String: Int] = [:]
                 for e in group { counts[e.subject, default: 0] += 1 }
                 let subject = counts.max { $0.value < $1.value }?.key ?? first.subject
-                let total = group.reduce(0.0) { $0 + Self.clippedSeconds($1, in: interval) }
+                let total = group.reduce(0.0) { $0 + $1.seconds(within: interval) }
                 return MeetingSeriesAggregate(
                     seriesMasterID: sid,
                     sampleSubject: subject.isEmpty ? "(no subject)" : subject,
@@ -1147,8 +1143,8 @@ struct AppDatabase {
 
     /// One-off meetings: events that are not part of a series. Ignored events
     /// are filtered out at the database level — Discover surfaces them under
-    /// the Ignored list instead. Bounds are clipped to the interval (in-memory
-    /// copies only), so a boundary-crossing meeting lists its in-range part.
+    /// the Ignored list instead. Rows keep their real bounds (the row shows
+    /// the true start time); callers clip the displayed duration.
     func oneOffMeetingAggregates(in interval: DateInterval) throws -> [CalendarEvent] {
         try dbQueue.read { db in
             try CalendarEvent
@@ -1158,12 +1154,6 @@ struct AppDatabase {
                 .order(CalendarEvent.Columns.startAt.desc)
                 .fetchAll(db)
                 .filter { AppSettings.meetingRSVPFilter.includes($0.rsvpStatus) }
-                .map { event in
-                    var clipped = event
-                    clipped.startAt = max(event.startAt, interval.start)
-                    clipped.endAt = min(event.endAt, interval.end)
-                    return clipped
-                }
         }
     }
 
@@ -1193,7 +1183,7 @@ struct AppDatabase {
                     scope: .event,
                     id: e.id,
                     label: e.subject.isEmpty ? "(no subject)" : e.subject,
-                    totalSeconds: Self.clippedSeconds(e, in: interval),
+                    totalSeconds: e.seconds(within: interval),
                     occurrenceCount: nil
                 )
             }
@@ -1213,7 +1203,7 @@ struct AppDatabase {
                     .filter { AppSettings.meetingRSVPFilter.includes($0.rsvpStatus) }
                 let firstSubject = occurrences.first?.subject ?? ""
                 let label = firstSubject.isEmpty ? "(no subject)" : firstSubject
-                let total = occurrences.reduce(0.0) { $0 + Self.clippedSeconds($1, in: interval) }
+                let total = occurrences.reduce(0.0) { $0 + $1.seconds(within: interval) }
                 rows.append(IgnoredMeetingAggregate(
                     scope: .series,
                     id: series.seriesMasterID,
