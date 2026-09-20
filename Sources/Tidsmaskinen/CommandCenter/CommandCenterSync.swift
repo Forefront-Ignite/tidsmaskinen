@@ -80,6 +80,10 @@ actor CommandCenterSync {
         }
 
         var keptClientIDs = Set(ccClients.map { $0.id })
+        // Parents present in the client feed were just reconciled from their
+        // authoritative record; an engagement's joined clientName may differ
+        // (e.g. a shorter display name) and must not overwrite it each pass.
+        let feedClientIDs = keptClientIDs
 
         // ---- Projects
         var keptProjectIDs = Set<String>()
@@ -103,19 +107,21 @@ actor CommandCenterSync {
             let parent: Customer
             if var found = parentLookup {
                 // An engagement may bring back a parent absent from the active-client feed.
-                var changed = false
-                if found.externalSource != ExternalSource.commandCenter.rawValue {
-                    found.externalSource = ExternalSource.commandCenter.rawValue
-                    changed = true
+                if !feedClientIDs.contains(clientId) {
+                    var changed = false
+                    if found.externalSource != ExternalSource.commandCenter.rawValue {
+                        found.externalSource = ExternalSource.commandCenter.rawValue
+                        changed = true
+                    }
+                    if let name = cc.clientName, found.name != name {
+                        found.name = name
+                        changed = true
+                    }
+                    found.externalSyncedAt = now
+                    try database.upsert(found)
+                    customerByExternalID[clientId] = found
+                    if changed { result.clientsUpdated += 1 }
                 }
-                if let name = cc.clientName, found.name != name {
-                    found.name = name
-                    changed = true
-                }
-                found.externalSyncedAt = now
-                try database.upsert(found)
-                customerByExternalID[clientId] = found
-                if changed { result.clientsUpdated += 1 }
                 parent = found
             } else if let clientName = cc.clientName {
                 let adopted = Customer(

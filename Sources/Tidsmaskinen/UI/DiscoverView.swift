@@ -877,6 +877,11 @@ struct DiscoverView: View {
 
     private func reload() {
         do {
+            // Invalidate cached path totals so they reflect new samples and
+            // syncs, but remember which hosts had detail loaded: an expanded
+            // host that is already attributed is skipped by the eager loop
+            // below and would otherwise show "Loading paths…" forever.
+            let previouslyLoaded = Set(hostPathDetails.keys)
             hostPathDetails.removeAll()
             let interval = scope.interval
             var baseAggs = try state.database.signalAggregates(
@@ -921,8 +926,11 @@ struct DiscoverView: View {
             //   - honor customer/unassigned filters that look at child rows
             for agg in baseAggs where agg.kind == .urlHost {
                 if hostPathDetails[agg.value] != nil { continue }
-                if matcher.attribute(kind: .urlHost, value: agg.value).customer != nil { continue }
-                if isHidden(agg) { continue }
+                let keepLoaded = previouslyLoaded.contains(agg.value) || expandedHosts.contains(agg.value)
+                if !keepLoaded {
+                    if matcher.attribute(kind: .urlHost, value: agg.value).customer != nil { continue }
+                    if isHidden(agg) { continue }
+                }
                 loadPathDetails(forHost: agg.value)
             }
         } catch {

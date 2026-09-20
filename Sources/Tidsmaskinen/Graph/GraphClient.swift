@@ -231,10 +231,13 @@ actor GraphClient {
         var nextURL = components.url
         var visited = Set<URL>()
         var allEvents: [CalendarEvent] = []
+        // 200 events per page; a 28-day window never needs anywhere near this.
+        let maxPages = 100
         while let url = nextURL {
             // Never send the bearer token to an untrusted pagination destination.
-            guard url.scheme == "https", url.host == "graph.microsoft.com",
+            guard url.scheme?.lowercased() == "https", url.host?.lowercased() == "graph.microsoft.com",
                   url.port == nil || url.port == 443,
+                  visited.count < maxPages,
                   visited.insert(url).inserted else {
                 throw GraphError.calendarFetchFailed("Invalid or repeated calendar page URL.")
             }
@@ -246,14 +249,14 @@ actor GraphClient {
                 throw GraphError.calendarFetchFailed(Self.errorBody(data))
             }
             let parsed = try JSONDecoder().decode(GraphCalendarViewResponse.self, from: data)
-            for event in parsed.value {
+            for event in parsed.value where event.isCancelled != true {
+                // Cancelled events are dropped above before validation: one with
+                // unparseable dates must not poison every future sync.
                 guard let converted = event.toCalendarEvent(userDomain: userDomain) else {
                     // A partial snapshot would make CalendarSync delete valid local rows.
                     throw GraphError.calendarFetchFailed("An event has invalid start/end dates.")
                 }
-                if event.isCancelled != true {
-                    allEvents.append(converted)
-                }
+                allEvents.append(converted)
             }
             if let link = parsed.nextLink {
                 guard let url = URL(string: link) else {

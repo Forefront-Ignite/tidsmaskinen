@@ -133,14 +133,25 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${VERSION#v}"
-          git fetch origin main
-          git checkout -B appcast-update origin/main
-          ./bin/update-appcast.sh "$VERSION" "$SIG_LINE"
           git config user.name  "tidsmaskinen-release-bot"
           git config user.email "tidsmaskinen-release-bot@users.noreply.github.com"
-          git add appcast.xml
-          git commit -m "release: appcast for v$VERSION"
-          git push origin HEAD:main
+          # The release asset is already published, so a rejected push here
+          # would leave installed apps never offered the update. Rebuild the
+          # appcast on a fresh main and retry if someone pushed in between.
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git checkout -B appcast-update origin/main
+            ./bin/update-appcast.sh "$VERSION" "$SIG_LINE"
+            git add appcast.xml
+            git commit -m "release: appcast for v$VERSION"
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "appcast push rejected (attempt $attempt); retrying" >&2
+            sleep 5
+          done
+          echo "Failed to publish appcast.xml after 3 attempts" >&2
+          exit 1
 
       - name: Cleanup signing keychain
         if: always()

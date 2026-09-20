@@ -379,10 +379,13 @@ struct TeamsCallsView: View {
                 for (i, r) in remainders.enumerated() {
                     // Preserve the ongoing-session indicator only on the
                     // tail segment that actually reaches the live cursor.
+                    // Test the unclipped range: a rolling scope's `interval.end`
+                    // was captured slightly before `sEnd`, so the clipped end
+                    // never equals the live cursor.
+                    let isLive = s.endedAt == nil && r.end == sEnd
                     let start = max(r.start, interval.start)
                     let end = min(r.end, interval.end)
                     guard end > start else { continue }
-                    let isLive = s.endedAt == nil && end == sEnd
                     emitted.append(CallSegment(
                         session: s,
                         startedAt: start,

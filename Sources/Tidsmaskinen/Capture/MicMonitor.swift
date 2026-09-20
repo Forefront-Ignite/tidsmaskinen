@@ -112,6 +112,10 @@ final class MicMonitor {
         guard timer == nil else { return }
         if let other = Self.active, other !== self { return }
         Self.active = self
+        // A wake notification missed between stop() and start() (aborted
+        // sleep, observer torn down mid-cycle) must not leave polling
+        // suppressed forever.
+        isSleeping = false
         let notifications = NSWorkspace.shared.notificationCenter
         notifications.addObserver(self, selector: #selector(handleSleep), name: NSWorkspace.willSleepNotification, object: nil)
         notifications.addObserver(self, selector: #selector(handleWake), name: NSWorkspace.didWakeNotification, object: nil)

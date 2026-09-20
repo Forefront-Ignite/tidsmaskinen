@@ -25,6 +25,8 @@ private final class GraphFixtureProtocol: URLProtocol, @unchecked Sendable {
             body = #"{"value":[{"id":"second","start":{"dateTime":"invalid"},"end":{"dateTime":"invalid"}}]}"#
         } else if scenario == "Bearer tentative" {
             body = #"{"value":[{"id":"tentative","start":{"dateTime":"2026-09-14T09:00:00Z"},"end":{"dateTime":"2026-09-14T10:00:00Z"},"responseStatus":{"response":"tentativelyAccepted"}}]}"#
+        } else if scenario == "Bearer cancelled-invalid" {
+            body = #"{"value":[{"id":"cancelled","isCancelled":true,"start":{"dateTime":"invalid"},"end":{"dateTime":"invalid"}}]}"#
         } else if scenario == "Bearer cancelled" {
             body = #"{"value":[{"id":"cancelled","isCancelled":true,"start":{"dateTime":"2026-09-14T09:00:00Z"},"end":{"dateTime":"2026-09-14T10:00:00Z"},"responseStatus":{"response":"accepted"}}]}"#
         } else {
@@ -69,6 +71,13 @@ final class GraphClientTests: XCTestCase {
 
     func testCancelledMeetingsAreExcluded() async throws {
         let events = try await client("cancelled").fetchCalendarView(start: start, end: end)
+        XCTAssertTrue(events.isEmpty)
+    }
+
+    /// A cancelled event is dropped before validation, so one with unparseable
+    /// dates cannot make every future sync fail.
+    func testCancelledMeetingWithInvalidDatesDoesNotPoisonSync() async throws {
+        let events = try await client("cancelled-invalid").fetchCalendarView(start: start, end: end)
         XCTAssertTrue(events.isEmpty)
     }
 

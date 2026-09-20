@@ -31,10 +31,15 @@ final class HookIngester {
                 withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700])
             let url = dir.appendingPathComponent(Self.eventLogFilename)
+            // Create-or-open atomically so a concurrent first hook can never
+            // truncate a log we just created. A failure here is not fatal: the
+            // watcher, the poll timer and sleep finalization still install, and
+            // reads recover once the file becomes accessible.
             let fd = open(url.path, O_WRONLY | O_CREAT, 0o600)
-            guard fd >= 0 else { return }
-            _ = fchmod(fd, 0o600)
-            close(fd)
+            if fd >= 0 {
+                _ = fchmod(fd, 0o600)
+                close(fd)
+            }
             self.fileURL = url
 
             attachWatcher()

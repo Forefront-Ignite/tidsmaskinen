@@ -61,15 +61,17 @@ enum MeetingRSVPFilter: String, CaseIterable, Identifiable {
     case acceptedAndTentative
     case all
 
-    func includes(_ status: String) -> Bool {
+    /// RSVP states shown under this filter; nil means every state.
+    var includedStatuses: [String]? {
         switch self {
-        case .acceptedOnly:
-            return status == "accepted" || status == "organizer"
-        case .acceptedAndTentative:
-            return status == "accepted" || status == "organizer" || status == "tentativelyAccepted"
-        case .all:
-            return true
+        case .acceptedOnly: return ["accepted", "organizer"]
+        case .acceptedAndTentative: return ["accepted", "organizer", "tentativelyAccepted"]
+        case .all: return nil
         }
+    }
+
+    func includes(_ status: String) -> Bool {
+        includedStatuses?.contains(status) ?? true
     }
 
     var id: String { rawValue }
@@ -77,7 +79,7 @@ enum MeetingRSVPFilter: String, CaseIterable, Identifiable {
         switch self {
         case .acceptedOnly: return "Accepted only"
         case .acceptedAndTentative: return "Accepted + Tentative"
-        case .all: return "All invites (incl. declined)"
+        case .all: return "All invites (declined shown, never billed)"
         }
     }
 }

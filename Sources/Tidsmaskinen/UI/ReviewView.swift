@@ -96,8 +96,12 @@ struct ReviewView: View {
         guard let target = state.reviewTargetWeekStart else { return false }
         initialLookupTask?.cancel()
         state.reviewTargetWeekStart = nil
+        let willTriggerReload = target != weekStart || selectedDay != nil
         selectedDay = nil
         if target != weekStart { weekStart = target }
+        // The cancelled lookup was the only pending load. When neither state
+        // change above fires an onChange reload, load the target week here.
+        if !willTriggerReload { reload() }
         return true
     }
 
@@ -155,9 +159,9 @@ struct ReviewView: View {
                 // oldest week that still has open items — same window the
                 // menu-bar glance scans — so you clear the backlog tail first.
                 // An explicit target (from the menu bar) already picked the
-                // week, so just load it.
-                if hadTarget { reload() } else { landOnOldestOpenWeek() }
-            } else {
+                // week and `consumeReviewTarget` loaded it.
+                if !hadTarget { landOnOldestOpenWeek() }
+            } else if !hadTarget {
                 reload()
             }
         }
@@ -692,15 +696,19 @@ struct ReviewView: View {
             // Pin this session; if it carries a Slack channel, also teach a
             // channel rule (bounded under "Just this period", permanent under
             // "Always") so future huddles in that channel auto-attribute.
+            // Both writes share one transaction, so a failed rule insert
+            // never leaves the session pinned on its own.
+            var rule: Rule?
+            if let channel = session.slackChannel {
+                let (validFrom, validTo) = scopeBounds
+                rule = Rule(
+                    id: UUID().uuidString, customerID: customerID, projectID: projectID,
+                    kind: .slackChannel, pattern: channel, priority: 100, createdAt: Date(),
+                    validFrom: validFrom, validTo: validTo)
+            }
             if run({
-                try state.database.setMicSessionAttribution(id: session.id, customerID: customerID, projectID: projectID)
-                if let channel = session.slackChannel {
-                    let (validFrom, validTo) = scopeBounds
-                    try state.database.upsertReplacingWindow(Rule(
-                        id: UUID().uuidString, customerID: customerID, projectID: projectID,
-                        kind: .slackChannel, pattern: channel, priority: 100, createdAt: Date(),
-                        validFrom: validFrom, validTo: validTo))
-                }
+                try state.database.setMicSessionAttribution(
+                    id: session.id, customerID: customerID, projectID: projectID, rule: rule)
             }) {
                 resolved[unit.id] = attrLabel(customerID, projectID); advance()
             }

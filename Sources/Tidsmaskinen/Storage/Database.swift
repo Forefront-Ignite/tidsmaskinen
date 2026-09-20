@@ -671,10 +671,14 @@ struct AppDatabase {
     func customer(externalSource: ExternalSource, externalID: String) throws -> Customer? {
         let sources = externalSource == .commandCenter ? [externalSource.rawValue, ExternalSource.commandCenterArchived.rawValue] : [externalSource.rawValue]
         return try dbQueue.read { db in
-            try Customer
+            // Earlier syncs could create a fresh active row beside an archived
+            // one for the same external ID. Prefer the active row so the sync
+            // never resurrects the archived twin next to it.
+            let rows = try Customer
                 .filter(sources.contains(Customer.Columns.externalSource)
                         && Customer.Columns.externalID == externalID)
-                .fetchOne(db)
+                .fetchAll(db)
+            return rows.first { $0.externalSource == externalSource.rawValue } ?? rows.first
         }
     }
 
@@ -790,10 +794,13 @@ struct AppDatabase {
     func project(externalSource: ExternalSource, externalID: String) throws -> Project? {
         let sources = externalSource == .commandCenter ? [externalSource.rawValue, ExternalSource.commandCenterArchived.rawValue] : [externalSource.rawValue]
         return try dbQueue.read { db in
-            try Project
+            // See `customer(externalSource:externalID:)`: prefer an active row
+            // over an archived twin left behind by an earlier sync.
+            let rows = try Project
                 .filter(sources.contains(Project.Columns.externalSource)
                         && Project.Columns.externalID == externalID)
-                .fetchOne(db)
+                .fetchAll(db)
+            return rows.first { $0.externalSource == externalSource.rawValue } ?? rows.first
         }
     }
 
@@ -886,19 +893,29 @@ struct AppDatabase {
         }
     }
 
+    /// Rows visible under the current RSVP filter. Excluded RSVP states stay
+    /// stored (so their assignments survive filter changes) but are hidden.
+    private func visibleCalendarEvents() -> QueryInterfaceRequest<CalendarEvent> {
+        guard let statuses = AppSettings.meetingRSVPFilter.includedStatuses else {
+            return CalendarEvent.all()
+        }
+        return CalendarEvent.filter(statuses.contains(CalendarEvent.Columns.rsvpStatus))
+    }
+
     func recentCalendarEvents(limit: Int = 50) throws -> [CalendarEvent] {
         try dbQueue.read { db in
-            Array(try CalendarEvent
+            try visibleCalendarEvents()
                 .order(CalendarEvent.Columns.startAt.desc)
+                .limit(limit)
                 .fetchAll(db)
-                .filter { AppSettings.meetingRSVPFilter.includes($0.rsvpStatus) }
-                .prefix(limit))
         }
     }
 
+    /// Counts the meetings visible under the current RSVP filter, matching
+    /// `recentCalendarEvents`.
     func calendarEventCount() throws -> Int {
         try dbQueue.read { db in
-            try CalendarEvent.fetchCount(db)
+            try visibleCalendarEvents().fetchCount(db)
         }
     }
 

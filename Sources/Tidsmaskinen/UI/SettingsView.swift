@@ -290,7 +290,7 @@ struct SettingsView: View {
                     Text(filter.label).tag(filter)
                 }
             }
-            Text("The RSVP filter controls which saved meetings appear in the app; changing it keeps your assignments. Meetings count for their booked duration even when you are idle; attendance is not verified.")
+            Text("The RSVP filter controls which saved meetings appear in the app; changing it keeps your assignments. Declined meetings are shown under \"All invites\" but never bill. Meetings count for their booked duration even when you are idle; attendance is not verified.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Stepper(value: $autoSyncMinutes, in: 0...60, step: 1) {
