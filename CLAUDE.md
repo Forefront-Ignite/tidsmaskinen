@@ -55,6 +55,7 @@ security set-key-partition-list -S apple-tool:,apple:,codesign: \
 ```
 Sources/Tidsmaskinen/
   App.swift                 # @main, MenuBarExtra + Window scenes, AppDelegate sets .accessory policy
+  AppRelocator.swift        # offers to move a release build out of /Applications to ~/Applications so Sparkle updates need no admin
   AppState.swift            # @MainActor ObservableObject; owns AppDatabase + ActivityMonitor
   Settings.swift            # AppSettings (read) + SettingsKey constants; @AppStorage in views
   Capture/
@@ -131,7 +132,7 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-The `.github/workflows/release.yml` workflow then signs (Developer ID), notarizes, packages, and publishes a GitHub Release with `Tidsmaskinen.zip` attached, and prepends a new `<item>` to `appcast.xml` on `main`. Installed apps pick up the new version on their next Sparkle check (daily) or when the user clicks "Check for Updates" in the menu bar.
+The `.github/workflows/release.yml` workflow then signs (Developer ID), notarizes, packages, publishes a GitHub Release with `Tidsmaskinen.zip` attached, deploys `appcast.xml` plus the zip to GitHub Pages, verifies the zip is reachable, and only then prepends the new `<item>` to `appcast.xml` on `main`. Installed apps pick up the new version on their next Sparkle check (daily) or when the user clicks "Check for Updates" in the menu bar.
 
 `bin/make-app.sh` keeps its local-dev defaults (self-signed, no notarization, no Sparkle keys) and only switches behaviour when these env vars are set:
 
@@ -150,7 +151,11 @@ One-time setup (already done if the workflow has run successfully):
 2. **App Store Connect API key** (Developer role) → store contents as `APPLE_API_KEY_P8` plus `APPLE_API_KEY_ID` and `APPLE_API_ISSUER_ID` secrets.
 3. **Sparkle EdDSA key pair** — run `.build/artifacts/sparkle/Sparkle/bin/generate_keys` once (private key lands in the login keychain). Re-export with `generate_keys -x sparkle_ed_private_key`, base64-encode the file, store as the `SPARKLE_ED_PRIVATE_KEY` secret. The matching public key (printed by `generate_keys`) goes into the `SPARKLE_PUBLIC_ED_KEY` GitHub Variable.
 
-`appcast.xml` lives at the repo root and is served via `https://raw.githubusercontent.com/Forefront-Ignite/tidsmaskinen/main/appcast.xml`. The release workflow rewrites it; don't hand-edit unless rolling back a release.
+`appcast.xml` lives at the repo root; the release workflow rewrites it. Don't hand-edit it. Rolling back means cutting a new, higher version: Sparkle never downgrades, and only the newest zip is hosted.
+
+**Update feed hosting.** Installed apps read `https://forefront-ignite.github.io/tidsmaskinen/appcast.xml` and download `…/releases/v<version>/Tidsmaskinen.zip` from the same GitHub Pages site (`SUFeedURL` default in `bin/make-app.sh`, enclosure base in `bin/update-appcast.sh`). Pages stays public even when the repository is private, which is why the feed no longer points at `raw.githubusercontent.com` or at GitHub Release assets — both 404 anonymously on a private repo. Each Pages deploy replaces the whole site, so only the newest zip is hosted; Sparkle only ever downloads the top item. Setup that already exists and must survive: Pages source = "GitHub Actions" (`gh api -X POST repos/Forefront-Ignite/tidsmaskinen/pages -f build_type=workflow`), and the auto-created `github-pages` environment must allow deployments from `v*` tags (its default only allows `main`). GitHub documents that making a repo private unpublishes its Pages site; after flipping, check `gh api repos/Forefront-Ignite/tidsmaskinen/pages` and, if it is gone, re-enable it with the same command and cut a new tag so the site is redeployed. Builds ≤ 0.3.15 still read the old raw URL, which only works while the repo is public.
+
+**Install location.** Sparkle updates without an admin prompt only when the bundle *and its parent folder* are writable by the user and the bundle is user-owned. `/Applications` is `root:admin`, so on standard-user Macs (Admin By Request) every update prompted. Users are told to install to `~/Applications` (README, release notes), and `AppRelocator.run()` (called from `AppDelegate`) offers to move a release build whose location would need admin (`updatesNeedAdmin` mirrors Sparkle's check) via `do shell script … with administrator privileges` — the `system.privilege.admin` right, which ABR wraps — then relaunches and re-registers the login item. Dev builds have no `SUFeedURL` and are never moved. "Don't ask again" is `defaults delete se.forefront.tidsmaskinen relocationPromptSuppressed` to undo.
 
 ## What this app deliberately does NOT do
 
