@@ -81,6 +81,17 @@ final class AppRelocatorTests: XCTestCase {
             URL(fileURLWithPath: "/Users/me/Downloads/locked/Tidsmaskinen.app")))
         XCTAssertFalse(AppRelocator.isInSystemApplications(
             URL(fileURLWithPath: "/Applications")), "the folder itself is not an install")
+        // A bundle reached through a symlink still resolves to its real home,
+        // and run() hands root that resolved path, never the link.
+        let link = FileManager.default.temporaryDirectory
+            .appendingPathComponent("applink-\(UUID().uuidString)")
+        try? FileManager.default.createSymbolicLink(
+            at: link, withDestinationURL: URL(fileURLWithPath: "/Applications"))
+        defer { try? FileManager.default.removeItem(at: link) }
+        let viaLink = link.appendingPathComponent("Tidsmaskinen.app")
+        XCTAssertTrue(AppRelocator.isInSystemApplications(viaLink))
+        XCTAssertEqual(viaLink.resolvingSymlinksInPath().path, "/Applications/Tidsmaskinen.app",
+                       "the resolved path is what gets elevated, so it must be the real one")
     }
 
     func testVersionComparisonIsNumericNotLexical() {

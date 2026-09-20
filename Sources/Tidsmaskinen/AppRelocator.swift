@@ -66,9 +66,20 @@ enum AppRelocator {
     /// world-writable ones (`/Applications/Hearthstone` is 0777), and an
     /// ancestor the user can replace puts the whole path back in their hands.
     /// An install anywhere else can be moved by its owner without any rights.
+    ///
+    /// The comparison is against the literal `/Applications`, and that path
+    /// must be a real directory rather than a symlink standing in for one:
+    /// the entire trust argument is that `root:admin` owns it. `run()` passes
+    /// the resolved bundle path, so root is handed the real location and never
+    /// a symlink the user could re-point afterwards.
     static func isInSystemApplications(_ bundleURL: URL) -> Bool {
-        bundleURL.resolvingSymlinksInPath().deletingLastPathComponent()
-            == systemApplications.resolvingSymlinksInPath()
+        let fm = FileManager.default
+        let path = systemApplications.path
+        var isDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue,
+              (try? fm.destinationOfSymbolicLink(atPath: path)) == nil
+        else { return false }
+        return bundleURL.resolvingSymlinksInPath().deletingLastPathComponent().path == path
     }
 
     /// Call once the app has finished launching. Finishes a move made on the
