@@ -50,8 +50,22 @@ enum AppRelocator {
             // Gatekeeper runs quarantined apps from a read-only mount; that
             // path can't be moved. The user has to drag the app out first.
             && !bundleURL.path.contains("/AppTranslocation/")
+            && isInSystemApplications(bundleURL)
             && updatesNeedAdmin(bundleURL)
             && !AppSettings.relocationPromptSuppressed
+    }
+
+    static let systemApplications = URL(fileURLWithPath: "/Applications", isDirectory: true)
+
+    /// Whether the bundle sits inside the system `/Applications`. Only that
+    /// case earns an elevated delete: the folder is `root:admin`, so nothing
+    /// running as the user can swap a component of the path between this check
+    /// and the command. An install anywhere else can be moved by its owner
+    /// without any rights, and elevating there would hand root a path the user
+    /// controls.
+    static func isInSystemApplications(_ bundleURL: URL) -> Bool {
+        bundleURL.resolvingSymlinksInPath().path
+            .hasPrefix(systemApplications.resolvingSymlinksInPath().path + "/")
     }
 
     /// Call once the app has finished launching. Finishes a move made on the
@@ -127,14 +141,25 @@ enum AppRelocator {
             return releaseUpdater()
         }
 
+        // Record the repair *before* elevating. If the process dies between a
+        // successful delete and writing this, the next launch would otherwise
+        // never repoint the login item or the coding-agent hooks. It is a
+        // no-op when nothing ends up changing.
+        AppSettings.defaults.set(hadLoginItem, forKey: SettingsKey.relocationRestoreLoginItem)
+
         // All root has left to do is drop the old copy, and only because
         // removing an entry from /Applications needs write access there.
+        // Re-checked here because the guard above ran before the prompt.
         do {
+            guard isInSystemApplications(bundleURL) else {
+                throw RelocationError.failed("Tidsmaskinen isn't in /Applications any more.")
+            }
             try runAsAdmin(removeCommand(for: bundleURL))
         } catch {
             // Nothing was handed over yet, so undo our copy rather than leave
             // two installs behind. We own it, so this needs no rights either.
             try? FileManager.default.removeItem(at: target)
+            AppSettings.defaults.removeObject(forKey: SettingsKey.relocationRestoreLoginItem)
             if hadLoginItem { try? LoginItemManager.setEnabled(true) }
             defer { releaseUpdater() }
             if case RelocationError.cancelled = error { return }
@@ -142,7 +167,6 @@ enum AppRelocator {
             return
         }
 
-        AppSettings.defaults.set(hadLoginItem, forKey: SettingsKey.relocationRestoreLoginItem)
         do {
             try relaunch(target)
         } catch {

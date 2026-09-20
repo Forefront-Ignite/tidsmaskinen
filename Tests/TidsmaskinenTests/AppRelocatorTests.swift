@@ -52,6 +52,22 @@ final class AppRelocatorTests: XCTestCase {
         XCTAssertFalse(command.contains("mv "), command)
     }
 
+    func testOnlyTheSystemApplicationsFolderEarnsAnElevatedDelete() {
+        // /Applications is root:admin, so its entries can't be swapped by
+        // anything running as the user. Elevating for a path the user controls
+        // would hand root a target they can redirect.
+        XCTAssertTrue(AppRelocator.isInSystemApplications(
+            URL(fileURLWithPath: "/Applications/Tidsmaskinen.app")))
+        XCTAssertTrue(AppRelocator.isInSystemApplications(
+            URL(fileURLWithPath: "/Applications/Utilities/Tidsmaskinen.app")))
+        XCTAssertFalse(AppRelocator.isInSystemApplications(
+            URL(fileURLWithPath: "/Users/me/Applications/Tidsmaskinen.app")))
+        XCTAssertFalse(AppRelocator.isInSystemApplications(
+            URL(fileURLWithPath: "/Users/me/Downloads/locked/Tidsmaskinen.app")))
+        XCTAssertFalse(AppRelocator.isInSystemApplications(
+            URL(fileURLWithPath: "/Applications")), "the folder itself is not an install")
+    }
+
     func testVersionComparisonIsNumericNotLexical() {
         // Lexical ordering would call 0.3.9 newer than 0.3.15 and let an older
         // copy overwrite the install the user actually keeps.
