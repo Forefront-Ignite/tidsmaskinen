@@ -3,10 +3,7 @@ import Foundation
 enum SettingsKey {
     static let sampleIntervalSeconds = "sampleIntervalSeconds"
     static let idleThresholdSeconds = "idleThresholdSeconds"
-    static let trackIdleDuringMeetings = "trackIdleDuringMeetings"
     static let meetingRSVPFilter = "meetingRSVPFilter"
-    static let verifyMeetingAttendance = "verifyMeetingAttendance"
-    static let parallelAttribution = "parallelAttribution"
     static let graphClientID = "graphClientID"
     static let graphTenantID = "graphTenantID"
     static let calendarAutoSyncMinutes = "calendarAutoSyncMinutes"
@@ -64,12 +61,25 @@ enum MeetingRSVPFilter: String, CaseIterable, Identifiable {
     case acceptedAndTentative
     case all
 
+    /// RSVP states shown under this filter; nil means every state.
+    var includedStatuses: [String]? {
+        switch self {
+        case .acceptedOnly: return ["accepted", "organizer"]
+        case .acceptedAndTentative: return ["accepted", "organizer", "tentativelyAccepted"]
+        case .all: return nil
+        }
+    }
+
+    func includes(_ status: String) -> Bool {
+        includedStatuses?.contains(status) ?? true
+    }
+
     var id: String { rawValue }
     var label: String {
         switch self {
         case .acceptedOnly: return "Accepted only"
         case .acceptedAndTentative: return "Accepted + Tentative"
-        case .all: return "All invites (incl. declined)"
+        case .all: return "All invites (declined shown, never billed)"
         }
     }
 }
@@ -92,26 +102,12 @@ enum AppSettings {
         return v <= 0 ? 300 : v
     }
 
-    static var trackIdleDuringMeetings: Bool {
-        if defaults.object(forKey: SettingsKey.trackIdleDuringMeetings) == nil { return true }
-        return defaults.bool(forKey: SettingsKey.trackIdleDuringMeetings)
-    }
-
     static var meetingRSVPFilter: MeetingRSVPFilter {
         guard let raw = defaults.string(forKey: SettingsKey.meetingRSVPFilter),
               let value = MeetingRSVPFilter(rawValue: raw) else {
             return .acceptedAndTentative
         }
         return value
-    }
-
-    static var verifyMeetingAttendance: Bool {
-        defaults.bool(forKey: SettingsKey.verifyMeetingAttendance)
-    }
-
-    static var parallelAttribution: Bool {
-        if defaults.object(forKey: SettingsKey.parallelAttribution) == nil { return true }
-        return defaults.bool(forKey: SettingsKey.parallelAttribution)
     }
 
     // MARK: Graph

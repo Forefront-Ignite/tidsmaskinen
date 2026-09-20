@@ -28,6 +28,7 @@ struct ReviewView: View {
     @State private var cursor: Int = 0          // position in the snapshot
     @State private var loadError: String?
     @State private var didInitialLoad = false
+    @State private var initialLookupTask: Task<Void, Never>?
     @State private var scope: AttrScope = .always
     @State private var weekStart: Date = Calendar.weekStartingMonday().currentWeekInterval().start
     @State private var selectedDay: Date? = nil    // nil = whole selected week
@@ -93,9 +94,14 @@ struct ReviewView: View {
     @discardableResult
     private func consumeReviewTarget() -> Bool {
         guard let target = state.reviewTargetWeekStart else { return false }
+        initialLookupTask?.cancel()
         state.reviewTargetWeekStart = nil
+        let willTriggerReload = target != weekStart || selectedDay != nil
         selectedDay = nil
         if target != weekStart { weekStart = target }
+        // The cancelled lookup was the only pending load. When neither state
+        // change above fires an onChange reload, load the target week here.
+        if !willTriggerReload { reload() }
         return true
     }
 
@@ -104,26 +110,25 @@ struct ReviewView: View {
     /// everything is clean). Runs off the main actor; if `weekStart` ends up
     /// changing, the onChange handler does the reload.
     private func landOnOldestOpenWeek() {
-        let db = state.database
-        let now = Date()
-        let sampleInterval = AppSettings.sampleIntervalSeconds
-        let idleMinutes = AppSettings.claudeIdleThresholdMinutes
-        let reviewMin = AppSettings.reviewMinMinutes
-        Task { @MainActor in
-            let oldest = await Task.detached(priority: .userInitiated) { () -> Date? in
-                (try? ReviewQueue.rolling(
-                    database: db, now: now,
-                    weeksBack: ReviewQueue.defaultBacklogWeeksBack,
-                    sampleIntervalSeconds: sampleInterval,
-                    idleThresholdSeconds: TimeInterval(idleMinutes * 60),
-                    minMinutes: reviewMin))?.oldestOpenWeekStart
-            }.value
+        let lookupPeriod = period
+        initialLookupTask?.cancel()
+        initialLookupTask = Task { @MainActor in
+            // Same cached backlog the menu-bar glance shows.
+            let oldest = (try? await state.currentReviewBacklog())?.oldestOpenWeekStart
+            // Navigation or an explicit menu-bar target takes precedence over
+            // this initial lookup. Never discard work begun while it ran.
+            guard !Task.isCancelled, period == lookupPeriod, cursor == 0,
+                  resolved.isEmpty, pathResolved.isEmpty else { return }
             if let oldest, oldest != weekStart {
                 weekStart = oldest   // onChange(weekStart) → reload
             } else {
                 reload()
             }
         }
+    }
+
+    private func reloadIfUntouched() {
+        if cursor == 0 && resolved.isEmpty && pathResolved.isEmpty { reload() }
     }
 
     private func goBack() {
@@ -147,18 +152,31 @@ struct ReviewView: View {
                 // oldest week that still has open items — same window the
                 // menu-bar glance scans — so you clear the backlog tail first.
                 // An explicit target (from the menu bar) already picked the
-                // week, so just load it.
-                if hadTarget { reload() } else { landOnOldestOpenWeek() }
+                // week and `consumeReviewTarget` loaded it.
+                if !hadTarget { landOnOldestOpenWeek() }
+            } else if !hadTarget {
+                reload()
             }
         }
+        .onDisappear { initialLookupTask?.cancel() }
         .onChange(of: state.reviewTargetWeekStart) { _, _ in _ = consumeReviewTarget() }
-        .onChange(of: weekStart) { _, _ in reload() }
-        .onChange(of: selectedDay) { _, _ in reload() }
-        // Refresh when new activity lands, but only before the user has started
-        // acting — so a live snapshot doesn't wipe in-session resolutions/cursor.
-        .onChange(of: state.sampleCount) { _, _ in
-            if cursor == 0 && resolved.isEmpty && pathResolved.isEmpty { reload() }
+        .onChange(of: weekStart) { _, _ in
+            initialLookupTask?.cancel()
+            // A day belongs to its displayed week. Keeping the previous day's
+            // filter would show (and edit) the old week under the new heading.
+            selectedDay = nil
+            reload()
         }
+        .onChange(of: selectedDay) { _, _ in
+            initialLookupTask?.cancel()
+            reload()
+        }
+        // Refresh when new activity or a sync lands, but only before the user
+        // has started acting — so a live snapshot doesn't wipe in-session
+        // resolutions/cursor.
+        .onChange(of: state.sampleCount) { _, _ in reloadIfUntouched() }
+        .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reloadIfUntouched() }
+        .onChange(of: state.commandCenterLastSyncAt) { _, _ in reloadIfUntouched() }
         .alert("Database error", isPresented: errorBinding) {
             Button("OK") { loadError = nil }
         } message: { Text(loadError ?? "") }
@@ -672,15 +690,19 @@ struct ReviewView: View {
             // Pin this session; if it carries a Slack channel, also teach a
             // channel rule (bounded under "Just this period", permanent under
             // "Always") so future huddles in that channel auto-attribute.
+            // Both writes share one transaction, so a failed rule insert
+            // never leaves the session pinned on its own.
+            var rule: Rule?
+            if let channel = session.slackChannel {
+                let (validFrom, validTo) = scopeBounds
+                rule = Rule(
+                    id: UUID().uuidString, customerID: customerID, projectID: projectID,
+                    kind: .slackChannel, pattern: channel, priority: 100, createdAt: Date(),
+                    validFrom: validFrom, validTo: validTo)
+            }
             if run({
-                try state.database.setMicSessionAttribution(id: session.id, customerID: customerID, projectID: projectID)
-                if let channel = session.slackChannel {
-                    let (validFrom, validTo) = scopeBounds
-                    try state.database.upsertReplacingWindow(Rule(
-                        id: UUID().uuidString, customerID: customerID, projectID: projectID,
-                        kind: .slackChannel, pattern: channel, priority: 100, createdAt: Date(),
-                        validFrom: validFrom, validTo: validTo))
-                }
+                try state.database.setMicSessionAttribution(
+                    id: session.id, customerID: customerID, projectID: projectID, rule: rule)
             }) {
                 resolved[unit.id] = attrLabel(customerID, projectID); advance()
             }
@@ -815,7 +837,14 @@ struct ReviewView: View {
     /// in-session UI state on success. Surfaces errors; does NOT reload the snapshot.
     @discardableResult
     private func run(_ body: () throws -> Void) -> Bool {
-        do { try body(); return true } catch { loadError = error.localizedDescription; return false }
+        do {
+            try body()
+            state.invalidateReviewBacklog()
+            return true
+        } catch {
+            loadError = error.localizedDescription
+            return false
+        }
     }
 
     private func hiddenKind(_ k: AppDatabase.SignalAggregate.Kind) -> HiddenSignal.Kind? {
@@ -861,11 +890,7 @@ struct ReviewView: View {
             // pickers and resolved-state checks.
             let allCustomers = try state.database.allCustomers()
             let allProjects = try state.database.allProjects()
-            let rules = try state.database.allRules()
-            let seriesAttrs = try state.database.allMeetingSeriesAttributions()
-            let m = RuleMatcher.make(customers: allCustomers, projects: allProjects, rules: rules, series: seriesAttrs)
-
-            self.matcher = m
+            self.matcher = try RuleMatcher.load(from: state.database)
             self.customers = allCustomers
             self.projects = allProjects
             self.units = built

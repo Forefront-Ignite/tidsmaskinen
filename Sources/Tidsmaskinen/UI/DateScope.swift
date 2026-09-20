@@ -23,6 +23,18 @@ enum DateScope: Equatable, Hashable {
         }
     }
 
+    /// Date used by day/week attribution actions for the visible scope, and the
+    /// instant Discover evaluates time-bounded rules at, so a "This day" rule
+    /// written on a past day reads back as assigned on that day. A rolling
+    /// scope has no single day, so it shows today's rule state: a rule scoped
+    /// to Wednesday appears unassigned in "Last 7 days".
+    var referenceDate: Date {
+        switch self {
+        case .day(let date): return date
+        case .lastDays: return Date()
+        }
+    }
+
     var isDay: Bool {
         if case .day = self { return true }
         return false

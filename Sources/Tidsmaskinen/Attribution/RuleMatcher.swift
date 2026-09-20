@@ -53,8 +53,8 @@ struct RuleMatcher {
     let ignoredRepoSlugs: Set<String>
 
     static func load(from db: AppDatabase) throws -> RuleMatcher {
-        let customers = try db.allCustomers()
-        let projects = try db.allProjects()
+        let customers = try db.allCustomersIncludingArchived()
+        let projects = try db.allProjectsIncludingArchived()
         let rules = try db.allRules()
         let series = try db.allMeetingSeriesAttributions()
         let hiddenSignals = try db.allHiddenSignals()
@@ -319,20 +319,20 @@ struct RuleMatcher {
     ///   https://github.com/forefront/foo.git → forefront/foo
     ///   git@github.com:forefront/foo.git     → forefront/foo
     static func gitSlug(fromRemote url: String) -> String? {
-        var s = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let range = s.range(of: "://") {
-            s = String(s[range.upperBound...])
+        let remote = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let path: String
+        if remote.contains("://") {
+            guard let components = URLComponents(string: remote), components.host != nil else { return nil }
+            path = components.path
+        } else if let colon = remote.firstIndex(of: ":"), !remote[..<colon].contains("/") {
+            // Git's scp-style [user@]host:path syntax is not a URL.
+            path = String(remote[remote.index(after: colon)...])
+        } else {
+            return nil
         }
-        // SSH form: user@host:owner/repo.git → drop user@host:
-        if s.contains("@"), let at = s.firstIndex(of: "@"),
-           let colon = s.firstIndex(of: ":"), at < colon {
-            s = String(s[s.index(after: colon)...])
-        } else if let slash = s.firstIndex(of: "/") {
-            // HTTPS form: drop host
-            s = String(s[s.index(after: slash)...])
-        }
-        if s.hasSuffix(".git") { s = String(s.dropLast(4)) }
-        return s.isEmpty ? nil : s
+        var slug = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if slug.hasSuffix(".git") { slug.removeLast(4) }
+        return slug.isEmpty ? nil : slug
     }
 
     /// Strips scheme and produces `host[/path]` from a Chrome tab URL. The host
@@ -358,18 +358,13 @@ struct RuleMatcher {
     }
 
     static func gitHost(fromRemote url: String) -> String? {
-        var s = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let range = s.range(of: "://") {
-            s = String(s[range.upperBound...])
+        let remote = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        if remote.contains("://") {
+            return URLComponents(string: remote)?.host?.lowercased()
         }
-        if let at = s.firstIndex(of: "@") {
-            s = String(s[s.index(after: at)...])
-        }
-        if let colon = s.firstIndex(of: ":") {
-            s = String(s[..<colon])
-        } else if let slash = s.firstIndex(of: "/") {
-            s = String(s[..<slash])
-        }
-        return s.isEmpty ? nil : s
+        guard let colon = remote.firstIndex(of: ":"), !remote[..<colon].contains("/") else { return nil }
+        let authority = remote[..<colon]
+        let host = authority.split(separator: "@").last.map(String.init)
+        return host?.isEmpty == false ? host?.lowercased() : nil
     }
 }

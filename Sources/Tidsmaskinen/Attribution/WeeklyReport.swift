@@ -319,7 +319,7 @@ struct WeeklyReport {
             ))
         }
 
-        for event in events {
+        for event in events where event.rsvpStatus != "declined" {
             let attribution = matcher.attribute(event: event)
             if attribution.isIgnored { continue }
             let result = attribution.asAttributionResult
@@ -341,7 +341,7 @@ struct WeeklyReport {
         // calls reach the report — unattributed call time shows up in the Review
         // backlog instead. We skip ongoing sessions (no end yet) so a live call
         // isn't counted.
-        let ownedMeetingMics = CalendarEvent.meetingMicSessionIDs(events: events, micSessions: micSessions)
+        let ownedMeetingMics = CalendarEvent.meetingMicSessionIDs(events: events, micSessions: micSessions, matcher: matcher)
         for session in micSessions {
             guard let endedAt = session.endedAt, endedAt > session.startedAt else { continue }
             if session.isIgnored { continue }
@@ -368,7 +368,9 @@ struct WeeklyReport {
         let sessionByID = Dictionary(uniqueKeysWithValues: includedSessions.map { ($0.id, $0) })
         var creditedSessionIDs = Set<String>()
         for delta in claudeDeltas {
-            guard let session = sessionByID[delta.sessionID], delta.gainedSeconds > 0 else { continue }
+            guard let session = sessionByID[delta.sessionID] else { continue }
+            creditedSessionIDs.insert(session.id)
+            guard delta.gainedSeconds > 0 else { continue }
             let result = matcher.attribute(session: session)
             records.append(AttributedRecord(
                 bucketID: rowKey(customer: result.customer, project: result.project),
@@ -377,7 +379,6 @@ struct WeeklyReport {
                 end: delta.occurredAt,
                 contributor: contributorInfo(forClaudeSession: session)
             ))
-            creditedSessionIDs.insert(session.id)
         }
         // Fallback: pre-v10 sessions with no deltas — treat amortized active as
         // a single interval starting at session start.

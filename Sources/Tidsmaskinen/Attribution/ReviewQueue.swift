@@ -22,83 +22,74 @@ enum ReviewQueue {
                       sampleIntervalSeconds: Int,
                       idleThresholdSeconds: TimeInterval,
                       minMinutes: Int) throws -> [ReviewUnit] {
-        var baseAggs = try database.signalAggregates(in: interval, sampleIntervalSeconds: sampleIntervalSeconds)
-        // Fold Claude session activity into git-repo aggregates (as Discover does).
-        let sessionRepos = try database.sessionRepoAggregates(in: interval, idleThresholdSeconds: idleThresholdSeconds)
-        if !sessionRepos.isEmpty {
-            var bySlug: [String: Double] = [:]
-            var others: [AppDatabase.SignalAggregate] = []
-            for agg in baseAggs {
-                if agg.kind == .gitRepoSlug { bySlug[agg.value, default: 0] += agg.totalSeconds }
-                else { others.append(agg) }
-            }
-            for s in sessionRepos { bySlug[s.value, default: 0] += s.totalSeconds }
-            baseAggs = others + bySlug.map { AppDatabase.SignalAggregate(kind: .gitRepoSlug, value: $0.key, totalSeconds: $0.value) }
-        }
-
-        let allCustomers = try database.allCustomers()
-        let allProjects = try database.allProjects()
-        let rules = try database.allRules()
-        let seriesAttrs = try database.allMeetingSeriesAttributions()
+        let m = try RuleMatcher.load(from: database)
         let hidden = try database.allHiddenSignals()
-        let m = RuleMatcher.make(customers: allCustomers, projects: allProjects, rules: rules,
-                                 series: seriesAttrs, hiddenSignals: hidden)
         let hiddenHosts = Set(hidden.filter { $0.kind == .urlHost }.map { $0.value })
         let hiddenPaths = Set(hidden.filter { $0.kind == .urlPath }.map { $0.value })
-
-        let series = try database.meetingSeriesAggregates(in: interval)
-        let oneOffs = try database.oneOffMeetingAggregates(in: interval)
-        let seriesByID = Dictionary(uniqueKeysWithValues: seriesAttrs.map { ($0.seriesMasterID, $0) })
-
         let minSec = Double(minMinutes) * 60
-        // Evaluate "is this already attributed?" in the reviewed period's
-        // temporal context, so a rule bounded to that week/day still counts
-        // (a rule for last week isn't treated as expired just because it's
-        // not valid "now").
-        let at = interval.start
         var built: [ReviewUnit] = []
 
-        for agg in baseAggs {
-            switch agg.kind {
-            case .gitRepoSlug:
-                if m.isRepoIgnored(slug: agg.value) { continue }
-                if agg.totalSeconds < minSec { continue }
-                if m.attribute(kind: .gitRepoSlug, value: agg.value, at: at).customer == nil {
-                    built.append(.signal(agg))
+        // Resolve each sample at its actual timestamp before aggregating. A
+        // Monday rule cannot hide Tuesday's backlog, and manual assignments or
+        // a Wednesday-only rule must clear the activity they actually cover.
+        var repos: [String: Double] = [:]
+        var hosts: [String: Double] = [:]
+        var pathsByHost: [String: [String: Double]] = [:]
+        for sample in try database.samples(in: interval) where !sample.isIdle {
+            guard !m.isRepoIgnored(remoteURL: sample.gitRemoteURL), m.attribute(sample).customer == nil else { continue }
+            let seconds = min(Double(sampleIntervalSeconds), interval.end.timeIntervalSince(sample.capturedAt))
+            if let remote = sample.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: remote) {
+                repos[slug, default: 0] += seconds
+            } else if let host = sample.chromeHost, !hiddenHosts.contains(host) {
+                if let url = sample.chromeURL, let path = RuleMatcher.urlPathPrefix(url) {
+                    guard !hiddenPaths.contains(path) else { continue }
+                    pathsByHost[host, default: [:]][path, default: 0] += seconds
                 }
-            case .appBundleID:
-                // Apps are intentionally not reviewable — e.g. VS Code can't be
-                // mapped to a single customer. They still attribute via repo/URL.
-                continue
-            case .urlHost:
-                if agg.totalSeconds < minSec { continue }
-                if hiddenHosts.contains(agg.value) { continue }
-                if m.attribute(kind: .urlHost, value: agg.value, at: at).customer != nil { continue }
-                // High limit so a host's unattributed time surfaces as assignable
-                // paths rather than being orphaned beyond the default top-N cap.
-                let paths = (try? database.urlPathAggregates(forHost: agg.value, in: interval, sampleIntervalSeconds: sampleIntervalSeconds, limit: 60)) ?? []
-                let openPaths = paths.filter {
-                    $0.totalSeconds >= minSec
-                        && m.attribute(kind: .urlPath, value: $0.value, at: at).customer == nil
-                        && !hiddenPaths.contains($0.value)
-                }
-                if openPaths.count >= 1 {
-                    built.append(.hostGroup(host: agg, paths: openPaths))
-                } else if paths.isEmpty {
-                    built.append(.signal(agg))   // host with no path detail → assign whole host
-                }
-            case .urlPath:
-                break
+                hosts[host, default: 0] += seconds
             }
         }
-
-        for s in series where s.totalSeconds >= minSec {
-            let attr = seriesByID[s.seriesMasterID]
-            if attr?.isIgnored == true { continue }
-            if attr?.customerID == nil { built.append(.series(s)) }
+        let sessionSeconds = try database.sessionActiveSeconds(in: interval, idleThresholdSeconds: idleThresholdSeconds)
+        for session in try database.sessions(in: interval) {
+            guard !m.isRepoIgnored(remoteURL: session.gitRemoteURL),
+                  m.attribute(session: session).customer == nil,
+                  let remote = session.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: remote),
+                  let seconds = sessionSeconds[session.id], seconds > 0 else { continue }
+            repos[slug, default: 0] += seconds
         }
-        for e in oneOffs where e.customerID == nil {
-            if max(0, e.endAt.timeIntervalSince(e.startAt)) >= minSec { built.append(.event(e)) }
+        for (slug, seconds) in repos where seconds >= minSec {
+            built.append(.signal(.init(kind: .gitRepoSlug, value: slug, totalSeconds: seconds)))
+        }
+        for (host, seconds) in hosts where seconds >= minSec {
+            let aggregate = AppDatabase.SignalAggregate(kind: .urlHost, value: host, totalSeconds: seconds)
+            let paths = (pathsByHost[host] ?? [:]).compactMap { path, seconds -> AppDatabase.SignalAggregate? in
+                guard seconds >= minSec else { return nil }
+                return .init(kind: .urlPath, value: path, totalSeconds: seconds)
+            }.sorted { $0.totalSeconds > $1.totalSeconds }
+            // Many short paths can collectively be worth reviewing. Keep the
+            // host assignable even when no individual path clears the threshold.
+            built.append(paths.isEmpty ? .signal(aggregate) : .hostGroup(host: aggregate, paths: paths))
+        }
+
+        let rawEvents = try database.calendarEvents(in: interval)
+        let unresolved = rawEvents.filter { $0.rsvpStatus != "declined" && m.attribute(event: $0) == .unattributed }
+        let recurring = Dictionary(grouping: unresolved.filter { $0.seriesMasterID != nil }, by: { $0.seriesMasterID! })
+        for (seriesID, events) in recurring {
+            let sorted = events.sorted { $0.startAt < $1.startAt }
+            guard let first = sorted.first, let last = sorted.last else { continue }
+            let seconds = sorted.reduce(0.0) {
+                $0 + max(0, min($1.endAt, interval.end).timeIntervalSince(max($1.startAt, interval.start)))
+            }
+            guard seconds >= minSec else { continue }
+            built.append(.series(.init(seriesMasterID: seriesID, sampleSubject: first.subject,
+                                       occurrenceCount: sorted.count, totalSeconds: seconds,
+                                       firstStartAt: first.startAt, lastStartAt: last.startAt)))
+        }
+        for var event in unresolved where event.seriesMasterID == nil {
+            event.startAt = max(event.startAt, interval.start)
+            event.endAt = min(event.endAt, interval.end)
+            if event.endAt.timeIntervalSince(event.startAt) >= minSec {
+                built.append(.event(event))
+            }
         }
 
         // Ad-hoc calls: ended mic sessions whose impromptu time (mic minus any
@@ -108,9 +99,8 @@ enum ReviewQueue {
         // can be attributed from Review instead of being stranded.
         let micSessions = try database.micSessions(in: interval)
         if !micSessions.isEmpty {
-            let rawEvents = try database.calendarEvents(in: interval)
-            let extendedEvents = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions)
-            let owned = CalendarEvent.meetingMicSessionIDs(events: extendedEvents, micSessions: micSessions)
+            let extendedEvents = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions, matcher: m)
+            let owned = CalendarEvent.meetingMicSessionIDs(events: extendedEvents, micSessions: micSessions, matcher: m)
             for session in micSessions {
                 guard let endedAt = session.endedAt, endedAt > session.startedAt else { continue }
                 if session.isIgnored { continue }                                  // user said don't ask
@@ -118,8 +108,8 @@ enum ReviewQueue {
                 let adHoc = CallSegment.adHocRanges(
                     of: session, endedAt: endedAt, events: extendedEvents,
                     owned: owned, minimumSeconds: 30
-                ).reduce(0.0) { $0 + $1.end.timeIntervalSince($1.start) }
-                if adHoc >= minSec { built.append(.call(session: session, seconds: adHoc)) }
+                ).reduce(0.0) { $0 + max(0, min($1.end, interval.end).timeIntervalSince(max($1.start, interval.start))) }
+                if adHoc > 0, adHoc >= minSec { built.append(.call(session: session, seconds: adHoc)) }
             }
         }
 
@@ -155,9 +145,12 @@ enum ReviewQueue {
         let cal = Calendar.weekStartingMonday()
         let currentStart = cal.currentWeekInterval(reference: now).start
         var result = Rolling()
-        // Walk newest → oldest so the final non-empty week we touch is the
-        // oldest one with open items.
-        for w in 0...max(0, weeksBack) {
+        // Walk oldest → newest. A call or meeting crossing a week boundary is
+        // queued in both weeks (each clipped), so each unit id is counted once
+        // and the oldest week owns it — Review still lands where the backlog
+        // tail begins. Seconds stay summed: the clipped parts are disjoint.
+        var seen = Set<String>()
+        for w in stride(from: max(0, weeksBack), through: 0, by: -1) {
             guard let start = cal.date(byAdding: .day, value: -7 * w, to: currentStart) else { continue }
             let end = cal.date(byAdding: .day, value: 7, to: start) ?? start
             let units = try build(database: database,
@@ -165,11 +158,12 @@ enum ReviewQueue {
                                   sampleIntervalSeconds: sampleIntervalSeconds,
                                   idleThresholdSeconds: idleThresholdSeconds,
                                   minMinutes: minMinutes)
-            guard !units.isEmpty else { continue }
-            result.totalCount += units.count
             result.totalSeconds += units.reduce(0) { $0 + $1.totalSeconds }
-            if w == 0 { result.currentWeekCount += units.count } else { result.earlierCount += units.count }
-            result.oldestOpenWeekStart = start
+            let fresh = units.filter { seen.insert($0.id).inserted }
+            guard !fresh.isEmpty else { continue }
+            result.totalCount += fresh.count
+            if w == 0 { result.currentWeekCount += fresh.count } else { result.earlierCount += fresh.count }
+            if result.oldestOpenWeekStart == nil { result.oldestOpenWeekStart = start }
         }
         return result
     }

@@ -64,6 +64,7 @@ struct WeeklyReportView: View {
         .onChange(of: weekStart) { _, _ in reload(immediate: true) }
         .onChange(of: state.sampleCount) { _, _ in reload(immediate: false) }
         .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload(immediate: true) }
+        .onChange(of: state.commandCenterLastSyncAt) { _, _ in reload(immediate: true) }
     }
 
     // MARK: - Header
@@ -670,7 +671,7 @@ struct WeeklyReportView: View {
                         let samples = try database.samples(in: interval)
                         let rawEvents = try database.calendarEvents(in: interval)
                         let micSessions = try database.micSessions(in: interval)
-                        let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions)
+                        let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions, matcher: matcher)
                         let sessions = try database.sessions(in: interval)
                         let claudeDeltas = try database.claudeActiveDeltas(in: interval)
                         return WeeklyReport.compute(
@@ -692,13 +693,13 @@ struct WeeklyReportView: View {
                     let projects = try database.allProjects()
                     // Actionable review backlog for this week — same pool the
                     // Review screen surfaces, so the hero stays in lockstep.
-                    let backlog = (try? ReviewQueue.build(
+                    let backlog = try ReviewQueue.build(
                         database: database,
                         interval: weekValue,
                         sampleIntervalSeconds: sampleInterval,
                         idleThresholdSeconds: TimeInterval(idleThresholdMinutes * 60),
                         minMinutes: reviewMinMinutes
-                    )) ?? []
+                    )
                     return ReloadPayload(report: report, lastWeekTotal: prev.grandTotal,
                                          customers: customers, projects: projects,
                                          backlogCount: backlog.count,
@@ -740,10 +741,4 @@ private struct ReloadPayload {
     let projects: [Project]
     let backlogCount: Int
     let backlogHours: Double
-}
-
-private extension String {
-    func ifEmpty(_ fallback: String) -> String {
-        isEmpty ? fallback : self
-    }
 }

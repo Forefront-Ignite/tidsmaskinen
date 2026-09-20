@@ -490,9 +490,13 @@ struct AppDatabase {
     }
 
     func setCalendarEventAttribution(eventID: String, customerID: String?, projectID: String?) throws {
+        try setCalendarEventAttribution(eventIDs: [eventID], customerID: customerID, projectID: projectID)
+    }
+
+    func setCalendarEventAttribution(eventIDs: [String], customerID: String?, projectID: String?) throws {
         _ = try dbQueue.write { db in
             try CalendarEvent
-                .filter(CalendarEvent.Columns.id == eventID)
+                .filter(eventIDs.contains(CalendarEvent.Columns.id))
                 .updateAll(db,
                            CalendarEvent.Columns.customerID.set(to: customerID),
                            CalendarEvent.Columns.projectID.set(to: projectID))
@@ -578,22 +582,23 @@ struct AppDatabase {
     func micSessions(in interval: DateInterval, minDurationSeconds: Double = 60) throws -> [MicSession] {
         try dbQueue.read { db in
             try MicSession
-                .filter(MicSession.Columns.startedAt >= interval.start
-                        && MicSession.Columns.startedAt < interval.end)
+                .filter(MicSession.Columns.startedAt < interval.end
+                        && (MicSession.Columns.endedAt == nil || MicSession.Columns.endedAt > interval.start))
                 .order(MicSession.Columns.startedAt.desc)
                 .fetchAll(db)
                 .filter { ($0.durationSeconds ?? 0) >= minDurationSeconds || $0.endedAt == nil }
         }
     }
 
-    func setMicSessionAttribution(id: String, customerID: String?, projectID: String?) throws {
-        _ = try dbQueue.write { db in
-            try MicSession
+    func setMicSessionAttribution(id: String, customerID: String?, projectID: String?, rule: Rule? = nil) throws {
+        try dbQueue.write { db in
+            _ = try MicSession
                 .filter(MicSession.Columns.id == id)
                 .updateAll(db,
                            MicSession.Columns.customerID.set(to: customerID),
                            MicSession.Columns.projectID.set(to: projectID),
                            MicSession.Columns.updatedAt.set(to: Date()))
+            if let rule { try upsertReplacingWindow(rule, in: db) }
         }
     }
 
@@ -664,11 +669,16 @@ struct AppDatabase {
     }
 
     func customer(externalSource: ExternalSource, externalID: String) throws -> Customer? {
-        try dbQueue.read { db in
-            try Customer
-                .filter(Customer.Columns.externalSource == externalSource.rawValue
+        let sources = externalSource == .commandCenter ? [externalSource.rawValue, ExternalSource.commandCenterArchived.rawValue] : [externalSource.rawValue]
+        return try dbQueue.read { db in
+            // Earlier syncs could create a fresh active row beside an archived
+            // one for the same external ID. Prefer the active row so the sync
+            // never resurrects the archived twin next to it.
+            let rows = try Customer
+                .filter(sources.contains(Customer.Columns.externalSource)
                         && Customer.Columns.externalID == externalID)
-                .fetchOne(db)
+                .fetchAll(db)
+            return rows.first { $0.externalSource == externalSource.rawValue } ?? rows.first
         }
     }
 
@@ -721,17 +731,21 @@ struct AppDatabase {
     /// matcher then picks the most precise applicable rule per timestamp.
     func upsertReplacingWindow(_ rule: Rule) throws {
         try dbQueue.write { db in
-            let sameWindow = try Rule
-                .filter(Rule.Columns.kind == rule.kind.rawValue
-                        && Rule.Columns.pattern == rule.pattern)
-                .fetchAll(db)
-                .filter { $0.validFrom == rule.validFrom && $0.validTo == rule.validTo }
-            for existing in sameWindow {
-                _ = try Rule.deleteOne(db, key: existing.id)
-            }
-            var r = rule
-            try r.upsert(db)
+            try upsertReplacingWindow(rule, in: db)
         }
+    }
+
+    private func upsertReplacingWindow(_ rule: Rule, in db: Database) throws {
+        let sameWindow = try Rule
+            .filter(Rule.Columns.kind == rule.kind.rawValue
+                    && Rule.Columns.pattern == rule.pattern)
+            .fetchAll(db)
+            .filter { $0.validFrom == rule.validFrom && $0.validTo == rule.validTo }
+        for existing in sameWindow {
+            _ = try Rule.deleteOne(db, key: existing.id)
+        }
+        var r = rule
+        try r.upsert(db)
     }
 
     // MARK: - Projects
@@ -778,11 +792,15 @@ struct AppDatabase {
     }
 
     func project(externalSource: ExternalSource, externalID: String) throws -> Project? {
-        try dbQueue.read { db in
-            try Project
-                .filter(Project.Columns.externalSource == externalSource.rawValue
+        let sources = externalSource == .commandCenter ? [externalSource.rawValue, ExternalSource.commandCenterArchived.rawValue] : [externalSource.rawValue]
+        return try dbQueue.read { db in
+            // See `customer(externalSource:externalID:)`: prefer an active row
+            // over an archived twin left behind by an earlier sync.
+            let rows = try Project
+                .filter(sources.contains(Project.Columns.externalSource)
                         && Project.Columns.externalID == externalID)
-                .fetchOne(db)
+                .fetchAll(db)
+            return rows.first { $0.externalSource == externalSource.rawValue } ?? rows.first
         }
     }
 
@@ -864,28 +882,40 @@ struct AppDatabase {
         }
     }
 
-    func calendarEvents(in interval: DateInterval) throws -> [CalendarEvent] {
+    func calendarEvents(in interval: DateInterval, includeFiltered: Bool = false) throws -> [CalendarEvent] {
         try dbQueue.read { db in
             try CalendarEvent
-                .filter(CalendarEvent.Columns.startAt >= interval.start
+                .filter(CalendarEvent.Columns.endAt > interval.start
                         && CalendarEvent.Columns.startAt < interval.end)
                 .order(CalendarEvent.Columns.startAt.asc)
                 .fetchAll(db)
+                .filter { includeFiltered || AppSettings.meetingRSVPFilter.includes($0.rsvpStatus) }
         }
+    }
+
+    /// Rows visible under the current RSVP filter. Excluded RSVP states stay
+    /// stored (so their assignments survive filter changes) but are hidden.
+    private func visibleCalendarEvents() -> QueryInterfaceRequest<CalendarEvent> {
+        guard let statuses = AppSettings.meetingRSVPFilter.includedStatuses else {
+            return CalendarEvent.all()
+        }
+        return CalendarEvent.filter(statuses.contains(CalendarEvent.Columns.rsvpStatus))
     }
 
     func recentCalendarEvents(limit: Int = 50) throws -> [CalendarEvent] {
         try dbQueue.read { db in
-            try CalendarEvent
+            try visibleCalendarEvents()
                 .order(CalendarEvent.Columns.startAt.desc)
                 .limit(limit)
                 .fetchAll(db)
         }
     }
 
+    /// Counts the meetings visible under the current RSVP filter, matching
+    /// `recentCalendarEvents`.
     func calendarEventCount() throws -> Int {
         try dbQueue.read { db in
-            try CalendarEvent.fetchCount(db)
+            try visibleCalendarEvents().fetchCount(db)
         }
     }
 
@@ -953,32 +983,56 @@ struct AppDatabase {
         }
     }
 
+    /// All activity slices for sessions overlapping this period. Consumers
+    /// clip the slices to their display/report interval. Keeping out-of-period
+    /// deltas distinguishes a quiet modern session from a legacy session with
+    /// no deltas, and retains slices that straddle a day/week boundary.
     func claudeActiveDeltas(in interval: DateInterval) throws -> [ClaudeActiveDelta] {
         try dbQueue.read { db in
             try ClaudeActiveDelta.fetchAll(db, sql: """
-                SELECT sessionID, occurredAt, gainedSeconds
-                FROM claude_active_deltas
-                WHERE occurredAt >= ? AND occurredAt < ?
-                ORDER BY occurredAt
-                """, arguments: [interval.start, interval.end])
+                SELECT d.sessionID, d.occurredAt, d.gainedSeconds
+                FROM claude_active_deltas d JOIN claude_sessions s ON s.id = d.sessionID
+                WHERE s.startedAt < ? AND (s.endedAt IS NULL OR s.endedAt > ?)
+                ORDER BY d.occurredAt
+                """, arguments: [interval.end, interval.start])
         }
     }
 
-    /// Per git-repo-slug time totals from Claude Code sessions whose start falls
-    /// in the interval. Uses each session's amortized active seconds.
-    func sessionRepoAggregates(in interval: DateInterval, idleThresholdSeconds: TimeInterval) throws -> [SignalAggregate] {
+    /// Agent activity clipped to the requested period. Delta-backed sessions
+    /// use actual activity slices; legacy sessions retain the report's fallback
+    /// of placing their amortized activity at the session start.
+    func sessionActiveSeconds(in interval: DateInterval, idleThresholdSeconds: TimeInterval) throws -> [String: Double] {
         let sessions = try self.sessions(in: interval)
-        var totals: [String: Double] = [:]
+        guard !sessions.isEmpty else { return [:] }
+        let deltas = try claudeActiveDeltas(in: interval)
+        let bySession = Dictionary(grouping: deltas, by: \.sessionID)
+        var seconds: [String: Double] = [:]
         for session in sessions {
+            if let activity = bySession[session.id] {
+                seconds[session.id] = activity.reduce(0.0) { total, delta in
+                    let start = max(interval.start, delta.occurredAt.addingTimeInterval(-max(0, delta.gainedSeconds)))
+                    let end = min(interval.end, delta.occurredAt)
+                    return total + max(0, end.timeIntervalSince(start))
+                }
+            } else {
+                let end = session.startedAt.addingTimeInterval(session.amortizedActiveSeconds(idleThresholdSeconds: idleThresholdSeconds))
+                seconds[session.id] = max(0, min(end, interval.end).timeIntervalSince(max(session.startedAt, interval.start)))
+            }
+        }
+        return seconds
+    }
+
+    /// Per-repository agent activity within the requested period.
+    func sessionRepoAggregates(in interval: DateInterval, idleThresholdSeconds: TimeInterval) throws -> [SignalAggregate] {
+        let seconds = try sessionActiveSeconds(in: interval, idleThresholdSeconds: idleThresholdSeconds)
+        var totals: [String: Double] = [:]
+        for session in try self.sessions(in: interval) {
             guard let url = session.gitRemoteURL,
-                  let slug = RuleMatcher.gitSlug(fromRemote: url) else { continue }
-            let active = session.amortizedActiveSeconds(idleThresholdSeconds: idleThresholdSeconds)
-            guard active > 0 else { continue }
+                  let slug = RuleMatcher.gitSlug(fromRemote: url),
+                  let active = seconds[session.id], active > 0 else { continue }
             totals[slug, default: 0] += active
         }
-        return totals.map {
-            SignalAggregate(kind: .gitRepoSlug, value: $0.key, totalSeconds: $0.value)
-        }
+        return totals.map { SignalAggregate(kind: .gitRepoSlug, value: $0.key, totalSeconds: $0.value) }
     }
 
     func deleteCalendarEvent(id: String) throws {
@@ -1043,17 +1097,23 @@ struct AppDatabase {
         var id: String { seriesMasterID }
     }
 
-    /// Series with at least one occurrence in the interval, ignoring per-event
-    /// `isIgnored` flags (we leave it to the caller to filter out ignored
-    /// series via `meetingSeriesAttribution`).
+    /// The Discover meeting lists use overlap semantics and totals clipped via
+    /// `CalendarEvent.seconds(within:)`, like Review and the report, so a
+    /// meeting crossing a day boundary agrees with them on both sides.
+    private static func overlapping(_ interval: DateInterval) -> SQLExpression {
+        CalendarEvent.Columns.endAt > interval.start && CalendarEvent.Columns.startAt < interval.end
+    }
+
+    /// Series with at least one occurrence overlapping the interval, ignoring
+    /// per-event `isIgnored` flags (we leave it to the caller to filter out
+    /// ignored series via `meetingSeriesAttribution`).
     func meetingSeriesAggregates(in interval: DateInterval) throws -> [MeetingSeriesAggregate] {
         try dbQueue.read { db in
             let events = try CalendarEvent
-                .filter(CalendarEvent.Columns.startAt >= interval.start
-                        && CalendarEvent.Columns.startAt < interval.end
-                        && CalendarEvent.Columns.seriesMasterID != nil)
+                .filter(Self.overlapping(interval) && CalendarEvent.Columns.seriesMasterID != nil)
                 .order(CalendarEvent.Columns.startAt.asc)
                 .fetchAll(db)
+                .filter { AppSettings.meetingRSVPFilter.includes($0.rsvpStatus) }
 
             var byID: [String: [CalendarEvent]] = [:]
             for e in events {
@@ -1067,7 +1127,7 @@ struct AppDatabase {
                 var counts: [String: Int] = [:]
                 for e in group { counts[e.subject, default: 0] += 1 }
                 let subject = counts.max { $0.value < $1.value }?.key ?? first.subject
-                let total = group.reduce(0.0) { $0 + max(0, $1.endAt.timeIntervalSince($1.startAt)) }
+                let total = group.reduce(0.0) { $0 + $1.seconds(within: interval) }
                 return MeetingSeriesAggregate(
                     seriesMasterID: sid,
                     sampleSubject: subject.isEmpty ? "(no subject)" : subject,
@@ -1083,16 +1143,17 @@ struct AppDatabase {
 
     /// One-off meetings: events that are not part of a series. Ignored events
     /// are filtered out at the database level — Discover surfaces them under
-    /// the Ignored list instead.
+    /// the Ignored list instead. Rows keep their real bounds (the row shows
+    /// the true start time); callers clip the displayed duration.
     func oneOffMeetingAggregates(in interval: DateInterval) throws -> [CalendarEvent] {
         try dbQueue.read { db in
             try CalendarEvent
-                .filter(CalendarEvent.Columns.startAt >= interval.start
-                        && CalendarEvent.Columns.startAt < interval.end
+                .filter(Self.overlapping(interval)
                         && CalendarEvent.Columns.seriesMasterID == nil
                         && CalendarEvent.Columns.isIgnored == false)
                 .order(CalendarEvent.Columns.startAt.desc)
                 .fetchAll(db)
+                .filter { AppSettings.meetingRSVPFilter.includes($0.rsvpStatus) }
         }
     }
 
@@ -1112,18 +1173,17 @@ struct AppDatabase {
         try dbQueue.read { db in
             // Per-event ignores within range.
             let ignoredEvents = try CalendarEvent
-                .filter(CalendarEvent.Columns.startAt >= interval.start
-                        && CalendarEvent.Columns.startAt < interval.end
-                        && CalendarEvent.Columns.isIgnored == true)
+                .filter(Self.overlapping(interval) && CalendarEvent.Columns.isIgnored == true)
                 .order(CalendarEvent.Columns.startAt.desc)
                 .fetchAll(db)
+                .filter { AppSettings.meetingRSVPFilter.includes($0.rsvpStatus) }
 
             var rows: [IgnoredMeetingAggregate] = ignoredEvents.map { e in
                 IgnoredMeetingAggregate(
                     scope: .event,
                     id: e.id,
                     label: e.subject.isEmpty ? "(no subject)" : e.subject,
-                    totalSeconds: max(0, e.endAt.timeIntervalSince(e.startAt)),
+                    totalSeconds: e.seconds(within: interval),
                     occurrenceCount: nil
                 )
             }
@@ -1138,12 +1198,12 @@ struct AppDatabase {
             for series in ignoredSeries {
                 let occurrences = try CalendarEvent
                     .filter(CalendarEvent.Columns.seriesMasterID == series.seriesMasterID
-                            && CalendarEvent.Columns.startAt >= interval.start
-                            && CalendarEvent.Columns.startAt < interval.end)
+                            && Self.overlapping(interval))
                     .fetchAll(db)
+                    .filter { AppSettings.meetingRSVPFilter.includes($0.rsvpStatus) }
                 let firstSubject = occurrences.first?.subject ?? ""
                 let label = firstSubject.isEmpty ? "(no subject)" : firstSubject
-                let total = occurrences.reduce(0.0) { $0 + max(0, $1.endAt.timeIntervalSince($1.startAt)) }
+                let total = occurrences.reduce(0.0) { $0 + $1.seconds(within: interval) }
                 rows.append(IgnoredMeetingAggregate(
                     scope: .series,
                     id: series.seriesMasterID,
@@ -1251,130 +1311,6 @@ struct AppDatabase {
 
             return (mergedGit + hostItems + appItems).sorted { $0.totalSeconds > $1.totalSeconds }
         }
-    }
-
-    // MARK: - Teams sessions
-
-    struct TeamsSession: Identifiable, Hashable {
-        let id: String
-        let startedAt: Date
-        let endedAt: Date
-        let durationSeconds: Double
-        let participant: String?
-        let kind: Kind
-        let sampleIDs: [Int64]
-        let customerID: String?
-        let projectID: String?
-
-        enum Kind: Hashable { case call, chat, mixed }
-    }
-
-    /// Contiguous Teams foreground activity, segmented into sessions wherever
-    /// there's a gap larger than ~2× the sample interval. Pure-chat sessions
-    /// are flagged separately so the UI can distinguish chats from calls.
-    func teamsSessions(in interval: DateInterval,
-                       sampleIntervalSeconds: Int,
-                       minDurationSeconds: Double = 180) throws -> [TeamsSession] {
-        try dbQueue.read { db in
-            let teamsBundles: [String] = ["com.microsoft.teams", "com.microsoft.teams2"]
-            let samples = try ActivitySample
-                .filter(ActivitySample.Columns.capturedAt >= interval.start
-                        && ActivitySample.Columns.capturedAt < interval.end
-                        && ActivitySample.Columns.isIdle == false
-                        && teamsBundles.contains(ActivitySample.Columns.appBundleID))
-                .order(ActivitySample.Columns.capturedAt.asc)
-                .fetchAll(db)
-
-            let gapThreshold = TimeInterval(sampleIntervalSeconds) * 2.5
-            let secs = Double(sampleIntervalSeconds)
-
-            var groups: [[ActivitySample]] = []
-            var current: [ActivitySample] = []
-            for s in samples {
-                if let last = current.last,
-                   s.capturedAt.timeIntervalSince(last.capturedAt) > gapThreshold {
-                    groups.append(current)
-                    current = []
-                }
-                current.append(s)
-            }
-            if !current.isEmpty { groups.append(current) }
-
-            return groups.compactMap { group in
-                guard let first = group.first, let last = group.last else { return nil }
-                let started = first.capturedAt
-                let ended = last.capturedAt.addingTimeInterval(secs)
-                let duration = ended.timeIntervalSince(started)
-                guard duration >= minDurationSeconds else { return nil }
-
-                var hasChat = false
-                var hasCall = false
-                var participantCounts: [String: Int] = [:]
-                for s in group {
-                    guard let title = s.windowTitle else { continue }
-                    let segments = title.split(separator: "|").map {
-                        $0.trimmingCharacters(in: .whitespaces)
-                    }
-                    let lowerFirst = segments.first?.lowercased() ?? ""
-                    if lowerFirst == "chat" {
-                        hasChat = true
-                    } else if !segments.isEmpty {
-                        hasCall = true
-                    }
-                    if let p = participant(fromTitleSegments: segments) {
-                        participantCounts[p, default: 0] += 1
-                    }
-                }
-                let kind: TeamsSession.Kind
-                switch (hasCall, hasChat) {
-                case (true, false): kind = .call
-                case (false, true): kind = .chat
-                case (true, true):  kind = .mixed
-                default:            kind = .call
-                }
-                let participant = participantCounts
-                    .max { $0.value < $1.value }
-                    .map { $0.key }
-
-                // Attribution is "set" only if every sample shares the same override.
-                let customers = Set(group.map { $0.customerID })
-                let projects = Set(group.map { $0.projectID })
-                let customerID = customers.count == 1 ? group[0].customerID : nil
-                let projectID = customers.count == 1 && projects.count == 1 ? group[0].projectID : nil
-
-                let sampleIDs = group.compactMap { $0.id }
-                let id = "\(Int(started.timeIntervalSince1970)):\(sampleIDs.first ?? 0)"
-
-                return TeamsSession(
-                    id: id,
-                    startedAt: started,
-                    endedAt: ended,
-                    durationSeconds: duration,
-                    participant: participant,
-                    kind: kind,
-                    sampleIDs: sampleIDs,
-                    customerID: customerID,
-                    projectID: projectID
-                )
-            }.sorted { $0.startedAt > $1.startedAt }
-        }
-    }
-
-    /// Pulls the participant name out of a Teams window title's segments.
-    /// Teams window titles look like:
-    ///   "Chat | Some Person | Some Org | someone@example.com | Microsoft Teams"
-    ///   "Some Person | Some Org | someone@example.com | Microsoft Teams"
-    /// We drop "Chat", "Microsoft Teams", and any email-like segment, then take
-    /// the first remaining piece.
-    private func participant(fromTitleSegments segments: [String]) -> String? {
-        for part in segments {
-            let lower = part.lowercased()
-            if lower == "chat" || lower == "microsoft teams" { continue }
-            if part.contains("@") { continue }
-            if part.isEmpty { continue }
-            return part
-        }
-        return nil
     }
 
     /// URL-path breakdown for a single browser host over an interval. Aggregates

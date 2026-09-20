@@ -337,9 +337,10 @@ struct CalendarEvent: Codable, FetchableRecord, MutablePersistableRecord, Identi
     static func meetingMicSessionIDs(events: [CalendarEvent],
                                      micSessions: [MicSession],
                                      now: Date = Date(),
-                                     minimumOverlapSeconds: TimeInterval = 0) -> [String: Set<String>] {
+                                     minimumOverlapSeconds: TimeInterval = 0,
+                                     matcher: RuleMatcher) -> [String: Set<String>] {
         var owned: [String: Set<String>] = [:]
-        for event in events where !event.isIgnored {
+        for event in events where event.rsvpStatus != "declined" && !matcher.attribute(event: event).isIgnored {
             for mic in micSessions where event.micPlatformMatches(mic) {
                 let micEnd = mic.endedAt ?? now
                 let overlapStart = max(mic.startedAt, event.startAt)
@@ -399,13 +400,20 @@ struct CalendarEvent: Codable, FetchableRecord, MutablePersistableRecord, Identi
     /// platform taken during the booking — can't stretch it.
     ///
     /// Returns in-memory copies — does not mutate persisted rows.
+    /// Seconds of this event inside `interval`. Every surface that sums
+    /// meeting time for a period (Review, Discover, the report) clips this way.
+    func seconds(within interval: DateInterval) -> Double {
+        max(0, min(endAt, interval.end).timeIntervalSince(max(startAt, interval.start)))
+    }
+
     static func withMicOverrun(events: [CalendarEvent],
                                 micSessions: [MicSession],
-                                now: Date = Date()) -> [CalendarEvent] {
+                                now: Date = Date(),
+                                matcher: RuleMatcher) -> [CalendarEvent] {
         guard !events.isEmpty, !micSessions.isEmpty else { return events }
         // Stretching needs real participation, not just any overlap.
         let owned = meetingMicSessionIDs(events: events, micSessions: micSessions, now: now,
-                                         minimumOverlapSeconds: meetingMicOverlapSeconds)
+                                         minimumOverlapSeconds: meetingMicOverlapSeconds, matcher: matcher)
         var extended = events.sorted { $0.startAt < $1.startAt }
         for i in extended.indices {
             guard let mine = owned[extended[i].id] else { continue }

@@ -120,7 +120,7 @@ struct SignInView: View {
             Text(me.userPrincipalName)
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
-            Text("You can now sync your calendar from the menu bar.")
+            Text("Your calendar is syncing automatically. You can also sync it from Settings.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -142,18 +142,18 @@ struct SignInView: View {
             }
             .frame(maxHeight: 120)
             .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.controlBackgroundColor)))
-            Button("Try again") { phase = .idle }
+            Button("Try again") { beginFlow() }
         }
     }
 
     private func beginFlow() {
+        pollTask?.cancel()
         phase = .requesting
         pollTask = Task { @MainActor in
             do {
                 let response = try await state.graph.requestDeviceCode()
                 phase = .awaiting(response)
-                let tokens = try await state.graph.pollForTokens(deviceCode: response.deviceCode, interval: response.interval)
-                _ = tokens
+                _ = try await state.graph.pollForTokens(deviceCode: response.deviceCode, interval: response.interval)
                 let me = try await state.graph.me()
                 state.didSignIn(principal: me.userPrincipalName)
                 phase = .completed(me)

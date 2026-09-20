@@ -49,6 +49,8 @@ struct DiscoverView: View {
             reload()
         }
         .onChange(of: state.sampleCount) { _, _ in reload() }
+        .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload() }
+        .onChange(of: state.commandCenterLastSyncAt) { _, _ in reload() }
         .sheet(item: $assignTarget) { target in
             AssignmentSheet(
                 title: "Attribute signal",
@@ -58,7 +60,7 @@ struct DiscoverView: View {
                 onCreateCustomer: { name in try state.database.createLocalCustomer(name: name) },
                 onCreateProject: { customerID, name in try state.database.createLocalProject(customerID: customerID, name: name) },
                 onSave: { customerID, projectID, scope in
-                    saveAssignment(for: target, customerID: customerID, projectID: projectID, scope: scope)
+                    try saveAssignment(for: target, customerID: customerID, projectID: projectID, scope: scope)
                 },
                 scopeOptions: [.today, .thisWeek, .always]
             )
@@ -72,7 +74,7 @@ struct DiscoverView: View {
                 onCreateCustomer: { name in try state.database.createLocalCustomer(name: name) },
                 onCreateProject: { customerID, name in try state.database.createLocalProject(customerID: customerID, name: name) },
                 onSave: { customerID, projectID, scope in
-                    saveSeriesAttribution(seriesID: target.seriesMasterID, customerID: customerID, projectID: projectID, scope: scope)
+                    try saveSeriesAttribution(seriesID: target.seriesMasterID, customerID: customerID, projectID: projectID, scope: scope)
                 },
                 scopeOptions: [.always, .thisWeek, .today]
             )
@@ -86,7 +88,7 @@ struct DiscoverView: View {
                 onCreateCustomer: { name in try state.database.createLocalCustomer(name: name) },
                 onCreateProject: { customerID, name in try state.database.createLocalProject(customerID: customerID, name: name) },
                 onSave: { customerID, projectID, _ in
-                    saveEventAttribution(eventID: target.id, customerID: customerID, projectID: projectID)
+                    try saveEventAttribution(eventID: target.id, customerID: customerID, projectID: projectID)
                 }
             )
         }
@@ -166,7 +168,7 @@ struct DiscoverView: View {
         for (host, details) in hostPathDetails {
             var set = Set<String>()
             for detail in details {
-                if let cid = matcher.attribute(kind: .urlPath, value: detail.value).customer?.id {
+                if let cid = matcher.attribute(kind: .urlPath, value: detail.value, at: scope.referenceDate).customer?.id {
                     set.insert(cid)
                 }
             }
@@ -180,10 +182,10 @@ struct DiscoverView: View {
     private var fullyCoveredHosts: Set<String> {
         var set = Set<String>()
         for agg in aggregates where agg.kind == .urlHost {
-            guard matcher.attribute(kind: .urlHost, value: agg.value).customer == nil else { continue }
+            guard matcher.attribute(kind: .urlHost, value: agg.value, at: scope.referenceDate).customer == nil else { continue }
             guard let details = hostPathDetails[agg.value], !details.isEmpty else { continue }
             let allAssigned = details.allSatisfy {
-                matcher.attribute(kind: .urlPath, value: $0.value).customer != nil
+                matcher.attribute(kind: .urlPath, value: $0.value, at: scope.referenceDate).customer != nil
             }
             if allAssigned { set.insert(agg.value) }
         }
@@ -216,7 +218,7 @@ struct DiscoverView: View {
         return aggregates.filter { agg in
             if isHidden(agg) { return false }
             if agg.totalSeconds < minSeconds { return false }
-            let attr = matcher.attribute(kind: ruleKind(agg.kind), value: agg.value)
+            let attr = matcher.attribute(kind: ruleKind(agg.kind), value: agg.value, at: scope.referenceDate)
 
             if unassignedOnly {
                 if agg.kind == .urlHost {
@@ -248,7 +250,7 @@ struct DiscoverView: View {
         details.filter { detail in
             if detail.totalSeconds < minSeconds { return false }
             guard filtersAffectChildren else { return true }
-            let attr = matcher.attribute(kind: .urlPath, value: detail.value)
+            let attr = matcher.attribute(kind: .urlPath, value: detail.value, at: scope.referenceDate)
             if unassignedOnly, attr.customer != nil { return false }
             if let cid = customerFilterID, attr.customer?.id != cid { return false }
             return true
@@ -390,6 +392,9 @@ struct DiscoverView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
+            // A filter forces every host open, including attributed ones the
+            // eager loop in `reload` skips. Load on demand so the spinner resolves.
+            .onAppear { if hostPathDetails[host] == nil { loadPathDetails(forHost: host) } }
         }
     }
 
@@ -398,7 +403,7 @@ struct DiscoverView: View {
                      isExpandable: Bool,
                      indented: Bool = false,
                      isHiddenRow: Bool = false) -> some View {
-        let attribution = matcher.attribute(kind: ruleKind(item.kind), value: item.value)
+        let attribution = matcher.attribute(kind: ruleKind(item.kind), value: item.value, at: scope.referenceDate)
         HStack(spacing: 12) {
             if isExpandable {
                 Button {
@@ -690,7 +695,7 @@ struct DiscoverView: View {
                 }
             }
             Spacer()
-            Text(formatHours(max(0, event.endAt.timeIntervalSince(event.startAt))))
+            Text(formatHours(event.seconds(within: scope.interval)))
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 70, alignment: .trailing)
@@ -796,46 +801,38 @@ struct DiscoverView: View {
         return AttributionResult(customer: customer, project: project, matchingRule: nil)
     }
 
-    private func saveSeriesAttribution(seriesID: String, customerID: String, projectID: String?, scope: AttributionScope) {
-        do {
-            if scope.createsRule, let (from, to) = optionalBounds(scope) {
-                // "This week / today": override just this series' occurrences in
-                // the window (per-event overrides win over the series rule), so
-                // other periods keep the standing series attribution / stay open.
-                let occurrences = try state.database.calendarEvents(in: DateInterval(start: from, end: to))
-                    .filter { $0.seriesMasterID == seriesID }
-                for ev in occurrences {
-                    try state.database.setCalendarEventAttribution(eventID: ev.id, customerID: customerID, projectID: projectID)
-                }
-            } else {
-                // "Always": attribute the whole series.
-                try state.database.setMeetingSeriesAttribution(
-                    seriesID: seriesID,
-                    customerID: customerID,
-                    projectID: projectID,
-                    isIgnored: false
-                )
-            }
-            reload()
-        } catch {
-            loadError = error.localizedDescription
+    private func saveSeriesAttribution(seriesID: String, customerID: String, projectID: String?, scope: AttributionScope) throws {
+        if scope.createsRule, let (from, to) = optionalBounds(scope) {
+            // "This week / today": override just this series' occurrences in
+            // the window (per-event overrides win over the series rule), so
+            // other periods keep the standing series attribution / stay open.
+            let occurrences = try state.database.calendarEvents(in: DateInterval(start: from, end: to))
+                .filter { $0.seriesMasterID == seriesID }
+            try state.database.setCalendarEventAttribution(
+                eventIDs: occurrences.map(\.id), customerID: customerID, projectID: projectID
+            )
+        } else {
+            // "Always": attribute the whole series.
+            try state.database.setMeetingSeriesAttribution(
+                seriesID: seriesID,
+                customerID: customerID,
+                projectID: projectID,
+                isIgnored: false
+            )
         }
+        reload()
     }
 
     /// Concrete window for a bounded scope, else nil (always/justThis).
     private func optionalBounds(_ scope: AttributionScope) -> (Date, Date)? {
-        let (f, t) = scope.bounds(reference: Date())
+        let (f, t) = scope.bounds(reference: self.scope.referenceDate)
         if let f, let t { return (f, t) }
         return nil
     }
 
-    private func saveEventAttribution(eventID: String, customerID: String, projectID: String?) {
-        do {
-            try state.database.setCalendarEventAttribution(eventID: eventID, customerID: customerID, projectID: projectID)
-            reload()
-        } catch {
-            loadError = error.localizedDescription
-        }
+    private func saveEventAttribution(eventID: String, customerID: String, projectID: String?) throws {
+        try state.database.setCalendarEventAttribution(eventID: eventID, customerID: customerID, projectID: projectID)
+        reload()
     }
 
     private func ignoreSeries(_ seriesID: String) {
@@ -883,6 +880,12 @@ struct DiscoverView: View {
 
     private func reload() {
         do {
+            // Invalidate cached path totals so they reflect new samples and
+            // syncs, but remember which hosts had detail loaded: an expanded
+            // host that is already attributed is skipped by the eager loop
+            // below and would otherwise show "Loading paths…" forever.
+            let previouslyLoaded = Set(hostPathDetails.keys)
+            hostPathDetails.removeAll()
             let interval = scope.interval
             var baseAggs = try state.database.signalAggregates(
                 in: interval,
@@ -917,22 +920,20 @@ struct DiscoverView: View {
             self.aggregates = baseAggs
             self.customers = try state.database.allCustomers()
             self.projects = try state.database.allProjects()
-            let rules = try state.database.allRules()
             let seriesAttrs = try state.database.allMeetingSeriesAttributions()
             self.seriesAttributionsByID = Dictionary(uniqueKeysWithValues: seriesAttrs.map { ($0.seriesMasterID, $0) })
             self.hidden = try state.database.allHiddenSignals()
-            self.matcher = RuleMatcher.make(customers: customers,
-                                            projects: projects,
-                                            rules: rules,
-                                            series: seriesAttrs,
-                                            hiddenSignals: hidden)
+            self.matcher = try RuleMatcher.load(from: state.database)
             // Eager-load path detail for urlHosts whose own attribution is empty so we can:
             //   - hide the parent "Unassigned" tag when every child is assigned
             //   - honor customer/unassigned filters that look at child rows
             for agg in baseAggs where agg.kind == .urlHost {
                 if hostPathDetails[agg.value] != nil { continue }
-                if matcher.attribute(kind: .urlHost, value: agg.value).customer != nil { continue }
-                if isHidden(agg) { continue }
+                let keepLoaded = previouslyLoaded.contains(agg.value) || expandedHosts.contains(agg.value)
+                if !keepLoaded {
+                    if matcher.attribute(kind: .urlHost, value: agg.value, at: scope.referenceDate).customer != nil { continue }
+                    if isHidden(agg) { continue }
+                }
                 loadPathDetails(forHost: agg.value)
             }
         } catch {
@@ -940,7 +941,7 @@ struct DiscoverView: View {
         }
     }
 
-    private func saveAssignment(for signal: AppDatabase.SignalAggregate, customerID: String, projectID: String?, scope: AttributionScope) {
+    private func saveAssignment(for signal: AppDatabase.SignalAggregate, customerID: String, projectID: String?, scope: AttributionScope) throws {
         let kind = ruleKind(signal.kind)
         // urlPath rules use the prefix value plus `*` so deeper paths under the same
         // owner/repo (e.g. `github.com/forefront/foo/issues/123`) also match.
@@ -950,27 +951,23 @@ struct DiscoverView: View {
         } else {
             pattern = signal.value
         }
-        // Discover assigns over a range, so the scope is evaluated against "now":
-        // today / this week bound the rule; always = permanent.
-        let (validFrom, validTo) = scope.bounds(reference: Date())
-        do {
-            // Replace only a rule with the same signal AND window, so a scoped
-            // override coexists with any standing permanent rule for this signal.
-            let r = Rule(
-                id: UUID().uuidString,
-                customerID: customerID,
-                projectID: projectID,
-                kind: kind,
-                pattern: pattern,
-                priority: 100,
-                createdAt: Date(),
-                validFrom: validFrom,
-                validTo: validTo
-            )
-            try state.database.upsertReplacingWindow(r)
-            reload()
-        } catch {
-            loadError = error.localizedDescription
-        }
+        // A selected historic day anchors bounded attribution to that day;
+        // rolling ranges use the current day.
+        let (validFrom, validTo) = scope.bounds(reference: self.scope.referenceDate)
+        // Replace only a rule with the same signal AND window, so a scoped
+        // override coexists with any standing permanent rule for this signal.
+        let r = Rule(
+            id: UUID().uuidString,
+            customerID: customerID,
+            projectID: projectID,
+            kind: kind,
+            pattern: pattern,
+            priority: 100,
+            createdAt: Date(),
+            validFrom: validFrom,
+            validTo: validTo
+        )
+        try state.database.upsertReplacingWindow(r)
+        reload()
     }
 }

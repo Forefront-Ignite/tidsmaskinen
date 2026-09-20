@@ -39,6 +39,12 @@ dates. Recorded data and attribution rules are kept; **Settings → Ignored →
 Un-ignore** includes it again. This excludes repo activity from reports without
 stopping capture or deleting its local history.
 
+## Settings and time accounting
+
+Settings control sampling/idle thresholds, calendar RSVP filtering and sync, coding-session idle time, integrations, startup, permissions, and ignored signals. Changing the RSVP filter hides or shows saved meetings without discarding their assignments.
+
+Concurrent work for different customer/project buckets can count in parallel; overlapping sources within the same bucket are deduplicated. Idle foreground samples do not count, while calendar bookings still contribute their duration. Attendance verification and a single-customer-per-minute mode are not implemented and have no settings controls.
+
 ## What it deliberately does NOT do
 
 - No cloud sync — everything is local in `~/Library/Application Support/Tidsmaskinen/db.sqlite`

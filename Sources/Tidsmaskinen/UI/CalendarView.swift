@@ -4,6 +4,7 @@ struct CalendarView: View {
     @EnvironmentObject private var state: AppState
     @State private var events: [CalendarEvent] = []
     @State private var totalCount: Int = 0
+    @State private var loadError: String?
     @State private var refreshTimer: Timer?
 
     var body: some View {
@@ -41,7 +42,7 @@ struct CalendarView: View {
                 ContentUnavailableView {
                     Label("Not signed in to Microsoft", systemImage: "person.crop.circle.badge.exclamationmark")
                 } description: {
-                    Text("Open the menu bar and click \"Sign in to Microsoft\" to start syncing your Outlook calendar.")
+                    Text("Open Settings and click \"Sign in to Microsoft\" to start syncing your Outlook calendar.")
                 }
             } else if let err = state.calendarSync.lastError {
                 Text(err)
@@ -111,6 +112,11 @@ struct CalendarView: View {
                 }
             }
         }
+        .alert("Unable to load data", isPresented: Binding(
+            get: { loadError != nil }, set: { if !$0 { loadError = nil } }
+        )) {
+            Button("OK") { loadError = nil }
+        } message: { Text(loadError ?? "") }
         .onAppear {
             reload()
             let t = Timer(timeInterval: 5, repeats: true) { _ in
@@ -131,8 +137,9 @@ struct CalendarView: View {
         do {
             events = try state.database.recentCalendarEvents(limit: 200)
             totalCount = try state.database.calendarEventCount()
+            loadError = nil
         } catch {
-            events = []
+            loadError = error.localizedDescription
         }
     }
 

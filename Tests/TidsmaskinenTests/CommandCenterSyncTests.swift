@@ -90,4 +90,78 @@ final class CommandCenterSyncTests: XCTestCase {
         XCTAssertEqual(result.projectsImported, 0)
         XCTAssertTrue(try db.allProjects().isEmpty)
     }
+    func testArchivedRowsReappearWithOriginalIDs() async throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        let sync = CommandCenterSync(database: db, client: CommandCenterClient())
+        let clients = [CommandCenter.Client(id: "c1", name: "Client", status: "active")]
+        let projects = [project(id: "e1", name: "Project", clientId: "c1", clientName: "Client")]
+        _ = try await sync.reconcile(clients: clients, projects: projects)
+        let customerID = try XCTUnwrap(db.allCustomers().first?.id)
+        let projectID = try XCTUnwrap(db.allProjects().first?.id)
+        _ = try await sync.reconcile(clients: [], projects: [])
+        XCTAssertTrue(try db.allCustomers().isEmpty)
+        XCTAssertTrue(try db.allProjects().isEmpty)
+
+        _ = try await sync.reconcile(clients: clients, projects: projects)
+        XCTAssertEqual(try db.allCustomers().map(\.id), [customerID])
+        XCTAssertEqual(try db.allProjects().map(\.id), [projectID])
+        XCTAssertEqual(try db.allCustomersIncludingArchived().count, 1)
+        XCTAssertEqual(try db.allProjectsIncludingArchived().count, 1)
+    }
+
+    func testReturningEngagementReactivatesAndRenamesItsArchivedParent() async throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        let sync = CommandCenterSync(database: db, client: CommandCenterClient())
+        _ = try await sync.reconcile(clients: [], projects: [
+            project(id: "e1", name: "Project", clientId: "c1", clientName: "Old name")
+        ])
+        let customerID = try XCTUnwrap(db.allCustomers().first?.id)
+        _ = try await sync.reconcile(clients: [], projects: [])
+
+        _ = try await sync.reconcile(clients: [], projects: [
+            project(id: "e1", name: "Project", clientId: "c1", clientName: "New name")
+        ])
+        XCTAssertEqual(try db.allCustomers().map(\.id), [customerID])
+        XCTAssertEqual(try db.allCustomers().map(\.name), ["New name"])
+        XCTAssertEqual(try db.allProjects().count, 1)
+    }
+
+    /// The client feed is authoritative for a client's name. An engagement's
+    /// joined clientName (often a shorter display name) must not overwrite it,
+    /// or the name flips between the two on every sync pass.
+    func testEngagementClientNameDoesNotOverrideClientFeed() async throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        let sync = CommandCenterSync(database: db, client: CommandCenterClient())
+        let clients = [CommandCenter.Client(id: "c1", name: "Ambea AB", status: "active")]
+        let projects = [project(id: "e1", name: "Project", clientId: "c1", clientName: "Ambea")]
+        _ = try await sync.reconcile(clients: clients, projects: projects)
+        XCTAssertEqual(try db.allCustomers().map(\.name), ["Ambea AB"])
+        let second = try await sync.reconcile(clients: clients, projects: projects)
+        XCTAssertEqual(try db.allCustomers().map(\.name), ["Ambea AB"])
+        XCTAssertEqual(second.clientsUpdated, 0)
+    }
+
+    /// Earlier syncs could leave an archived row *and* a newer active row for
+    /// the same external ID. The lookup must keep using the active row rather
+    /// than resurrecting the archived twin beside it.
+    func testLookupPrefersActiveRowOverArchivedTwin() async throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        let now = Date()
+        try db.upsert(Customer(id: "old", name: "Client", color: nil, createdAt: now,
+                               externalSource: ExternalSource.commandCenterArchived.rawValue,
+                               externalID: "c1", externalSyncedAt: now))
+        try db.upsert(Customer(id: "new", name: "Client", color: nil, createdAt: now,
+                               externalSource: ExternalSource.commandCenter.rawValue,
+                               externalID: "c1", externalSyncedAt: now))
+        XCTAssertEqual(try db.customer(externalSource: .commandCenter, externalID: "c1")?.id, "new")
+
+        let sync = CommandCenterSync(database: db, client: CommandCenterClient())
+        _ = try await sync.reconcile(
+            clients: [CommandCenter.Client(id: "c1", name: "Client", status: "active")],
+            projects: []
+        )
+        XCTAssertEqual(try db.allCustomers().map(\.id), ["new"])
+        XCTAssertEqual(try db.allCustomersIncludingArchived().count, 2)
+    }
+
 }

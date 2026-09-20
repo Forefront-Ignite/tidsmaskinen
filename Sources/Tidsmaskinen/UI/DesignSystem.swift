@@ -33,7 +33,6 @@ enum TM {
     // Corner radii (prototype `--r: 22px`, cards 16, pills 13).
     static let radiusCard: CGFloat = 18
     static let radiusInner: CGFloat = 13
-    static let radiusPill: CGFloat = 11
 }
 
 // MARK: - Hex color
@@ -119,7 +118,7 @@ enum AttributionScope: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .justThis: return "Just this"
-        case .today:    return "Today"
+        case .today:    return "This day"
         case .thisWeek: return "This week"
         case .always:   return "Always"
         }
@@ -184,24 +183,13 @@ struct GlassCard: ViewModifier {
     }
 }
 
-/// A soft inner chip / control surface (pills, steppers, segmented bg).
-struct GlassChip: ViewModifier {
-    var radius: CGFloat = TM.radiusPill
-    func body(content: Content) -> some View {
-        content.glassEffect(.regular.interactive(), in: .rect(cornerRadius: radius))
-    }
-}
-
 extension View {
     /// Frosted card container with optional internal padding.
     func glassCard(radius: CGFloat = TM.radiusCard, padding: CGFloat? = nil) -> some View {
         modifier(GlassCard(radius: radius, padding: padding))
     }
 
-    /// Soft interactive chip surface.
-    func glassChip(radius: CGFloat = TM.radiusPill) -> some View {
-        modifier(GlassChip(radius: radius))
-    }
+
 }
 
 // MARK: - App mark (segmented-clock identity)
@@ -327,13 +315,6 @@ struct TMWallpaper: View {
                     center: tint.1, startRadius: 0, endRadius: 620)
             }
         }
-    }
-}
-
-extension View {
-    /// Place the soft glass wallpaper behind a full-bleed view.
-    func tmWallpaper() -> some View {
-        background(TMWallpaper().ignoresSafeArea())
     }
 }
 

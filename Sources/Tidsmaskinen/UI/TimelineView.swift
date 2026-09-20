@@ -135,6 +135,7 @@ struct TimelineView: View {
         .onChange(of: pendingUndo) { _, _ in undoError = nil }
         .onChange(of: state.sampleCount) { _, _ in reload() }
         .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload() }
+        .onChange(of: state.commandCenterLastSyncAt) { _, _ in reload() }
     }
 
     // MARK: - Day stats
@@ -1050,21 +1051,13 @@ struct TimelineView: View {
             let allSamples = try state.database.samples(in: dayInterval)
             let rawEvents = try state.database.calendarEvents(in: dayInterval)
             let micSessions = try state.database.micSessions(in: dayInterval)
-            let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions)
+            let matcher = try RuleMatcher.load(from: state.database)
+            let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions, matcher: matcher)
             let sessions = try state.database.sessions(in: dayInterval)
             let claudeDeltas = try state.database.claudeActiveDeltas(in: dayInterval)
             customers = try state.database.allCustomers()
             projects = try state.database.allProjects()
-            let rules = try state.database.allRules()
-            let allSeries = try state.database.allMeetingSeriesAttributions()
             let hidden = try state.database.allHiddenSignals()
-            let matcher = RuleMatcher.make(
-                customers: customers,
-                projects: projects,
-                rules: rules,
-                series: allSeries,
-                hiddenSignals: hidden
-            )
             hasIgnoredMeetings = events.contains { matcher.attribute(event: $0).isIgnored }
             hasHiddenSignals = !hidden.isEmpty
             let samples: [ActivitySample]
@@ -1519,11 +1512,7 @@ private struct ReattributePopover: View {
 
     /// True when the secondary row would render at least one action.
     private var hasSecondaryRow: Bool {
-        if isEventScopeIgnore { return false }
-        if isSeriesScopeIgnore { return true } // always has "Restore series"
-        // Non-ignored: ignore + clear override possibilities
-        if block.hasManualOverride { return true }
-        return true // "Ignore this meeting" is always offered
+        !isEventScopeIgnore
     }
 
     @ViewBuilder

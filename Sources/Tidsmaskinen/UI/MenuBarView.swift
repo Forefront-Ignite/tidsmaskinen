@@ -10,26 +10,28 @@ struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
 
     @State private var report: WeeklyReport?
-    @State private var customers: [Customer] = []
+    @State private var loadError: String?
     /// Review backlog across the current week *and* recent previous weeks, so
     /// the glance never claims "all reviewed" while an older week still has
-    /// open items. See `ReviewQueue.rolling`.
+    /// open items. Cached on `AppState`; see `ReviewQueue.rolling`.
     @State private var backlog = ReviewQueue.Rolling()
     @State private var reloadTask: Task<Void, Never>?
-
-    /// How many weeks back the glance scans for residual backlog.
-    private let backlogWeeksBack = ReviewQueue.defaultBacklogWeeksBack
 
     var body: some View {
         VStack(spacing: 12) {
             header
             glanceCard
+            if let loadError {
+                Text("Unable to refresh: \(loadError)")
+                    .font(.caption).foregroundStyle(.red)
+            }
             shortcutGrid
             footer
         }
         .padding(14)
         .frame(width: 320)
         .onAppear { loadGlance() }
+        .onDisappear { reloadTask?.cancel() }
         .onChange(of: state.sampleCount) { _, _ in loadGlance() }
         .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in loadGlance() }
     }
@@ -181,6 +183,8 @@ struct MenuBarView: View {
     /// how much of the backlog is older than this week so it doesn't surprise
     /// you when you navigate back.
     private var backlogLabel: String {
+        if loadError != nil { return "review status unavailable" }
+        if report == nil { return "loading…" }
         if backlog.totalCount == 0 { return "all reviewed" }
         if backlog.earlierCount > 0 && backlog.currentWeekCount > 0 {
             return "\(backlog.currentWeekCount) this week · \(backlog.earlierCount) earlier"
@@ -211,35 +215,32 @@ struct MenuBarView: View {
         let week = cal.currentWeekInterval()
         let sampleInterval = AppSettings.sampleIntervalSeconds
         let idleMinutes = AppSettings.claudeIdleThresholdMinutes
-        let reviewMinMinutes = AppSettings.reviewMinMinutes
-        let weeksBack = backlogWeeksBack
-        let now = Date()
         reloadTask = Task { @MainActor in
-            let result = try? await Task.detached(priority: .utility) { () -> (WeeklyReport, [Customer], ReviewQueue.Rolling) in
-                let samples = try db.samples(in: week)
-                let rawEvents = try db.calendarEvents(in: week)
-                let micSessions = try db.micSessions(in: week)
-                let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions)
-                let sessions = try db.sessions(in: week)
-                let deltas = try db.claudeActiveDeltas(in: week)
-                let matcher = try RuleMatcher.load(from: db)
-                let report = WeeklyReport.compute(
-                    week: week, samples: samples, events: events, sessions: sessions,
-                    claudeDeltas: deltas, micSessions: micSessions,
-                    idleThresholdSeconds: TimeInterval(idleMinutes * 60),
-                    matcher: matcher, sampleIntervalSeconds: sampleInterval)
-                let backlog = (try? ReviewQueue.rolling(
-                    database: db, now: now, weeksBack: weeksBack,
-                    sampleIntervalSeconds: sampleInterval,
-                    idleThresholdSeconds: TimeInterval(idleMinutes * 60),
-                    minMinutes: reviewMinMinutes)) ?? ReviewQueue.Rolling()
-                return (report, try db.allCustomers(), backlog)
-            }.value
-            if Task.isCancelled { return }
-            if let result {
-                self.report = result.0
-                self.customers = result.1
-                self.backlog = result.2
+            do {
+                let report = try await Task.detached(priority: .utility) { () -> WeeklyReport in
+                    let samples = try db.samples(in: week)
+                    let rawEvents = try db.calendarEvents(in: week)
+                    let micSessions = try db.micSessions(in: week)
+                    let matcher = try RuleMatcher.load(from: db)
+                    let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions, matcher: matcher)
+                    let sessions = try db.sessions(in: week)
+                    let deltas = try db.claudeActiveDeltas(in: week)
+                    return WeeklyReport.compute(
+                        week: week, samples: samples, events: events, sessions: sessions,
+                        claudeDeltas: deltas, micSessions: micSessions,
+                        idleThresholdSeconds: TimeInterval(idleMinutes * 60),
+                        matcher: matcher, sampleIntervalSeconds: sampleInterval)
+                }.value
+                if Task.isCancelled { return }
+                self.report = report
+                // Served from the cache while fresh, so a new sample every
+                // 15 s doesn't re-resolve five weeks of history.
+                self.backlog = try await state.currentReviewBacklog()
+                if Task.isCancelled { return }
+                self.loadError = nil
+            } catch {
+                if Task.isCancelled { return }
+                self.loadError = error.localizedDescription
             }
         }
     }

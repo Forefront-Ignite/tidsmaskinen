@@ -12,6 +12,9 @@ final class CalendarSync: ObservableObject {
     let database: AppDatabase
     let client: GraphClient
 
+    private var autoSyncEnabled = false
+    private var scheduledMinutes: Int?
+
     private static let lastSyncedKey = "calendarSync.lastSyncedAt"
     // Timer and NSObjectProtocol aren't Sendable. These are only mutated from
     // the main actor (this class is @MainActor); nonisolated(unsafe) lets
@@ -44,6 +47,7 @@ final class CalendarSync: ObservableObject {
     /// Start (or restart) the auto-sync timer at the user-configured interval.
     /// Safe to call multiple times. Fires an immediate sync first.
     func startAutoSync(initialSync: Bool = true) {
+        autoSyncEnabled = true
         rearmAutoSync()
         if initialSync {
             Task { await syncNow() }
@@ -51,12 +55,17 @@ final class CalendarSync: ObservableObject {
     }
 
     func stopAutoSync() {
+        autoSyncEnabled = false
+        scheduledMinutes = nil
         autoSyncTimer?.invalidate()
         autoSyncTimer = nil
     }
 
     private func rearmAutoSync() {
+        guard autoSyncEnabled else { return }
         let minutes = AppSettings.calendarAutoSyncMinutes
+        guard scheduledMinutes != minutes else { return }
+        scheduledMinutes = minutes
         autoSyncTimer?.invalidate()
         autoSyncTimer = nil
         guard minutes > 0 else { return }
@@ -80,10 +89,13 @@ final class CalendarSync: ObservableObject {
             let end = until ?? Calendar.current.date(byAdding: .day, value: 14, to: now) ?? now
             let interval = DateInterval(start: start, end: end)
 
-            let fetched = try await client.fetchCalendarView(start: start, end: end)
-            let fetchedIDs = Set(fetched.map { $0.id })
+            let snapshot = try await client.fetchCalendarView(start: start, end: end)
+            let fetched = snapshot.events
+            // A skipped (unparseable) event still exists on the server, so it
+            // counts as fetched for the orphan pass and keeps its local row.
+            let fetchedIDs = Set(fetched.map { $0.id }).union(snapshot.skippedIDs)
 
-            let existing = try database.calendarEvents(in: interval)
+            let existing = try database.calendarEvents(in: interval, includeFiltered: true)
 
             // Look up prior rows by the *fetched IDs*, not by the startAt window:
             // /calendarView returns events that merely overlap the range, so while
