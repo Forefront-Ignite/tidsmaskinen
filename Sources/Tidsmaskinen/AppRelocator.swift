@@ -48,6 +48,21 @@ enum AppRelocator {
         guard isMovePending else { return releaseUpdater() }
         let bundleURL = Bundle.main.bundleURL
 
+        let target = userApplications.appendingPathComponent(bundleURL.lastPathComponent)
+        // Duplicate bundle IDs make Launch Services pick a copy arbitrarily, so
+        // this older one can be opened by accident. Replacing the destination
+        // would then silently downgrade the install the user actually keeps.
+        if let newer = versionAtDestination(target), isNewer(newer, than: bundleVersion(of: Bundle.main)) {
+            showFailure("A newer Tidsmaskinen is already installed",
+                        """
+                        Version \(newer) is in your home Applications folder, and this copy is older.
+
+                        Quit this one and open the copy in ~/Applications instead. You can then drag \
+                        this older copy to the Trash.
+                        """)
+            return releaseUpdater()
+        }
+
         let alert = NSAlert()
         alert.messageText = "Move Tidsmaskinen to your Applications folder?"
         alert.informativeText = """
@@ -74,15 +89,21 @@ enum AppRelocator {
         // and re-register from the new location after relaunch.
         let hadLoginItem = LoginItemManager.isEnabled
         if hadLoginItem { try? LoginItemManager.setEnabled(false) }
-        let target: URL
         do {
-            target = try move(bundleURL)
+            try move(bundleURL, to: target)
         } catch {
-            if hadLoginItem { try? LoginItemManager.setEnabled(true) }
-            defer { releaseUpdater() }
-            if case RelocationError.cancelled = error { return }
-            showFailure("Couldn't move Tidsmaskinen", error.localizedDescription)
-            return
+            // The error says what the Apple event reported; only the filesystem
+            // says what happened. An event timeout can fire while the
+            // privileged command goes on to complete, and treating that as a
+            // cancellation would strand the login item and hooks on a bundle
+            // that is no longer there.
+            if !moveLanded(from: bundleURL, to: target) {
+                if hadLoginItem { try? LoginItemManager.setEnabled(true) }
+                defer { releaseUpdater() }
+                if case RelocationError.cancelled = error { return }
+                showFailure("Couldn't move Tidsmaskinen", error.localizedDescription)
+                return
+            }
         }
         AppSettings.defaults.set(hadLoginItem, forKey: SettingsKey.relocationRestoreLoginItem)
         do {
@@ -144,12 +165,30 @@ enum AppRelocator {
             """
     }
 
-    private static func move(_ bundleURL: URL) throws -> URL {
-        let fm = FileManager.default
-        try fm.createDirectory(at: userApplications, withIntermediateDirectories: true)
-        let target = userApplications.appendingPathComponent(bundleURL.lastPathComponent)
+    private static func move(_ bundleURL: URL, to target: URL) throws {
+        try FileManager.default.createDirectory(at: userApplications, withIntermediateDirectories: true)
         try runAsAdmin(moveCommand(from: bundleURL, to: target))
-        return target
+    }
+
+    /// Whether the bundle actually arrived at `target` and left its old home.
+    private static func moveLanded(from bundleURL: URL, to target: URL) -> Bool {
+        guard bundleURL.standardizedFileURL != target.standardizedFileURL else { return true }
+        let fm = FileManager.default
+        return fm.fileExists(atPath: target.path) && !fm.fileExists(atPath: bundleURL.path)
+    }
+
+    /// `CFBundleVersion` of an app bundle, or nil when there is nothing there.
+    static func versionAtDestination(_ target: URL) -> String? {
+        Bundle(url: target).map(bundleVersion(of:))
+    }
+
+    static func bundleVersion(of bundle: Bundle) -> String {
+        bundle.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+    }
+
+    /// Numeric comparison, so 0.3.15 sorts above 0.3.9 rather than below it.
+    static func isNewer(_ candidate: String, than current: String) -> Bool {
+        candidate.compare(current, options: .numeric) == .orderedDescending
     }
 
     private static func runAsAdmin(_ command: String) throws {

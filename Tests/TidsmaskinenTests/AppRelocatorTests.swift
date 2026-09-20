@@ -76,6 +76,19 @@ final class AppRelocatorTests: XCTestCase {
                        "must not recurse into other apps living there: \(command)")
     }
 
+    func testVersionComparisonIsNumericNotLexical() {
+        // Lexical ordering would call 0.3.9 newer than 0.3.15 and let an older
+        // copy overwrite the install the user actually keeps.
+        XCTAssertTrue(AppRelocator.isNewer("0.3.15", than: "0.3.9"))
+        XCTAssertFalse(AppRelocator.isNewer("0.3.9", than: "0.3.15"))
+        XCTAssertTrue(AppRelocator.isNewer("0.4.0", than: "0.3.15"))
+        XCTAssertFalse(AppRelocator.isNewer("0.3.15", than: "0.3.15"), "an equal version is not newer")
+    }
+
+    func testNoVersionReportedForAnEmptyDestination() {
+        XCTAssertNil(AppRelocator.versionAtDestination(root.appendingPathComponent("Nothing.app")))
+    }
+
     func testAdminScriptEscapesShellCommandForAppleScript() {
         let path = "/Users/a'b\"c\\d ü/Tidsmaskinen.app"
         let command = "chown -R 1:2 \(AppRelocator.shellQuoted(path))"
