@@ -34,6 +34,16 @@ final class AppState: ObservableObject {
     let commandCenterSync: CommandCenterSync
     let updaterController: SPUStandardUpdaterController
 
+    // Rolling review backlog shared by the menu-bar glance and Review's landing
+    // week. One pass resolves every sample of the last five weeks, so it is
+    // refreshed at most every `reviewBacklogMaxAge` instead of on every 15 s
+    // sample, and invalidated by Review's own writes and by calendar syncs.
+    // Writes from Discover, Timeline and Calls fall back to the max age.
+    @Published private(set) var reviewBacklog: ReviewQueue.Rolling?
+    private var reviewBacklogComputedAt: Date?
+    private var reviewBacklogTask: Task<ReviewQueue.Rolling, Error>?
+    static let reviewBacklogMaxAge: TimeInterval = 5 * 60
+
     private var cancellables = Set<AnyCancellable>()
     private var commandCenterAutoSyncTask: Task<Void, Never>?
 
@@ -61,6 +71,10 @@ final class AppState: ObservableObject {
         // (e.g. MenuBarView, CalendarView) repaint when sync state changes.
         calendarSync.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        calendarSync.$lastSyncedAt
+            .dropFirst()
+            .sink { [weak self] _ in self?.invalidateReviewBacklog() }
             .store(in: &cancellables)
 
         self.monitor.onSample = { [weak self] sample in
@@ -116,6 +130,41 @@ final class AppState: ObservableObject {
         calendarSync.stopAutoSync()
     }
 
+    // MARK: - Review backlog
+
+    /// Drops the cached rolling backlog so the next read recomputes it.
+    func invalidateReviewBacklog() {
+        reviewBacklogComputedAt = nil
+    }
+
+    /// The rolling backlog, recomputed off the main actor when the cache is
+    /// missing, stale or invalidated. Concurrent callers share one computation.
+    func currentReviewBacklog() async throws -> ReviewQueue.Rolling {
+        if let cached = reviewBacklog, let at = reviewBacklogComputedAt,
+           Date().timeIntervalSince(at) < Self.reviewBacklogMaxAge {
+            return cached
+        }
+        if let task = reviewBacklogTask { return try await task.value }
+        let db = database
+        let now = Date()
+        let sampleInterval = AppSettings.sampleIntervalSeconds
+        let idleSeconds = TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60)
+        let minMinutes = AppSettings.reviewMinMinutes
+        let task = Task.detached(priority: .utility) {
+            try ReviewQueue.rolling(
+                database: db, now: now, weeksBack: ReviewQueue.defaultBacklogWeeksBack,
+                sampleIntervalSeconds: sampleInterval,
+                idleThresholdSeconds: idleSeconds,
+                minMinutes: minMinutes)
+        }
+        reviewBacklogTask = task
+        defer { reviewBacklogTask = nil }
+        let result = try await task.value
+        reviewBacklog = result
+        reviewBacklogComputedAt = Date()
+        return result
+    }
+
     // MARK: - Command Center
 
     /// Saves a new token and (best-effort) immediately re-syncs.
@@ -149,6 +198,7 @@ final class AppState: ObservableObject {
             commandCenterLastSyncAt = result.finishedAt
             commandCenterTokenInvalid = false
             commandCenterLastError = nil
+            invalidateReviewBacklog()
             objectWillChange.send()
         } catch let error as CommandCenterError {
             commandCenterLastError = error.description

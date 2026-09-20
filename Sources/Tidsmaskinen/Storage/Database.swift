@@ -1097,15 +1097,24 @@ struct AppDatabase {
         var id: String { seriesMasterID }
     }
 
-    /// Series with at least one occurrence in the interval, ignoring per-event
-    /// `isIgnored` flags (we leave it to the caller to filter out ignored
-    /// series via `meetingSeriesAttribution`).
+    /// Seconds of the event inside the interval. The Discover meeting lists
+    /// use overlap semantics and clipped totals, like Review and the report,
+    /// so a meeting crossing a day boundary agrees with them on both sides.
+    private static func clippedSeconds(_ event: CalendarEvent, in interval: DateInterval) -> Double {
+        max(0, min(event.endAt, interval.end).timeIntervalSince(max(event.startAt, interval.start)))
+    }
+
+    private static func overlapping(_ interval: DateInterval) -> SQLExpression {
+        CalendarEvent.Columns.endAt > interval.start && CalendarEvent.Columns.startAt < interval.end
+    }
+
+    /// Series with at least one occurrence overlapping the interval, ignoring
+    /// per-event `isIgnored` flags (we leave it to the caller to filter out
+    /// ignored series via `meetingSeriesAttribution`).
     func meetingSeriesAggregates(in interval: DateInterval) throws -> [MeetingSeriesAggregate] {
         try dbQueue.read { db in
             let events = try CalendarEvent
-                .filter(CalendarEvent.Columns.startAt >= interval.start
-                        && CalendarEvent.Columns.startAt < interval.end
-                        && CalendarEvent.Columns.seriesMasterID != nil)
+                .filter(Self.overlapping(interval) && CalendarEvent.Columns.seriesMasterID != nil)
                 .order(CalendarEvent.Columns.startAt.asc)
                 .fetchAll(db)
                 .filter { AppSettings.meetingRSVPFilter.includes($0.rsvpStatus) }
@@ -1122,7 +1131,7 @@ struct AppDatabase {
                 var counts: [String: Int] = [:]
                 for e in group { counts[e.subject, default: 0] += 1 }
                 let subject = counts.max { $0.value < $1.value }?.key ?? first.subject
-                let total = group.reduce(0.0) { $0 + max(0, $1.endAt.timeIntervalSince($1.startAt)) }
+                let total = group.reduce(0.0) { $0 + Self.clippedSeconds($1, in: interval) }
                 return MeetingSeriesAggregate(
                     seriesMasterID: sid,
                     sampleSubject: subject.isEmpty ? "(no subject)" : subject,
@@ -1138,17 +1147,23 @@ struct AppDatabase {
 
     /// One-off meetings: events that are not part of a series. Ignored events
     /// are filtered out at the database level — Discover surfaces them under
-    /// the Ignored list instead.
+    /// the Ignored list instead. Bounds are clipped to the interval (in-memory
+    /// copies only), so a boundary-crossing meeting lists its in-range part.
     func oneOffMeetingAggregates(in interval: DateInterval) throws -> [CalendarEvent] {
         try dbQueue.read { db in
             try CalendarEvent
-                .filter(CalendarEvent.Columns.startAt >= interval.start
-                        && CalendarEvent.Columns.startAt < interval.end
+                .filter(Self.overlapping(interval)
                         && CalendarEvent.Columns.seriesMasterID == nil
                         && CalendarEvent.Columns.isIgnored == false)
                 .order(CalendarEvent.Columns.startAt.desc)
                 .fetchAll(db)
                 .filter { AppSettings.meetingRSVPFilter.includes($0.rsvpStatus) }
+                .map { event in
+                    var clipped = event
+                    clipped.startAt = max(event.startAt, interval.start)
+                    clipped.endAt = min(event.endAt, interval.end)
+                    return clipped
+                }
         }
     }
 
@@ -1168,9 +1183,7 @@ struct AppDatabase {
         try dbQueue.read { db in
             // Per-event ignores within range.
             let ignoredEvents = try CalendarEvent
-                .filter(CalendarEvent.Columns.startAt >= interval.start
-                        && CalendarEvent.Columns.startAt < interval.end
-                        && CalendarEvent.Columns.isIgnored == true)
+                .filter(Self.overlapping(interval) && CalendarEvent.Columns.isIgnored == true)
                 .order(CalendarEvent.Columns.startAt.desc)
                 .fetchAll(db)
                 .filter { AppSettings.meetingRSVPFilter.includes($0.rsvpStatus) }
@@ -1180,7 +1193,7 @@ struct AppDatabase {
                     scope: .event,
                     id: e.id,
                     label: e.subject.isEmpty ? "(no subject)" : e.subject,
-                    totalSeconds: max(0, e.endAt.timeIntervalSince(e.startAt)),
+                    totalSeconds: Self.clippedSeconds(e, in: interval),
                     occurrenceCount: nil
                 )
             }
@@ -1195,13 +1208,12 @@ struct AppDatabase {
             for series in ignoredSeries {
                 let occurrences = try CalendarEvent
                     .filter(CalendarEvent.Columns.seriesMasterID == series.seriesMasterID
-                            && CalendarEvent.Columns.startAt >= interval.start
-                            && CalendarEvent.Columns.startAt < interval.end)
+                            && Self.overlapping(interval))
                     .fetchAll(db)
                     .filter { AppSettings.meetingRSVPFilter.includes($0.rsvpStatus) }
                 let firstSubject = occurrences.first?.subject ?? ""
                 let label = firstSubject.isEmpty ? "(no subject)" : firstSubject
-                let total = occurrences.reduce(0.0) { $0 + max(0, $1.endAt.timeIntervalSince($1.startAt)) }
+                let total = occurrences.reduce(0.0) { $0 + Self.clippedSeconds($1, in: interval) }
                 rows.append(IgnoredMeetingAggregate(
                     scope: .series,
                     id: series.seriesMasterID,

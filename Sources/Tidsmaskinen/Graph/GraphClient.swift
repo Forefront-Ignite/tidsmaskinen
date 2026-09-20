@@ -211,8 +211,17 @@ actor GraphClient {
         return me
     }
 
+    struct CalendarFetch {
+        var events: [CalendarEvent]
+        /// Live events Graph returned with unparseable dates. They are not
+        /// synced, but `CalendarSync` must treat them as present so its orphan
+        /// pass never deletes a local copy — one bad row must neither block
+        /// every sync nor erase history.
+        var skippedIDs: Set<String>
+    }
+
     /// Fetch a complete calendar snapshot; RSVP filtering happens on local reads.
-    func fetchCalendarView(start: Date, end: Date) async throws -> [CalendarEvent] {
+    func fetchCalendarView(start: Date, end: Date) async throws -> CalendarFetch {
         let token = try await ensureValidAccessToken()
         let me = try? await me()
         let userDomain = me?.userPrincipalName.split(separator: "@").last.map(String.init).map { $0.lowercased() }
@@ -231,6 +240,7 @@ actor GraphClient {
         var nextURL = components.url
         var visited = Set<URL>()
         var allEvents: [CalendarEvent] = []
+        var skippedIDs = Set<String>()
         // 200 events per page; a 28-day window never needs anywhere near this.
         let maxPages = 100
         while let url = nextURL {
@@ -250,11 +260,11 @@ actor GraphClient {
             }
             let parsed = try JSONDecoder().decode(GraphCalendarViewResponse.self, from: data)
             for event in parsed.value where event.isCancelled != true {
-                // Cancelled events are dropped above before validation: one with
-                // unparseable dates must not poison every future sync.
                 guard let converted = event.toCalendarEvent(userDomain: userDomain) else {
-                    // A partial snapshot would make CalendarSync delete valid local rows.
-                    throw GraphError.calendarFetchFailed("An event has invalid start/end dates.")
+                    // Graph has emitted odd rows before. Skip the row but report
+                    // it, so the sync keeps working and nothing local is deleted.
+                    skippedIDs.insert(event.id)
+                    continue
                 }
                 allEvents.append(converted)
             }
@@ -267,7 +277,7 @@ actor GraphClient {
                 nextURL = nil
             }
         }
-        return allEvents
+        return CalendarFetch(events: allEvents, skippedIDs: skippedIDs)
     }
 
     // MARK: - Private helpers

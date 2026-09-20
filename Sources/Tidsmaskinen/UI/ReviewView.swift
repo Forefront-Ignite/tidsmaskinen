@@ -110,22 +110,11 @@ struct ReviewView: View {
     /// everything is clean). Runs off the main actor; if `weekStart` ends up
     /// changing, the onChange handler does the reload.
     private func landOnOldestOpenWeek() {
-        let db = state.database
-        let now = Date()
-        let sampleInterval = AppSettings.sampleIntervalSeconds
-        let idleMinutes = AppSettings.claudeIdleThresholdMinutes
-        let reviewMin = AppSettings.reviewMinMinutes
         let lookupPeriod = period
         initialLookupTask?.cancel()
         initialLookupTask = Task { @MainActor in
-            let oldest = await Task.detached(priority: .userInitiated) { () -> Date? in
-                (try? ReviewQueue.rolling(
-                    database: db, now: now,
-                    weeksBack: ReviewQueue.defaultBacklogWeeksBack,
-                    sampleIntervalSeconds: sampleInterval,
-                    idleThresholdSeconds: TimeInterval(idleMinutes * 60),
-                    minMinutes: reviewMin))?.oldestOpenWeekStart
-            }.value
+            // Same cached backlog the menu-bar glance shows.
+            let oldest = (try? await state.currentReviewBacklog())?.oldestOpenWeekStart
             // Navigation or an explicit menu-bar target takes precedence over
             // this initial lookup. Never discard work begun while it ran.
             guard !Task.isCancelled, period == lookupPeriod, cursor == 0,
@@ -136,6 +125,10 @@ struct ReviewView: View {
                 reload()
             }
         }
+    }
+
+    private func reloadIfUntouched() {
+        if cursor == 0 && resolved.isEmpty && pathResolved.isEmpty { reload() }
     }
 
     private func goBack() {
@@ -178,11 +171,12 @@ struct ReviewView: View {
             initialLookupTask?.cancel()
             reload()
         }
-        // Refresh when new activity lands, but only before the user has started
-        // acting — so a live snapshot doesn't wipe in-session resolutions/cursor.
-        .onChange(of: state.sampleCount) { _, _ in
-            if cursor == 0 && resolved.isEmpty && pathResolved.isEmpty { reload() }
-        }
+        // Refresh when new activity or a sync lands, but only before the user
+        // has started acting — so a live snapshot doesn't wipe in-session
+        // resolutions/cursor.
+        .onChange(of: state.sampleCount) { _, _ in reloadIfUntouched() }
+        .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reloadIfUntouched() }
+        .onChange(of: state.commandCenterLastSyncAt) { _, _ in reloadIfUntouched() }
         .alert("Database error", isPresented: errorBinding) {
             Button("OK") { loadError = nil }
         } message: { Text(loadError ?? "") }
@@ -843,7 +837,14 @@ struct ReviewView: View {
     /// in-session UI state on success. Surfaces errors; does NOT reload the snapshot.
     @discardableResult
     private func run(_ body: () throws -> Void) -> Bool {
-        do { try body(); return true } catch { loadError = error.localizedDescription; return false }
+        do {
+            try body()
+            state.invalidateReviewBacklog()
+            return true
+        } catch {
+            loadError = error.localizedDescription
+            return false
+        }
     }
 
     private func hiddenKind(_ k: AppDatabase.SignalAggregate.Kind) -> HiddenSignal.Kind? {

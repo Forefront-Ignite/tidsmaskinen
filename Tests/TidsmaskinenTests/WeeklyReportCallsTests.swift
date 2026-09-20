@@ -112,6 +112,47 @@ final class WeeklyReportCallsTests: XCTestCase {
         XCTAssertEqual(try db.micSessions(in: interval).map(\.id), [crossing])
     }
 
+    /// A call crossing the week boundary is queued in both weeks (clipped), but
+    /// the rolling badge counts it once, owned by the earlier week.
+    func testRollingBacklogCountsBoundaryCrossingCallOnce() throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        let now = at(2026, 4, 15, 12)
+        let weekStart = cal.currentWeekInterval(reference: now).start
+        let id = try db.startMicSession(at: weekStart.addingTimeInterval(-3600), voipApps: [])
+        try db.endMicSession(id: id, endedAt: weekStart.addingTimeInterval(3600), participant: nil, slackChannel: nil, voipApps: nil)
+        let rolling = try ReviewQueue.rolling(database: db, now: now, weeksBack: 1, sampleIntervalSeconds: 15,
+                                              idleThresholdSeconds: 300, minMinutes: 5)
+        XCTAssertEqual(rolling.totalCount, 1)
+        XCTAssertEqual(rolling.earlierCount, 1)
+        XCTAssertEqual(rolling.currentWeekCount, 0)
+        XCTAssertEqual(rolling.totalSeconds, 7200, accuracy: 1)
+        XCTAssertEqual(rolling.oldestOpenWeekStart, cal.date(byAdding: .day, value: -7, to: weekStart))
+    }
+
+    /// Discover's meeting lists agree with Review and the report on a meeting
+    /// crossing a day boundary: it appears on both days, clipped to each.
+    func testDiscoverMeetingQueriesClipBoundaryCrossingMeetings() throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        let midnight = at(2026, 4, 15, 0)
+        let before = DateInterval(start: midnight.addingTimeInterval(-86400), duration: 86400)
+        let after = DateInterval(start: midnight, duration: 86400)
+        let oneOff = event("one-off", from: midnight.addingTimeInterval(-1800), to: midnight.addingTimeInterval(1800), customerID: nil)
+        var occurrence = event("occurrence", from: midnight.addingTimeInterval(-3600), to: midnight.addingTimeInterval(1800), customerID: nil)
+        occurrence.seriesMasterID = "series"
+        var ignored = event("ignored", from: midnight.addingTimeInterval(-900), to: midnight.addingTimeInterval(900), customerID: nil)
+        ignored.isIgnored = true
+        try db.upsertEvents([oneOff, occurrence, ignored])
+
+        for (interval, expected) in [(before, 1800.0), (after, 1800.0)] {
+            let listed = try XCTUnwrap(db.oneOffMeetingAggregates(in: interval).first)
+            XCTAssertEqual(listed.id, "one-off")
+            XCTAssertEqual(listed.endAt.timeIntervalSince(listed.startAt), expected, accuracy: 1)
+        }
+        XCTAssertEqual(try db.meetingSeriesAggregates(in: before).first?.totalSeconds ?? 0, 3600, accuracy: 1)
+        XCTAssertEqual(try db.meetingSeriesAggregates(in: after).first?.totalSeconds ?? 0, 1800, accuracy: 1)
+        XCTAssertEqual(try db.ignoredMeetingAggregates(in: after).first?.totalSeconds ?? 0, 900, accuracy: 1)
+    }
+
     func testCalendarQueryIncludesBoundaryCrossingEvents() throws {
         let db = try AppDatabase.inMemoryForTesting()
         let start = at(2026, 4, 15, 0)

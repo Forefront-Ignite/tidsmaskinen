@@ -168,7 +168,7 @@ struct DiscoverView: View {
         for (host, details) in hostPathDetails {
             var set = Set<String>()
             for detail in details {
-                if let cid = matcher.attribute(kind: .urlPath, value: detail.value).customer?.id {
+                if let cid = matcher.attribute(kind: .urlPath, value: detail.value, at: scope.referenceDate).customer?.id {
                     set.insert(cid)
                 }
             }
@@ -182,10 +182,10 @@ struct DiscoverView: View {
     private var fullyCoveredHosts: Set<String> {
         var set = Set<String>()
         for agg in aggregates where agg.kind == .urlHost {
-            guard matcher.attribute(kind: .urlHost, value: agg.value).customer == nil else { continue }
+            guard matcher.attribute(kind: .urlHost, value: agg.value, at: scope.referenceDate).customer == nil else { continue }
             guard let details = hostPathDetails[agg.value], !details.isEmpty else { continue }
             let allAssigned = details.allSatisfy {
-                matcher.attribute(kind: .urlPath, value: $0.value).customer != nil
+                matcher.attribute(kind: .urlPath, value: $0.value, at: scope.referenceDate).customer != nil
             }
             if allAssigned { set.insert(agg.value) }
         }
@@ -218,7 +218,7 @@ struct DiscoverView: View {
         return aggregates.filter { agg in
             if isHidden(agg) { return false }
             if agg.totalSeconds < minSeconds { return false }
-            let attr = matcher.attribute(kind: ruleKind(agg.kind), value: agg.value)
+            let attr = matcher.attribute(kind: ruleKind(agg.kind), value: agg.value, at: scope.referenceDate)
 
             if unassignedOnly {
                 if agg.kind == .urlHost {
@@ -250,7 +250,7 @@ struct DiscoverView: View {
         details.filter { detail in
             if detail.totalSeconds < minSeconds { return false }
             guard filtersAffectChildren else { return true }
-            let attr = matcher.attribute(kind: .urlPath, value: detail.value)
+            let attr = matcher.attribute(kind: .urlPath, value: detail.value, at: scope.referenceDate)
             if unassignedOnly, attr.customer != nil { return false }
             if let cid = customerFilterID, attr.customer?.id != cid { return false }
             return true
@@ -400,7 +400,7 @@ struct DiscoverView: View {
                      isExpandable: Bool,
                      indented: Bool = false,
                      isHiddenRow: Bool = false) -> some View {
-        let attribution = matcher.attribute(kind: ruleKind(item.kind), value: item.value)
+        let attribution = matcher.attribute(kind: ruleKind(item.kind), value: item.value, at: scope.referenceDate)
         HStack(spacing: 12) {
             if isExpandable {
                 Button {
@@ -928,7 +928,7 @@ struct DiscoverView: View {
                 if hostPathDetails[agg.value] != nil { continue }
                 let keepLoaded = previouslyLoaded.contains(agg.value) || expandedHosts.contains(agg.value)
                 if !keepLoaded {
-                    if matcher.attribute(kind: .urlHost, value: agg.value).customer != nil { continue }
+                    if matcher.attribute(kind: .urlHost, value: agg.value, at: scope.referenceDate).customer != nil { continue }
                     if isHidden(agg) { continue }
                 }
                 loadPathDetails(forHost: agg.value)

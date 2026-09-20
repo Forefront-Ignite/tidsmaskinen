@@ -65,26 +65,46 @@ final class GraphClientTests: XCTestCase {
     }
 
     func testFetchIncludesAllPages() async throws {
-        let events = try await client("success").fetchCalendarView(start: start, end: end)
+        let events = try await client("success").fetchCalendarView(start: start, end: end).events
         XCTAssertEqual(events.map(\.id), ["first", "second"])
     }
 
     func testCancelledMeetingsAreExcluded() async throws {
-        let events = try await client("cancelled").fetchCalendarView(start: start, end: end)
+        let events = try await client("cancelled").fetchCalendarView(start: start, end: end).events
         XCTAssertTrue(events.isEmpty)
     }
 
     /// A cancelled event is dropped before validation, so one with unparseable
     /// dates cannot make every future sync fail.
     func testCancelledMeetingWithInvalidDatesDoesNotPoisonSync() async throws {
-        let events = try await client("cancelled-invalid").fetchCalendarView(start: start, end: end)
-        XCTAssertTrue(events.isEmpty)
+        let fetch = try await client("cancelled-invalid").fetchCalendarView(start: start, end: end)
+        XCTAssertTrue(fetch.events.isEmpty)
+        XCTAssertTrue(fetch.skippedIDs.isEmpty)
+    }
+
+    /// A live event with unparseable dates is skipped rather than failing the
+    /// whole sync, and its local row is protected from the orphan pass.
+    func testMalformedEventIsSkippedAndItsLocalRowKept() async throws {
+        let fetch = try await client("malformed").fetchCalendarView(start: start, end: end)
+        XCTAssertTrue(fetch.events.isEmpty)
+        XCTAssertEqual(fetch.skippedIDs, ["second"])
+
+        let db = try AppDatabase.inMemoryForTesting()
+        let events = try await client("success").fetchCalendarView(start: start, end: end).events
+        var event = try XCTUnwrap(events.last)
+        event.isIgnored = true
+        try db.upsertEvents([event])
+        let sync = CalendarSync(database: db, client: client("malformed"))
+        await sync.syncNow(since: start, until: end)
+        XCTAssertNil(sync.lastError)
+        XCTAssertEqual(sync.lastDeletedCount, 0)
+        XCTAssertTrue(try XCTUnwrap(db.calendarEvents(ids: [event.id]).first).isIgnored)
     }
 
     func testInvalidSnapshotDoesNotDeleteLocalCalendarHistory() async throws {
-        for scenario in ["failure", "malformed", "untrusted"] {
+        for scenario in ["failure", "untrusted"] {
             let db = try AppDatabase.inMemoryForTesting()
-            let events = try await client("success").fetchCalendarView(start: start, end: end)
+            let events = try await client("success").fetchCalendarView(start: start, end: end).events
             var event = try XCTUnwrap(events.last)
             event.isIgnored = true
             try db.upsertEvents([event])
@@ -98,7 +118,7 @@ final class GraphClientTests: XCTestCase {
 
     func testSuccessfulPagedSyncPreservesOverrides() async throws {
         let db = try AppDatabase.inMemoryForTesting()
-        let events = try await client("success").fetchCalendarView(start: start, end: end)
+        let events = try await client("success").fetchCalendarView(start: start, end: end).events
         var event = try XCTUnwrap(events.last)
         event.isIgnored = true
         try db.upsertEvents([event])

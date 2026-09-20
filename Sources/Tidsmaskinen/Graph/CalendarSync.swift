@@ -89,8 +89,11 @@ final class CalendarSync: ObservableObject {
             let end = until ?? Calendar.current.date(byAdding: .day, value: 14, to: now) ?? now
             let interval = DateInterval(start: start, end: end)
 
-            let fetched = try await client.fetchCalendarView(start: start, end: end)
-            let fetchedIDs = Set(fetched.map { $0.id })
+            let snapshot = try await client.fetchCalendarView(start: start, end: end)
+            let fetched = snapshot.events
+            // A skipped (unparseable) event still exists on the server, so it
+            // counts as fetched for the orphan pass and keeps its local row.
+            let fetchedIDs = Set(fetched.map { $0.id }).union(snapshot.skippedIDs)
 
             let existing = try database.calendarEvents(in: interval, includeFiltered: true)
 

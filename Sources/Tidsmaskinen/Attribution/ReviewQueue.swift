@@ -145,9 +145,12 @@ enum ReviewQueue {
         let cal = Calendar.weekStartingMonday()
         let currentStart = cal.currentWeekInterval(reference: now).start
         var result = Rolling()
-        // Walk newest → oldest so the final non-empty week we touch is the
-        // oldest one with open items.
-        for w in 0...max(0, weeksBack) {
+        // Walk oldest → newest. A call or meeting crossing a week boundary is
+        // queued in both weeks (each clipped), so each unit id is counted once
+        // and the oldest week owns it — Review still lands where the backlog
+        // tail begins. Seconds stay summed: the clipped parts are disjoint.
+        var seen = Set<String>()
+        for w in stride(from: max(0, weeksBack), through: 0, by: -1) {
             guard let start = cal.date(byAdding: .day, value: -7 * w, to: currentStart) else { continue }
             let end = cal.date(byAdding: .day, value: 7, to: start) ?? start
             let units = try build(database: database,
@@ -155,11 +158,12 @@ enum ReviewQueue {
                                   sampleIntervalSeconds: sampleIntervalSeconds,
                                   idleThresholdSeconds: idleThresholdSeconds,
                                   minMinutes: minMinutes)
-            guard !units.isEmpty else { continue }
-            result.totalCount += units.count
             result.totalSeconds += units.reduce(0) { $0 + $1.totalSeconds }
-            if w == 0 { result.currentWeekCount += units.count } else { result.earlierCount += units.count }
-            result.oldestOpenWeekStart = start
+            let fresh = units.filter { seen.insert($0.id).inserted }
+            guard !fresh.isEmpty else { continue }
+            result.totalCount += fresh.count
+            if w == 0 { result.currentWeekCount += fresh.count } else { result.earlierCount += fresh.count }
+            if result.oldestOpenWeekStart == nil { result.oldestOpenWeekStart = start }
         }
         return result
     }
