@@ -144,7 +144,17 @@ enum AppRelocator {
 
     /// Same dance as Sparkle's Autoupdate: wait for this process to exit, then
     /// open the moved bundle so only one instance touches the database.
+    ///
+    /// `open` runs only once this process is gone, so its exit status can't be
+    /// observed from here. Checking that the bundle arrived is what we can do
+    /// before the point of no return; a launch that fails after that surfaces
+    /// as the app simply not reappearing, and the user reopens it by hand.
     private static func relaunch(_ target: URL) throws {
+        guard FileManager.default.isExecutableFile(
+            atPath: target.appendingPathComponent("Contents/MacOS/Tidsmaskinen").path
+        ) else {
+            throw RelocationError.failed("Tidsmaskinen isn't where it should be after the move.")
+        }
         let pid = ProcessInfo.processInfo.processIdentifier
         let waiter = Process()
         waiter.executableURL = URL(fileURLWithPath: "/bin/sh")
@@ -153,9 +163,22 @@ enum AppRelocator {
         NSApp.terminate(nil)
     }
 
+    /// Rewrites the coding-agent hooks that point into the bundle's old home.
+    /// They record an absolute `tm-hook` path, so after a move they invoke a
+    /// binary that no longer exists and session capture stops without a word.
+    /// Scoped to the launch after a relocation: a Sparkle update replaces the
+    /// bundle in place, so nothing else moves the path out from under them.
+    private static func repairCodingAgentHooks() {
+        for provider in CodingAgentProvider.allCases {
+            guard case .stale = HookInstaller.currentState(provider: provider) else { continue }
+            try? HookInstaller.install(provider: provider)
+        }
+    }
+
     private static func restoreLoginItemIfPending() {
         let defaults = AppSettings.defaults
         guard defaults.object(forKey: SettingsKey.relocationRestoreLoginItem) != nil else { return }
+        repairCodingAgentHooks()
         if defaults.bool(forKey: SettingsKey.relocationRestoreLoginItem) {
             // Keep the flag on failure so the next launch tries again.
             guard (try? LoginItemManager.reregister()) != nil else { return }
