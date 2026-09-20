@@ -45,24 +45,44 @@ final class AppRelocatorTests: XCTestCase {
         let source = URL(fileURLWithPath: "/Applications/Tidsmaskinen.app")
         let target = URL(fileURLWithPath: "/Users/o'brien/Applications/Tidsmaskinen.app")
         let command = AppRelocator.moveCommand(from: source, to: target)
-        XCTAssertEqual(
-            command,
+        XCTAssertTrue(command.hasSuffix(
             "rm -rf '/Users/o'\\''brien/Applications/Tidsmaskinen.app' "
             + "&& mv -f '/Applications/Tidsmaskinen.app' '/Users/o'\\''brien/Applications/Tidsmaskinen.app' "
             + "&& { chown \(getuid()):\(getgid()) '/Users/o'\\''brien/Applications'; "
             + "chmod u+rwx '/Users/o'\\''brien/Applications'; "
-            + "chown -R \(getuid()):\(getgid()) '/Users/o'\\''brien/Applications/Tidsmaskinen.app' || true; }"
+            + "chown -R \(getuid()):\(getgid()) '/Users/o'\\''brien/Applications/Tidsmaskinen.app' || true; }"),
+            command)
+    }
+
+    func testMoveCommandRefusesSwappedPathsBeforeActing() throws {
+        // run()'s checks all happen before the admin approval, which can sit
+        // for minutes, so root re-tests the components it is about to act on.
+        let command = AppRelocator.moveCommand(
+            from: URL(fileURLWithPath: "/Applications/Tidsmaskinen.app"),
+            to: URL(fileURLWithPath: "/Users/me/Applications/Tidsmaskinen.app")
         )
+        let refusal = try XCTUnwrap(command.range(of: "exit 1; fi; "))
+        let guardClause = command[..<refusal.lowerBound]
+        for test in ["[ -L '/Users/me/Applications' ]",
+                     "[ ! -d '/Users/me/Applications' ]",
+                     "[ -L '/Users/me/Applications/Tidsmaskinen.app' ]",
+                     "[ -L '/Applications/Tidsmaskinen.app' ]"] {
+            XCTAssertTrue(guardClause.contains(test), "missing \(test) in \(command)")
+        }
+        let destructive = try XCTUnwrap(command.range(of: "rm -rf"))
+        XCTAssertLessThanOrEqual(refusal.upperBound, destructive.lowerBound,
+                                 "the refusal must come before anything destructive")
     }
 
     func testMoveCommandOnlyChownsWhenAlreadyInPlace() {
         let target = URL(fileURLWithPath: "/Users/me/Applications/Tidsmaskinen.app")
-        XCTAssertEqual(
-            AppRelocator.moveCommand(from: target, to: target),
+        let command = AppRelocator.moveCommand(from: target, to: target)
+        XCTAssertTrue(command.hasSuffix(
             "chown \(getuid()):\(getgid()) '/Users/me/Applications'; "
             + "chmod u+rwx '/Users/me/Applications'; "
-            + "chown -R \(getuid()):\(getgid()) '/Users/me/Applications/Tidsmaskinen.app'"
-        )
+            + "chown -R \(getuid()):\(getgid()) '/Users/me/Applications/Tidsmaskinen.app'"), command)
+        XCTAssertFalse(command.contains("rm -rf"), "nothing is deleted when the app is already in place")
+        XCTAssertTrue(command.hasPrefix("if [ -L '/Users/me/Applications' ]"), command)
     }
 
     func testMoveCommandTakesOwnershipOfTheDestinationFolder() {

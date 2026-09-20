@@ -36,7 +36,7 @@ enum AppRelocator {
             // path can't be moved. The user has to drag the app out first.
             && !bundleURL.path.contains("/AppTranslocation/")
             && updatesNeedAdmin(bundleURL)
-            && !AppSettings.defaults.bool(forKey: SettingsKey.relocationPromptSuppressed)
+            && !AppSettings.relocationPromptSuppressed
     }
 
     /// Call once the app has finished launching. Finishes a move made on the
@@ -91,7 +91,7 @@ enum AppRelocator {
             // Only a declined prompt is worth remembering: a failed move should
             // be offered again next launch.
             if alert.suppressionButton?.state == .on {
-                AppSettings.defaults.set(true, forKey: SettingsKey.relocationPromptSuppressed)
+                AppSettings.relocationPromptSuppressed = true
             }
             return releaseUpdater()
         }
@@ -161,17 +161,32 @@ enum AppRelocator {
     /// move. A failed chown afterwards is not fatal: the next launch lands in
     /// the chown-only branch and repairs it.
     static func moveCommand(from bundleURL: URL, to target: URL) -> String {
+        let parent = shellQuoted(target.deletingLastPathComponent().path)
+        let targetPath = shellQuoted(target.path)
+        let sourcePath = shellQuoted(bundleURL.path)
+        let inPlace = bundleURL.resolvingSymlinksInPath() == target.resolvingSymlinksInPath()
+        // Everything `run()` checked, it checked before the approval, which an
+        // Admin By Request request can leave pending for minutes. Anything able
+        // to write in the home folder could swap a component for a symlink in
+        // that window and aim these root commands elsewhere, so re-check as
+        // root immediately before acting. This narrows the window to the gap
+        // between test and command; closing it entirely would mean not driving
+        // the move through a shell at all.
+        var checks = ["[ -L \(parent) ]", "[ ! -d \(parent) ]", "[ -L \(targetPath) ]"]
+        if !inPlace { checks.append("[ -L \(sourcePath) ]") }
+        let refuse = "if \(checks.joined(separator: " || ")); then "
+            + "echo 'Your Applications folder changed while the request was pending." 
+            + " Nothing was moved.' >&2; exit 1; fi; "
         // Sparkle checks the parent folder too, so a root-owned ~/Applications
         // would keep every update prompting even after the bundle itself is
         // ours. Not recursive: it must not touch other apps living there.
-        let parent = shellQuoted(target.deletingLastPathComponent().path)
         // chown alone leaves the mode bits, so a 0555 folder stays unwritable
         // and Sparkle would keep asking. u+rwx is what its check actually reads.
         let own = "chown \(getuid()):\(getgid()) \(parent); chmod u+rwx \(parent); "
-            + "chown -R \(getuid()):\(getgid()) \(shellQuoted(target.path))"
-        if bundleURL.resolvingSymlinksInPath() == target.resolvingSymlinksInPath() { return own }
-        return "rm -rf \(shellQuoted(target.path)) && mv -f \(shellQuoted(bundleURL.path)) "
-            + "\(shellQuoted(target.path)) && { \(own) || true; }"
+            + "chown -R \(getuid()):\(getgid()) \(targetPath)"
+        if inPlace { return refuse + own }
+        return refuse + "rm -rf \(targetPath) && mv -f \(sourcePath) \(targetPath) "
+            + "&& { \(own) || true; }"
     }
 
     /// AppleScript that runs `command` as root. The long timeout covers an

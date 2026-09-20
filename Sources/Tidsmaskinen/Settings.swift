@@ -106,6 +106,12 @@ enum AppSettings {
         return v <= 0 ? 300 : v
     }
 
+    /// Set by "Don't ask again" on the move-to-~/Applications prompt.
+    static var relocationPromptSuppressed: Bool {
+        get { defaults.bool(forKey: SettingsKey.relocationPromptSuppressed) }
+        set { defaults.set(newValue, forKey: SettingsKey.relocationPromptSuppressed) }
+    }
+
     static var meetingRSVPFilter: MeetingRSVPFilter {
         guard let raw = defaults.string(forKey: SettingsKey.meetingRSVPFilter),
               let value = MeetingRSVPFilter(rawValue: raw) else {
