@@ -92,12 +92,18 @@ enum AppRelocator {
 
     /// Shell command that moves the bundle into `~/Applications` and gives it
     /// to the current user. Runs as root, so it also fixes a root-owned copy.
-    /// A failed chown after a successful move is not fatal: the next launch
-    /// lands in the chown-only branch and repairs it.
+    ///
+    /// `rm -rf` clears any stale copy at the target: `mv` can't replace a
+    /// non-empty directory, and two bundles with this bundle ID would leave
+    /// Launch Services picking between them arbitrarily. It runs as part of the
+    /// privileged command so nothing is deleted unless the user approved the
+    /// move. A failed chown afterwards is not fatal: the next launch lands in
+    /// the chown-only branch and repairs it.
     static func moveCommand(from bundleURL: URL, to target: URL) -> String {
         let chown = "chown -R \(getuid()):\(getgid()) \(shellQuoted(target.path))"
         if bundleURL.standardizedFileURL == target.standardizedFileURL { return chown }
-        return "mv -f \(shellQuoted(bundleURL.path)) \(shellQuoted(target.path)) && { \(chown) || true; }"
+        return "rm -rf \(shellQuoted(target.path)) && mv -f \(shellQuoted(bundleURL.path)) "
+            + "\(shellQuoted(target.path)) && { \(chown) || true; }"
     }
 
     /// AppleScript that runs `command` as root. The long timeout covers an
@@ -117,11 +123,6 @@ enum AppRelocator {
         let fm = FileManager.default
         try fm.createDirectory(at: userApplications, withIntermediateDirectories: true)
         let target = userApplications.appendingPathComponent(bundleURL.lastPathComponent)
-        if bundleURL.standardizedFileURL != target.standardizedFileURL, fm.fileExists(atPath: target.path) {
-            // A stale copy in ~/Applications would leave two registrations of
-            // the same bundle ID; Launch Services picks between them arbitrarily.
-            try fm.trashItem(at: target, resultingItemURL: nil)
-        }
         try runAsAdmin(moveCommand(from: bundleURL, to: target))
         return target
     }
@@ -157,7 +158,7 @@ enum AppRelocator {
         guard defaults.object(forKey: SettingsKey.relocationRestoreLoginItem) != nil else { return }
         if defaults.bool(forKey: SettingsKey.relocationRestoreLoginItem) {
             // Keep the flag on failure so the next launch tries again.
-            guard (try? LoginItemManager.setEnabled(true)) != nil else { return }
+            guard (try? LoginItemManager.reregister()) != nil else { return }
         }
         defaults.removeObject(forKey: SettingsKey.relocationRestoreLoginItem)
     }
@@ -167,6 +168,9 @@ enum AppRelocator {
         failure.alertStyle = .warning
         failure.messageText = title
         failure.informativeText = detail
+        // Accessory apps aren't frontmost, so an alert would open behind
+        // whatever the user is looking at.
+        NSApp.activate(ignoringOtherApps: true)
         failure.runModal()
     }
 

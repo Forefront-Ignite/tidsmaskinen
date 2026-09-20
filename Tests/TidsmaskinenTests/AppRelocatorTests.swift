@@ -47,7 +47,8 @@ final class AppRelocatorTests: XCTestCase {
         let command = AppRelocator.moveCommand(from: source, to: target)
         XCTAssertEqual(
             command,
-            "mv -f '/Applications/Tidsmaskinen.app' '/Users/o'\\''brien/Applications/Tidsmaskinen.app' "
+            "rm -rf '/Users/o'\\''brien/Applications/Tidsmaskinen.app' "
+            + "&& mv -f '/Applications/Tidsmaskinen.app' '/Users/o'\\''brien/Applications/Tidsmaskinen.app' "
             + "&& { chown -R \(getuid()):\(getgid()) '/Users/o'\\''brien/Applications/Tidsmaskinen.app' || true; }"
         )
     }

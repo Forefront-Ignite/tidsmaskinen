@@ -172,7 +172,9 @@ jobs:
           VERSION="${VERSION#v}"
           URL="https://forefront-ignite.github.io/tidsmaskinen/releases/v$VERSION/Tidsmaskinen.zip"
           for attempt in $(seq 1 12); do
-            if curl -fsSI "$URL" >/dev/null; then
+            # -L: without it curl exits 0 on a redirect without checking
+            # where it lands.
+            if curl -fsSLI "$URL" >/dev/null; then
               echo "Update zip reachable at $URL"
               exit 0
             fi
