@@ -70,8 +70,11 @@ final class AppRelocatorTests: XCTestCase {
         // would hand root a target they can redirect.
         XCTAssertTrue(AppRelocator.isInSystemApplications(
             URL(fileURLWithPath: "/Applications/Tidsmaskinen.app")))
-        XCTAssertTrue(AppRelocator.isInSystemApplications(
-            URL(fileURLWithPath: "/Applications/Utilities/Tidsmaskinen.app")))
+        // A nested folder is not enough: installers ship world-writable ones
+        // (/Applications/Hearthstone is 0777), and an ancestor the user can
+        // replace hands the path back to them.
+        XCTAssertFalse(AppRelocator.isInSystemApplications(
+            URL(fileURLWithPath: "/Applications/Hearthstone/Tidsmaskinen.app")))
         XCTAssertFalse(AppRelocator.isInSystemApplications(
             URL(fileURLWithPath: "/Users/me/Applications/Tidsmaskinen.app")))
         XCTAssertFalse(AppRelocator.isInSystemApplications(

@@ -27,15 +27,17 @@ enum AppRelocator {
     /// startup, and a single slot would leave the retained one stopped.
     static let didSettle = Notification.Name("AppRelocatorDidSettle")
 
-    /// False once relocation is settled, so an `AppState` built afterwards
-    /// starts its updater immediately instead of waiting for a notification
-    /// that has already been posted.
     private(set) static var isHoldingUpdater = false
+    /// Set once relocation is settled. Without it the hold would re-arm for
+    /// any `AppState` SwiftUI builds after the user declines, and that
+    /// controller would wait for a notification that has already been posted,
+    /// leaving Sparkle off for the rest of the launch.
+    private static var hasSettled = false
 
     /// Whether a freshly built updater should wait. Reading it marks the hold,
     /// so the notification is posted even if `run()` never gets that far.
     static var shouldHoldUpdater: Bool {
-        guard isMovePending else { return false }
+        guard !hasSettled, isMovePending else { return false }
         isHoldingUpdater = true
         return true
     }
@@ -57,15 +59,16 @@ enum AppRelocator {
 
     static let systemApplications = URL(fileURLWithPath: "/Applications", isDirectory: true)
 
-    /// Whether the bundle sits inside the system `/Applications`. Only that
-    /// case earns an elevated delete: the folder is `root:admin`, so nothing
-    /// running as the user can swap a component of the path between this check
-    /// and the command. An install anywhere else can be moved by its owner
-    /// without any rights, and elevating there would hand root a path the user
-    /// controls.
+    /// Whether the bundle sits *directly* in the system `/Applications`. Only
+    /// that case earns an elevated delete: the folder is `root:admin`, so
+    /// nothing running as the user can swap the path between this check and
+    /// the command. A nested folder is not good enough — installers do ship
+    /// world-writable ones (`/Applications/Hearthstone` is 0777), and an
+    /// ancestor the user can replace puts the whole path back in their hands.
+    /// An install anywhere else can be moved by its owner without any rights.
     static func isInSystemApplications(_ bundleURL: URL) -> Bool {
-        bundleURL.resolvingSymlinksInPath().path
-            .hasPrefix(systemApplications.resolvingSymlinksInPath().path + "/")
+        bundleURL.resolvingSymlinksInPath().deletingLastPathComponent()
+            == systemApplications.resolvingSymlinksInPath()
     }
 
     /// Call once the app has finished launching. Finishes a move made on the
@@ -193,6 +196,7 @@ enum AppRelocator {
     }
 
     private static func releaseUpdater() {
+        hasSettled = true
         guard isHoldingUpdater else { return }
         isHoldingUpdater = false
         NotificationCenter.default.post(name: didSettle, object: nil)
