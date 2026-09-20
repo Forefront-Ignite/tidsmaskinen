@@ -52,6 +52,18 @@ final class AppRelocatorTests: XCTestCase {
         XCTAssertFalse(command.contains("mv "), command)
     }
 
+    func testRollbackOnlyWhenTheOldCopySurvivedIntact() throws {
+        // rm -rf can destroy part of the old bundle and still report failure.
+        // Undoing our copy then would leave the user with no working app.
+        let old = try makeBundle(in: root)
+        XCTAssertTrue(AppRelocator.oldCopyIsIntact(old, verify: { _ in true }))
+        XCTAssertFalse(AppRelocator.oldCopyIsIntact(old, verify: { _ in false }),
+                       "a half-deleted bundle fails verification, so its copy must be kept")
+        XCTAssertFalse(AppRelocator.oldCopyIsIntact(root.appendingPathComponent("Gone.app"),
+                                                    verify: { _ in true }),
+                       "a bundle that is already gone must not trigger a rollback")
+    }
+
     func testOnlyTheSystemApplicationsFolderEarnsAnElevatedDelete() {
         // /Applications is root:admin, so its entries can't be swapped by
         // anything running as the user. Elevating for a path the user controls

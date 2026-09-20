@@ -156,15 +156,29 @@ enum AppRelocator {
             }
             try runAsAdmin(removeCommand(for: bundleURL))
         } catch {
-            // Nothing was handed over yet, so undo our copy rather than leave
-            // two installs behind. We own it, so this needs no rights either.
-            try? FileManager.default.removeItem(at: target)
-            AppSettings.defaults.removeObject(forKey: SettingsKey.relocationRestoreLoginItem)
-            if hadLoginItem { try? LoginItemManager.setEnabled(true) }
-            defer { releaseUpdater() }
-            if case RelocationError.cancelled = error { return }
-            showFailure("Couldn't remove the old copy", error.localizedDescription)
-            return
+            // `rm -rf` is not transactional: it can destroy part of the old
+            // bundle and still report failure. Undo our copy only when the old
+            // one is provably still whole — deleting both would leave no
+            // working app at all.
+            if oldCopyIsIntact(bundleURL) {
+                try? FileManager.default.removeItem(at: target)
+                AppSettings.defaults.removeObject(forKey: SettingsKey.relocationRestoreLoginItem)
+                if hadLoginItem { try? LoginItemManager.setEnabled(true) }
+                defer { releaseUpdater() }
+                if case RelocationError.cancelled = error { return }
+                showFailure("Couldn't remove the old copy", error.localizedDescription)
+                return
+            }
+            // The old copy is gone or half-deleted. Keep the new one and hand
+            // over to it; the repair flag stays set so the next launch
+            // repoints the login item and hooks.
+            showFailure("Tidsmaskinen is now in ~/Applications",
+                        """
+                        The copy in /Applications couldn't be removed cleanly, so Tidsmaskinen will \
+                        carry on from ~/Applications.
+
+                        Drag anything left behind in /Applications to the Trash when convenient.
+                        """)
         }
 
         do {
@@ -202,6 +216,14 @@ enum AppRelocator {
     /// it either.
     static func removeCommand(for bundleURL: URL) -> String {
         "rm -rf \(shellQuoted(bundleURL.path))"
+    }
+
+    /// Whether the bundle at `bundleURL` is still a complete, correctly signed
+    /// copy. A half-deleted bundle fails the signature check, which is what
+    /// makes it safe to tell "nothing was removed" apart from "removal got
+    /// part way".
+    static func oldCopyIsIntact(_ bundleURL: URL, verify: (URL) -> Bool = signedLikeUs) -> Bool {
+        FileManager.default.fileExists(atPath: bundleURL.path) && verify(bundleURL)
     }
 
     /// Copies the running bundle to `target` as the user. Replaces an existing
