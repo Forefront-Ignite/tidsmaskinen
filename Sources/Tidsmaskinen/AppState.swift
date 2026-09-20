@@ -64,11 +64,20 @@ final class AppState: ObservableObject {
         let ccClient = CommandCenterClient()
         self.commandCenter = ccClient
         self.commandCenterSync = CommandCenterSync(database: database, client: ccClient)
+        // A pending relocation holds the updater back: an update that installs
+        // while the user is still approving the move would be writing to the
+        // bundle we're about to move out from under it. AppRelocator starts it
+        // as soon as it knows the app is staying put.
+        let movePending = AppRelocator.isMovePending
         self.updaterController = SPUStandardUpdaterController(
-            startingUpdater: true,
+            startingUpdater: !movePending,
             updaterDelegate: nil,
             userDriverDelegate: nil
         )
+        if movePending {
+            let controller = self.updaterController
+            AppRelocator.startUpdater = { controller.startUpdater() }
+        }
 
         // Forward nested ObservableObject changes so views observing AppState
         // (e.g. MenuBarView, CalendarView) repaint when sync state changes.

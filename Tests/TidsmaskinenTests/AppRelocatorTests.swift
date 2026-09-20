@@ -49,7 +49,8 @@ final class AppRelocatorTests: XCTestCase {
             command,
             "rm -rf '/Users/o'\\''brien/Applications/Tidsmaskinen.app' "
             + "&& mv -f '/Applications/Tidsmaskinen.app' '/Users/o'\\''brien/Applications/Tidsmaskinen.app' "
-            + "&& { chown -R \(getuid()):\(getgid()) '/Users/o'\\''brien/Applications/Tidsmaskinen.app' || true; }"
+            + "&& { chown \(getuid()):\(getgid()) '/Users/o'\\''brien/Applications'; "
+            + "chown -R \(getuid()):\(getgid()) '/Users/o'\\''brien/Applications/Tidsmaskinen.app' || true; }"
         )
     }
 
@@ -57,8 +58,22 @@ final class AppRelocatorTests: XCTestCase {
         let target = URL(fileURLWithPath: "/Users/me/Applications/Tidsmaskinen.app")
         XCTAssertEqual(
             AppRelocator.moveCommand(from: target, to: target),
-            "chown -R \(getuid()):\(getgid()) '/Users/me/Applications/Tidsmaskinen.app'"
+            "chown \(getuid()):\(getgid()) '/Users/me/Applications'; "
+            + "chown -R \(getuid()):\(getgid()) '/Users/me/Applications/Tidsmaskinen.app'"
         )
+    }
+
+    func testMoveCommandTakesOwnershipOfTheDestinationFolder() {
+        // Sparkle checks the parent too, so a root-owned ~/Applications would
+        // keep every update prompting even once the bundle itself is ours.
+        let command = AppRelocator.moveCommand(
+            from: URL(fileURLWithPath: "/Applications/Tidsmaskinen.app"),
+            to: URL(fileURLWithPath: "/Users/me/Applications/Tidsmaskinen.app")
+        )
+        XCTAssertTrue(command.contains("chown \(getuid()):\(getgid()) '/Users/me/Applications'"),
+                      "the destination folder must end up user-owned: \(command)")
+        XCTAssertFalse(command.contains("chown -R \(getuid()):\(getgid()) '/Users/me/Applications'"),
+                       "must not recurse into other apps living there: \(command)")
     }
 
     func testAdminScriptEscapesShellCommandForAppleScript() {

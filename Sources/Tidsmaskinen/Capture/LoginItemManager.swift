@@ -37,8 +37,10 @@ enum LoginItemManager {
     /// the old path. Unregister first, so this always re-registers.
     static func reregister() throws {
         let service = SMAppService.mainApp
+        // Not `try?`: this is the only step that drops the old path, so if it
+        // fails, registering again can't be trusted to repoint the item.
         if service.status == .enabled || service.status == .requiresApproval {
-            try? service.unregister()
+            try service.unregister()
         }
         try service.register()
     }

@@ -18,21 +18,35 @@ enum AppRelocator {
     static let userApplications = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Applications", isDirectory: true)
 
-    /// Call once the app has finished launching. Restores the login item after
-    /// a completed move, then offers a move when Sparkle would need admin
-    /// rights to update this install. Dev builds ship without `SUFeedURL` and
-    /// are left alone.
-    static func run() {
-        restoreLoginItemIfPending()
-        guard Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil else { return }
+    /// Starts the Sparkle updater once relocation is settled. `AppState` holds
+    /// it back while a move is pending so an update can't install into — or
+    /// replace — the bundle we are about to move, which an Admin By Request
+    /// approval can leave in flight for minutes.
+    static var startUpdater: (() -> Void)?
+
+    /// True when `run()` would offer to move this install. Read by `AppState`
+    /// before it builds the updater, and re-checked inside `run()`; nothing
+    /// changes in between.
+    static var isMovePending: Bool {
+        guard Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil else { return false }
         let bundleURL = Bundle.main.bundleURL
-        guard bundleURL.pathExtension == "app",
-              // Gatekeeper runs quarantined apps from a read-only mount; that
-              // path can't be moved. The user has to drag the app out first.
-              !bundleURL.path.contains("/AppTranslocation/"),
-              updatesNeedAdmin(bundleURL),
-              !AppSettings.defaults.bool(forKey: SettingsKey.relocationPromptSuppressed)
-        else { return }
+        return bundleURL.pathExtension == "app"
+            // Gatekeeper runs quarantined apps from a read-only mount; that
+            // path can't be moved. The user has to drag the app out first.
+            && !bundleURL.path.contains("/AppTranslocation/")
+            && updatesNeedAdmin(bundleURL)
+            && !AppSettings.defaults.bool(forKey: SettingsKey.relocationPromptSuppressed)
+    }
+
+    /// Call once the app has finished launching. Finishes a move made on the
+    /// previous launch, then offers a move when Sparkle would need admin
+    /// rights to update this install. Dev builds ship without `SUFeedURL` and
+    /// are left alone. Every path that doesn't end in a relaunch releases the
+    /// updater before returning.
+    static func run() {
+        finishPendingRelocation()
+        guard isMovePending else { return releaseUpdater() }
+        let bundleURL = Bundle.main.bundleURL
 
         let alert = NSAlert()
         alert.messageText = "Move Tidsmaskinen to your Applications folder?"
@@ -53,7 +67,7 @@ enum AppRelocator {
             if alert.suppressionButton?.state == .on {
                 AppSettings.defaults.set(true, forKey: SettingsKey.relocationPromptSuppressed)
             }
-            return
+            return releaseUpdater()
         }
 
         // The login item is tied to the bundle's inode and path. Drop it now
@@ -65,6 +79,7 @@ enum AppRelocator {
             target = try move(bundleURL)
         } catch {
             if hadLoginItem { try? LoginItemManager.setEnabled(true) }
+            defer { releaseUpdater() }
             if case RelocationError.cancelled = error { return }
             showFailure("Couldn't move Tidsmaskinen", error.localizedDescription)
             return
@@ -77,7 +92,13 @@ enum AppRelocator {
             // on the next launch from the new location.
             showFailure("Tidsmaskinen was moved to ~/Applications",
                         "Quit Tidsmaskinen and open it again from ~/Applications. (\(error.localizedDescription))")
+            releaseUpdater()
         }
+    }
+
+    private static func releaseUpdater() {
+        startUpdater?()
+        startUpdater = nil
     }
 
     /// Mirrors Sparkle's check: no admin needed only when the bundle and its
@@ -100,10 +121,14 @@ enum AppRelocator {
     /// move. A failed chown afterwards is not fatal: the next launch lands in
     /// the chown-only branch and repairs it.
     static func moveCommand(from bundleURL: URL, to target: URL) -> String {
-        let chown = "chown -R \(getuid()):\(getgid()) \(shellQuoted(target.path))"
-        if bundleURL.standardizedFileURL == target.standardizedFileURL { return chown }
+        // Sparkle checks the parent folder too, so a root-owned ~/Applications
+        // would keep every update prompting even after the bundle itself is
+        // ours. Not recursive: it must not touch other apps living there.
+        let own = "chown \(getuid()):\(getgid()) \(shellQuoted(target.deletingLastPathComponent().path)); "
+            + "chown -R \(getuid()):\(getgid()) \(shellQuoted(target.path))"
+        if bundleURL.standardizedFileURL == target.standardizedFileURL { return own }
         return "rm -rf \(shellQuoted(target.path)) && mv -f \(shellQuoted(bundleURL.path)) "
-            + "\(shellQuoted(target.path)) && { \(chown) || true; }"
+            + "\(shellQuoted(target.path)) && { \(own) || true; }"
     }
 
     /// AppleScript that runs `command` as root. The long timeout covers an
@@ -168,21 +193,29 @@ enum AppRelocator {
     /// binary that no longer exists and session capture stops without a word.
     /// Scoped to the launch after a relocation: a Sparkle update replaces the
     /// bundle in place, so nothing else moves the path out from under them.
-    private static func repairCodingAgentHooks() {
-        for provider in CodingAgentProvider.allCases {
-            guard case .stale = HookInstaller.currentState(provider: provider) else { continue }
-            try? HookInstaller.install(provider: provider)
+    private static func repairCodingAgentHooks() -> Bool {
+        CodingAgentProvider.allCases.allSatisfy { provider in
+            switch HookInstaller.currentState(provider: provider) {
+            case .installed, .notInstalled: return true
+            case .stale: return (try? HookInstaller.install(provider: provider)) != nil
+            // A config we couldn't read may hold hooks pointing at the old
+            // path, so this is unrepaired, not absent.
+            case .error: return false
+            }
         }
     }
 
-    private static func restoreLoginItemIfPending() {
+    /// Finishes the work a completed move left for the next launch. The flag
+    /// is cleared only once every repair has actually succeeded, so a failure
+    /// is retried instead of being lost.
+    private static func finishPendingRelocation() {
         let defaults = AppSettings.defaults
         guard defaults.object(forKey: SettingsKey.relocationRestoreLoginItem) != nil else { return }
-        repairCodingAgentHooks()
+        var repaired = repairCodingAgentHooks()
         if defaults.bool(forKey: SettingsKey.relocationRestoreLoginItem) {
-            // Keep the flag on failure so the next launch tries again.
-            guard (try? LoginItemManager.reregister()) != nil else { return }
+            repaired = ((try? LoginItemManager.reregister()) != nil) && repaired
         }
+        guard repaired else { return }
         defaults.removeObject(forKey: SettingsKey.relocationRestoreLoginItem)
     }
 
