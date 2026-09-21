@@ -20,17 +20,7 @@ final class HookIngester {
 
     func start() {
         do {
-            let appSupport = try FileManager.default.url(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: true)
-            let dir = appSupport.appendingPathComponent("Tidsmaskinen", isDirectory: true)
-            try FileManager.default.createDirectory(
-                at: dir,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700])
-            let url = dir.appendingPathComponent(Self.eventLogFilename)
+            let url = try AppPaths.supportDirectory().appendingPathComponent(Self.eventLogFilename)
             // Create-or-open atomically so a concurrent first hook can never
             // truncate a log we just created. A failure here is not fatal: the
             // watcher, the poll timer and sleep finalization still install, and

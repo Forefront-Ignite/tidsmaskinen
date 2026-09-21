@@ -1214,7 +1214,7 @@ private struct ReattributePopover: View {
 
     @State private var selectedCustomerID: String = ""
     @State private var selectedProjectID: String = ""
-    @State private var scope: AttributionScope = .justThis
+    @State private var scope: AttributionScope = .always
     @State private var error: String?
     @State private var confirmingSeriesIgnore: Bool = false
 
@@ -1269,7 +1269,7 @@ private struct ReattributePopover: View {
             if showsScope {
                 AttributionScopePicker(
                     scope: $scope,
-                    options: [.justThis, .today, .thisWeek, .always],
+                    options: AttributionScope.allCases,
                     hint: scope == .justThis
                         ? "Attributes just this block."
                         : "Creates a \(scope == .always ? "permanent" : scope.label.lowercased()) rule for \(block.ruleSignal?.pattern ?? "this signal").")
@@ -1344,14 +1344,14 @@ private struct ReattributePopover: View {
                 systemImage: "checkmark.seal.fill",
                 tint: .green,
                 primary: "Attributed via your \(repoName) rule.",
-                secondary: "Already counted as \(displayName(customer: customer, project: block.attribution.project)) in the weekly report. Only pick a customer here if this specific session should go somewhere different."
+                secondary: "Already counted as \(displayName(customer: customer, project: block.attribution.project)) in the weekly report. To move only this session, pick a customer below and choose Just this."
             )
         } else {
             attributionBanner(
                 systemImage: "exclamationmark.triangle.fill",
                 tint: .orange,
                 primary: "Not matched by any rule.",
-                secondary: "Either assign \(repoName) in Review (covers every session in this repo) or pick a customer below to attribute just this session."
+                secondary: "Pick a customer below — Always teaches a rule for \(repoName); Just this attributes only this session."
             )
         }
     }
@@ -1489,6 +1489,15 @@ private struct ReattributePopover: View {
                 .keyboardShortcut(.defaultAction)
                 .help("Override the series ignore for just this occurrence.")
             } else {
+                // On a recurring meeting the series is the default action and
+                // takes Return; the per-occurrence save is the exception.
+                Button("Save for this meeting") {
+                    applyEvent(
+                        customerID: selectedCustomerID.isEmpty ? nil : selectedCustomerID,
+                        projectID: selectedProjectID.isEmpty ? nil : selectedProjectID
+                    )
+                }
+                .keyboardShortcut(hasSeries ? nil : .defaultAction)
                 if hasSeries {
                     Button("Apply to series") {
                         applySeries(
@@ -1497,15 +1506,9 @@ private struct ReattributePopover: View {
                         )
                     }
                     .disabled(selectedCustomerID.isEmpty)
+                    .keyboardShortcut(.defaultAction)
                     .help("Save this attribution for every occurrence of the series.")
                 }
-                Button("Save for this meeting") {
-                    applyEvent(
-                        customerID: selectedCustomerID.isEmpty ? nil : selectedCustomerID,
-                        projectID: selectedProjectID.isEmpty ? nil : selectedProjectID
-                    )
-                }
-                .keyboardShortcut(.defaultAction)
             }
         }
     }

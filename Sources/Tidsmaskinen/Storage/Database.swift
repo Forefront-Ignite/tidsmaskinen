@@ -34,15 +34,7 @@ struct AppDatabase {
 #endif
 
     static func databaseURL() throws -> URL {
-        let appSupport = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        return appSupport
-            .appendingPathComponent("Tidsmaskinen", isDirectory: true)
-            .appendingPathComponent("db.sqlite")
+        try AppPaths.supportDirectory().appendingPathComponent("db.sqlite")
     }
 
     private func migrate() throws {

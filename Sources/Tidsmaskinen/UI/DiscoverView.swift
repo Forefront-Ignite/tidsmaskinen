@@ -62,7 +62,7 @@ struct DiscoverView: View {
                 onSave: { customerID, projectID, scope in
                     try saveAssignment(for: target, customerID: customerID, projectID: projectID, scope: scope)
                 },
-                scopeOptions: [.today, .thisWeek, .always]
+                scopeOptions: [.always, .thisWeek, .today]
             )
         }
         .sheet(item: $seriesAssignTarget) { target in

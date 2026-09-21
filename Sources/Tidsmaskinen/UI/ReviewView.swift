@@ -22,6 +22,10 @@ struct ReviewView: View {
     @State private var units: [ReviewUnit] = []
     @State private var resolved: [String: String] = [:]      // unit id → result label
     @State private var pathResolved: [String: String] = [:]  // path value → result label
+    // The rule a Confirm wrote (unit id, or "path:<value>" for a host path), so
+    // Clear deletes exactly that rule and leaves a permanent rule or another
+    // week's assignment for the same pattern alone.
+    @State private var writtenRules: [String: Rule] = [:]
     @State private var matcher: RuleMatcher = .make(customers: [], projects: [], rules: [])
     @State private var customers: [Customer] = []
     @State private var projects: [Project] = []
@@ -29,19 +33,11 @@ struct ReviewView: View {
     @State private var loadError: String?
     @State private var didInitialLoad = false
     @State private var initialLookupTask: Task<Void, Never>?
-    @State private var scope: AttrScope = .always
+    @State private var scope: AttributionScope = .always
     @State private var weekStart: Date = Calendar.weekStartingMonday().currentWeekInterval().start
     @State private var selectedDay: Date? = nil    // nil = whole selected week
 
     private let calendar = Calendar.weekStartingMonday()
-
-    /// `.always` writes a permanent rule; `.period` writes a temporary rule
-    /// bounded to the currently-selected week (or day), so the same signal can
-    /// attribute elsewhere in a different period.
-    enum AttrScope: String, CaseIterable, Identifiable {
-        case always, period
-        var id: String { rawValue }
-    }
 
     private var week: DateInterval {
         DateInterval(start: weekStart, end: calendar.date(byAdding: .day, value: 7, to: weekStart) ?? weekStart)
@@ -59,15 +55,30 @@ struct ReviewView: View {
 
     private var interval: DateInterval { period }
 
-    /// (validFrom, validTo) for a rule under the current scope.
+    /// (validFrom, validTo) for a rule under the current scope, anchored to the
+    /// selected day (or the selected week).
     private var scopeBounds: (Date?, Date?) {
-        scope == .always ? (nil, nil) : (period.start, period.end)
+        scope.bounds(reference: selectedDay ?? weekStart)
+    }
+
+    /// Broad → specific: Always · This week (· This day once a day is picked)
+    /// (· Just this for a call, which can be pinned without teaching a rule).
+    private func scopeOptions(for unit: ReviewUnit) -> [AttributionScope] {
+        var options: [AttributionScope] = [.always, .thisWeek]
+        if selectedDay != nil { options.append(.today) }
+        if case .call = unit { options.append(.justThis) }
+        return options
     }
 
     /// "this week" / "Wed 4 Jun" — used in the scope label + hint.
     private var periodLabel: String {
         if let day = selectedDay { return DateFormatting.weekdayDayShortMonth.string(from: day) }
         return "this week"
+    }
+
+    /// The window a bounded scope covers: the selected day, else the week.
+    private var scopeWindowLabel: String {
+        scope == .today ? periodLabel : "this week"
     }
 
     private var isCurrentWeek: Bool { weekStart == calendar.currentWeekInterval().start }
@@ -171,6 +182,9 @@ struct ReviewView: View {
             initialLookupTask?.cancel()
             reload()
         }
+        // Scope is a per-item choice: a "This week" picked for one card must
+        // not silently carry into the next.
+        .onChange(of: cursor) { _, _ in scope = .always }
         // Refresh when new activity or a sync lands, but only before the user
         // has started acting — so a live snapshot doesn't wipe in-session
         // resolutions/cursor.
@@ -416,20 +430,12 @@ struct ReviewView: View {
                 }
             } else {
                 if showsScopePicker(unit) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Picker("", selection: $scope) {
-                            Text("Always").tag(AttrScope.always)
-                            Text("Just \(periodLabel)").tag(AttrScope.period)
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        Text(scopeHint).font(.caption).foregroundStyle(.tertiary)
-                    }
+                    AttributionScopePicker(scope: $scope, options: scopeOptions(for: unit), hint: scopeHint)
                 }
                 InlineAssign(
                     customers: customers,
                     projects: projects,
-                    confirmLabel: "Confirm",
+                    confirmLabel: showsScopePicker(unit) ? "Confirm · \(scope.label)" : "Confirm",
                     onCreateCustomer: { try state.database.createLocalCustomer(name: $0) },
                     onCreateProject: { try state.database.createLocalProject(customerID: $0, name: $1) },
                     onConfirm: { cust, proj in confirm(unit, customerID: cust, projectID: proj) }
@@ -449,7 +455,7 @@ struct ReviewView: View {
                     }
                     Text(unit.isRepo
                          ? "Ignore excludes this repo from Review, Timeline and reports for all dates. Restore it in Settings → Ignored."
-                         : "Ignore hides it permanently — the Always / Just-this-period choice only affects attribution.")
+                         : "Ignore hides it permanently — the scope choice above only affects attribution.")
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
             }
@@ -600,23 +606,19 @@ struct ReviewView: View {
     private func hostGroupBody(_ unit: ReviewUnit, host: AppDatabase.SignalAggregate) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             if showsScopePicker(unit) {
-                Picker("", selection: $scope) {
-                    Text("Always").tag(AttrScope.always)
-                    Text("Just \(periodLabel)").tag(AttrScope.period)
-                }
-                .pickerStyle(.segmented).labelsHidden()
+                AttributionScopePicker(scope: $scope, options: scopeOptions(for: unit))
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text("ASSIGN ENTIRE HOST").font(.system(size: 10, weight: .bold)).foregroundStyle(.tertiary)
                 InlineAssign(
-                    customers: customers, projects: projects, confirmLabel: "Assign host",
+                    customers: customers, projects: projects, confirmLabel: "Assign host · \(scope.label)",
                     onCreateCustomer: { try state.database.createLocalCustomer(name: $0) },
                     onCreateProject: { try state.database.createLocalProject(customerID: $0, name: $1) },
                     onConfirm: { cust, proj in assignSignal(host, customerID: cust, projectID: proj, markUnit: unit.id) }
                 )
                 Text(scope == .always
                      ? "All current and future paths under \(host.value) attribute here."
-                     : "Paths under \(host.value) during \(periodLabel) attribute here.")
+                     : "Paths under \(host.value) during \(scopeWindowLabel) attribute here.")
                     .font(.caption).foregroundStyle(.tertiary)
             }
             Divider()
@@ -653,8 +655,9 @@ struct ReviewView: View {
 
     private var scopeHint: String {
         switch scope {
-        case .always: return "Creates a rule — future activity auto-attributes here."
-        case .period: return "Attributes only \(periodLabel)'s matching activity; other periods can go elsewhere."
+        case .always:           return "Creates a rule — future activity auto-attributes here."
+        case .thisWeek, .today: return "Attributes only \(scopeWindowLabel)'s matching activity; other periods can go elsewhere."
+        case .justThis:         return "Pins just this call — no rule is created."
         }
     }
 
@@ -673,7 +676,7 @@ struct ReviewView: View {
     private func confirm(_ unit: ReviewUnit, customerID: String, projectID: String?) {
         switch unit {
         case .signal(let s):
-            if run({ try writeSignalRule(s, customerID: customerID, projectID: projectID) }) {
+            if run({ writtenRules[unit.id] = try writeSignalRule(s, customerID: customerID, projectID: projectID) }) {
                 resolved[unit.id] = attrLabel(customerID, projectID); advance()
             }
         case .hostGroup:
@@ -693,7 +696,7 @@ struct ReviewView: View {
             // Both writes share one transaction, so a failed rule insert
             // never leaves the session pinned on its own.
             var rule: Rule?
-            if let channel = session.slackChannel {
+            if scope.createsRule, let channel = session.slackChannel {
                 let (validFrom, validTo) = scopeBounds
                 rule = Rule(
                     id: UUID().uuidString, customerID: customerID, projectID: projectID,
@@ -704,6 +707,7 @@ struct ReviewView: View {
                 try state.database.setMicSessionAttribution(
                     id: session.id, customerID: customerID, projectID: projectID, rule: rule)
             }) {
+                writtenRules[unit.id] = rule
                 resolved[unit.id] = attrLabel(customerID, projectID); advance()
             }
         }
@@ -711,14 +715,14 @@ struct ReviewView: View {
 
     /// Whole-host or single-signal rule assignment (advances).
     private func assignSignal(_ signal: AppDatabase.SignalAggregate, customerID: String, projectID: String?, markUnit: String) {
-        if run({ try writeSignalRule(signal, customerID: customerID, projectID: projectID) }) {
+        if run({ writtenRules[markUnit] = try writeSignalRule(signal, customerID: customerID, projectID: projectID) }) {
             resolved[markUnit] = attrLabel(customerID, projectID); advance()
         }
     }
 
     /// A single path inside a host group — records path resolution, stays on card.
     private func assignPath(_ path: AppDatabase.SignalAggregate, customerID: String, projectID: String?) {
-        if run({ try writeSignalRule(path, customerID: customerID, projectID: projectID) }) {
+        if run({ writtenRules["path:\(path.value)"] = try writeSignalRule(path, customerID: customerID, projectID: projectID) }) {
             pathResolved[path.value] = attrLabel(customerID, projectID)
         }
     }
@@ -730,17 +734,17 @@ struct ReviewView: View {
     }
 
     private func clearPath(_ path: AppDatabase.SignalAggregate) {
-        let kind = ruleKind(path.kind)
-        let pattern = (path.kind == .urlPath && !path.value.contains("*")) ? path.value + "*" : path.value
+        let key = "path:\(path.value)"
         let ok = run {
-            for r in try state.database.allRules().filter({ $0.kind == kind && $0.pattern == pattern }) {
-                try state.database.deleteRule(id: r.id)
-            }
-            for h in try state.database.allHiddenSignals().filter({ $0.kind == .urlPath && $0.value == path.value }) {
-                try state.database.unhide(id: h.id)
+            if let rule = writtenRules[key] {
+                try state.database.deleteRule(id: rule.id)
+            } else {
+                for h in try state.database.allHiddenSignals() where h.kind == .urlPath && h.value == path.value {
+                    try state.database.unhide(id: h.id)
+                }
             }
         }
-        if ok { pathResolved[path.value] = nil }
+        if ok { pathResolved[path.value] = nil; writtenRules[key] = nil }
     }
 
     private func ignore(_ unit: ReviewUnit) {
@@ -761,37 +765,30 @@ struct ReviewView: View {
         if ok { resolved[unit.id] = "Ignored"; advance() }
     }
 
-    /// Undo a resolved unit — delete its rule / clear its attribution / un-ignore.
+    /// Undo a resolved unit — delete the rule Confirm wrote (only that one, so
+    /// a permanent rule or another week's assignment for the same pattern
+    /// survives) / clear its attribution / un-ignore.
     private func clear(_ unit: ReviewUnit) {
         let ok: Bool
         switch unit {
         case .signal(let s):
-            let kind = ruleKind(s.kind)
-            let pattern = (s.kind == .urlPath && !s.value.contains("*")) ? s.value + "*" : s.value
             ok = run {
-                let ignored = try state.database.allHiddenSignals().filter { h in
-                    guard let hk = hiddenKind(s.kind) else { return false }
-                    return h.matches(kind: hk, value: s.value)
-                }
-                // Undoing Ignore must preserve rules that existed before it
-                // (including assignments for other weeks).
-                if ignored.isEmpty {
-                    for r in try state.database.allRules().filter({ $0.kind == kind && $0.pattern == pattern }) {
-                        try state.database.deleteRule(id: r.id)
+                if let rule = writtenRules[unit.id] {
+                    try state.database.deleteRule(id: rule.id)
+                } else if let hk = hiddenKind(s.kind) {
+                    for h in try state.database.allHiddenSignals() where h.matches(kind: hk, value: s.value) {
+                        try state.database.unhide(id: h.id)
                     }
-                }
-                for h in ignored {
-                    try state.database.unhide(id: h.id)
                 }
             }
         case .hostGroup(let host, _):
             ok = run {
-                // whole-host rule + host hide
-                for r in try state.database.allRules().filter({ $0.kind == .urlHost && $0.pattern == host.value }) {
-                    try state.database.deleteRule(id: r.id)
-                }
-                for h in try state.database.allHiddenSignals().filter({ $0.kind == .urlHost && $0.value == host.value }) {
-                    try state.database.unhide(id: h.id)
+                if let rule = writtenRules[unit.id] {
+                    try state.database.deleteRule(id: rule.id)
+                } else {
+                    for h in try state.database.allHiddenSignals() where h.kind == .urlHost && h.value == host.value {
+                        try state.database.unhide(id: h.id)
+                    }
                 }
             }
         case .series(let s):
@@ -805,26 +802,27 @@ struct ReviewView: View {
             ok = run {
                 try state.database.setMicSessionAttribution(id: session.id, customerID: nil, projectID: nil)
                 try state.database.setMicSessionIgnored(id: session.id, isIgnored: false)
-                if let channel = session.slackChannel {
-                    for r in try state.database.allRules().filter({ $0.kind == .slackChannel && $0.pattern == channel }) {
-                        try state.database.deleteRule(id: r.id)
-                    }
+                if let rule = writtenRules[unit.id] {
+                    try state.database.deleteRule(id: rule.id)
                 }
             }
         }
-        if ok { resolved[unit.id] = nil }
+        if ok { resolved[unit.id] = nil; writtenRules[unit.id] = nil }
     }
 
-    /// Shared rule writer: replace any rule with the same (kind, pattern), then
-    /// upsert at priority 100 with the current scope's validity window.
-    private func writeSignalRule(_ signal: AppDatabase.SignalAggregate, customerID: String, projectID: String?) throws {
+    /// Shared rule writer: replace any rule with the same (kind, pattern,
+    /// window), then upsert at priority 100 with the current scope's validity
+    /// window. Returns the written rule so Clear can delete exactly it.
+    private func writeSignalRule(_ signal: AppDatabase.SignalAggregate, customerID: String, projectID: String?) throws -> Rule {
         let kind = ruleKind(signal.kind)
         let pattern = (signal.kind == .urlPath && !signal.value.contains("*")) ? signal.value + "*" : signal.value
         let (validFrom, validTo) = scopeBounds
-        try state.database.upsertReplacingWindow(Rule(
+        let rule = Rule(
             id: UUID().uuidString, customerID: customerID, projectID: projectID,
             kind: kind, pattern: pattern, priority: 100, createdAt: Date(),
-            validFrom: validFrom, validTo: validTo))
+            validFrom: validFrom, validTo: validTo)
+        try state.database.upsertReplacingWindow(rule)
+        return rule
     }
 
     private func advance() {
@@ -897,7 +895,9 @@ struct ReviewView: View {
             // Fresh snapshot for this period — clear in-session resolutions & cursor.
             self.resolved = [:]
             self.pathResolved = [:]
+            self.writtenRules = [:]
             self.cursor = 0
+            self.scope = .always
         } catch {
             loadError = error.localizedDescription
         }

@@ -30,6 +30,18 @@ open Tidsmaskinen.app
 
 Always test permission-related changes against the .app, never against the bare `swift run` binary.
 
+### A dev instance beside the installed app
+
+To look at a branch's UI while the installed app keeps recording, run
+
+```sh
+./bin/dev-instance.sh debug
+```
+
+It builds an ad-hoc-signed copy as `build/Tidsmaskinen Dev.app` (bundle id `se.forefront.tidsmaskinen.dev`), snapshots the live database with `sqlite3 .backup` into `build/dev-data/`, and launches the copy with `TIDSMASKINEN_DATA_DIR` pointing there. `AppPaths.supportDirectory()` honours that variable for the DB, the hook events log, the mic log and AX dumps, and `KeychainStore.service` switches to a `.dev` namespace, so the copy never shares the live DB, never truncates the real `claude-events.jsonl`, and never triggers a keychain prompt for the installed app's tokens. `tm-hook` ignores the variable on purpose: hooks always write the real log. Stop the copy with `pkill -f 'Tidsmaskinen Dev.app'`. It has no TCC grants, so window titles and mic detection are absent — it is for looking at screens, not for testing capture.
+
+To navigate it without a mouse, compile `bin/devdrive.swift` (`swiftc -O -o build/devdrive bin/devdrive.swift`): `devdrive windows <pid>` lists its windows, `devdrive dump <pid>` lists pressable elements, `devdrive press <pid> "Review"` presses the first match by title/description. Capture a window with `screencapture -x -o -l <windowID> out.png`, which works even when the window is behind others. Prefer this over synthetic clicks at screen coordinates: those go to whatever is in front, which may be the user's own app. Timeline blocks use tap gestures, not buttons, so the reattribute popover cannot be opened this way.
+
 Stuck Automation prompt? `tccutil reset AppleEvents se.forefront.tidsmaskinen` clears the cached state so the next AEDeterminePermissionToAutomateTarget call re-prompts. The Diagnostics window has buttons for this.
 
 ### TCC grants do not transfer between dev and release builds

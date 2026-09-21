@@ -172,7 +172,8 @@ struct DiagnosticsView: View {
     private func resetChromePermission() {
         let task = Process()
         task.launchPath = "/usr/bin/tccutil"
-        task.arguments = ["reset", "AppleEvents", "se.forefront.tidsmaskinen"]
+        // Our own bundle id, so a dev copy never resets the installed app's grant.
+        task.arguments = ["reset", "AppleEvents", Bundle.main.bundleIdentifier ?? "se.forefront.tidsmaskinen"]
         let pipe = Pipe()
         task.standardError = pipe
         task.standardOutput = pipe
@@ -222,11 +223,9 @@ struct DiagnosticsView: View {
             return
         }
         let dump = Probes.dumpAXTree(pid: app.processIdentifier)
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Tidsmaskinen", isDirectory: true)
-        let url = dir.appendingPathComponent("ax-dump-\(substring).txt", isDirectory: false)
         do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let url = try AppPaths.supportDirectory()
+                .appendingPathComponent("ax-dump-\(substring).txt", isDirectory: false)
             try dump.write(to: url, atomically: true, encoding: .utf8)
             NSWorkspace.shared.activateFileViewerSelecting([url])
             axProbeMessage = "\(label) tree written to \(url.path) — revealed in Finder."

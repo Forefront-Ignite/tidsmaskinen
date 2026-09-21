@@ -110,9 +110,10 @@ extension AppSettings {
 /// Shared "how long does this attribution apply" choice, used by Review,
 /// Discover, Calls and My day. `justThis` is a precise per-occurrence override
 /// (no rule); `today`/`thisWeek` create a time-bounded rule; `always` a
-/// permanent rule.
+/// permanent rule. Cases run broad → specific so `allCases` renders with the
+/// durable choice leftmost; every picker defaults to `.always`.
 enum AttributionScope: String, CaseIterable, Identifiable {
-    case justThis, today, thisWeek, always
+    case always, thisWeek, today, justThis
     var id: String { rawValue }
 
     var label: String {

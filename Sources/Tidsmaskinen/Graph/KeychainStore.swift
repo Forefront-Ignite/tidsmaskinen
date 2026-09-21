@@ -2,7 +2,10 @@ import Foundation
 import Security
 
 enum KeychainStore {
-    static let service = "se.forefront.tidsmaskinen"
+    /// A dev instance gets its own namespace so it neither prompts for nor
+    /// uses the installed app's tokens.
+    static let service = AppPaths.isDevInstance
+        ? "se.forefront.tidsmaskinen.dev" : "se.forefront.tidsmaskinen"
 
     enum KeychainError: Error, CustomStringConvertible {
         case unhandled(OSStatus)

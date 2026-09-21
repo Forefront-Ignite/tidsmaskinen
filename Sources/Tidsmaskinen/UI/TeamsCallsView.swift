@@ -464,7 +464,7 @@ private struct CallDetailSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var selectedCustomerID: String = ""
     @State private var selectedProjectID: String = ""
-    @State private var scope: AttributionScope = .justThis
+    @State private var scope: AttributionScope = .always
     @State private var appBreakdown: [AppUsage] = []
     @State private var urlBreakdown: [URLUsage] = []
     @State private var loadError: String?
@@ -556,7 +556,7 @@ private struct CallDetailSheet: View {
             if session.slackChannel != nil {
                 AttributionScopePicker(
                     scope: $scope,
-                    options: [.justThis, .today, .thisWeek, .always],
+                    options: AttributionScope.allCases,
                     hint: scope == .justThis
                         ? "Attributes just this call."
                         : "Also teaches a #\(session.slackChannel ?? "") rule\(scope == .always ? "" : " for \(scope.label.lowercased())").")

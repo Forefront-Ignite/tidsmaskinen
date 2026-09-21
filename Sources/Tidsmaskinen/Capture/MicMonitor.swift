@@ -5,9 +5,7 @@ import Darwin
 
 enum MicDebug {
     private static let url: URL = {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Tidsmaskinen", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dir = (try? AppPaths.supportDirectory()) ?? FileManager.default.temporaryDirectory
         return dir.appendingPathComponent("mic-debug.log", isDirectory: false)
     }()
     // ISO8601DateFormatter isn't Sendable but is only touched from the
