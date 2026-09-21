@@ -247,5 +247,13 @@
             <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
             <enclosure url="https://forefront-ignite.github.io/tidsmaskinen/releases/v0.3.17/Tidsmaskinen.zip" sparkle:edSignature="vN240JC238Y0XgfohY7zBBIilhcWCnWpL4Q+HTJHv/PayeISFP5Gh6MFnU3D6SkEK8Nc2xcszOwfp/B+MbBtBg==" length="5299850" type="application/octet-stream" />
         </item>
+        <item>
+            <title>Version 0.3.18</title>
+            <sparkle:version>0.3.18</sparkle:version>
+            <sparkle:shortVersionString>0.3.18</sparkle:shortVersionString>
+            <pubDate>Mon, 21 Sep 2026 05:46:48 +0000</pubDate>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://forefront-ignite.github.io/tidsmaskinen/releases/v0.3.18/Tidsmaskinen.zip" sparkle:edSignature="CRdST/CriZALEyCpfmLEqPVXOUNbM9gGflGaGepmv34fuyJf5eCvSCdYG29xyEptgU3BuPCoR7NWORlENKu4Ag==" length="5299865" type="application/octet-stream" />
+        </item>
     </channel>
 </rss>
