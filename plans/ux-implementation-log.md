@@ -308,3 +308,10 @@ evidence card adds "+ 15 min in 9 shorter stretches" so it sums to the header, a
 total is now the host's open time rather than the sum of the paths above the threshold (the
 backlog and the report counted only the latter). Note the installed app's review threshold is
 10 min, so hosts rarely split into per-path rows there; the dev copy ran on the 5-min default.
+Second look: a stretch click landed in My day with nothing pointing at the stretch — the target
+now carries the moment and My day selects the block covering it, opening its popover. Hosts split
+into per-path assign rows for every open path of a minute or more (the review threshold gates the
+host, not its paths), so a single GitHub repo page can get its own rule. Suggestions were "the
+customers of the most recently created rules"; now they are earlier answers for the pattern, then
+where the host's paths already go, then the customers with the most attributed time in the period,
+each tagged with its reason.

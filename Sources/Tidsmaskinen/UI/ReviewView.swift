@@ -892,7 +892,7 @@ struct ReviewView: View {
 
     private func evidenceCard(_ row: ReviewRow) -> some View {
         detailCard {
-            Text("LONGEST STRETCHES").font(.system(size: 10, weight: .bold)).foregroundStyle(.tertiary)
+            Text("LONGEST STRETCHES · CLICK ONE TO SEE IT IN MY DAY").font(.system(size: 10, weight: .bold)).foregroundStyle(.tertiary)
             ForEach(row.evidence) { e in
                 Button {
                     state.timelineTargetDay = e.start
@@ -921,8 +921,9 @@ struct ReviewView: View {
         }
     }
 
-    /// Up to three targets: earlier answers for the same signal first, then the
-    /// most recently used customers.
+    /// Up to three targets, each tagged with why: earlier answers for the same
+    /// pattern, then (for a host) where its paths already go, then the customers
+    /// with the most attributed time in the period on screen.
     private struct Suggestion { let customerID: String; let projectID: String?; let why: String? }
     private func suggestions(for unit: ReviewUnit) -> [Suggestion] {
         var out: [Suggestion] = []
@@ -933,9 +934,12 @@ struct ReviewView: View {
             out.append(Suggestion(customerID: cid, projectID: pid, why: why))
         }
         var pattern: (Rule.Kind, String)?
+        var host: String?
         switch unit {
-        case .signal(let s):        pattern = (ruleKind(s.kind), s.kind == .urlPath ? s.value + "*" : s.value)
-        case .hostGroup(let h, _):  pattern = (.urlHost, h.value)
+        case .signal(let s):
+            pattern = (ruleKind(s.kind), s.kind == .urlPath ? s.value + "*" : s.value)
+            if s.kind == .urlHost { host = s.value }
+        case .hostGroup(let h, _):  pattern = (.urlHost, h.value); host = h.value
         case .call(let s, _):       pattern = s.learnableRule.map { ($0.kind, $0.pattern) }
         case .series, .event:       pattern = nil
         }
@@ -944,7 +948,23 @@ struct ReviewView: View {
                 add(r.customerID, r.projectID, "earlier")
             }
         }
-        for r in allRules.sorted(by: { $0.createdAt > $1.createdAt }) { add(r.customerID, r.projectID, nil) }
+        if let host {
+            let prefix = host.lowercased() + "/"
+            let under = Dictionary(grouping: allRules.filter { $0.kind == .urlPath && $0.pattern.lowercased().hasPrefix(prefix) },
+                                   by: { "\($0.customerID)/\($0.projectID ?? "")" })
+            for (_, rs) in under.sorted(by: { $0.value.count != $1.value.count ? $0.value.count > $1.value.count : $0.key < $1.key }) {
+                add(rs[0].customerID, rs[0].projectID, "paths here")
+            }
+        }
+        var byTime: [String: (cid: String, pid: String?, seconds: Double)] = [:]
+        for row in rows {
+            if case .attributed(let cid, let pid, _) = row.status {
+                byTime["\(cid)/\(pid ?? "")", default: (cid, pid, 0)].seconds += row.totalSeconds
+            }
+        }
+        for (_, v) in byTime.sorted(by: { $0.value.seconds != $1.value.seconds ? $0.value.seconds > $1.value.seconds : $0.key < $1.key }) {
+            add(v.cid, v.pid, periodLabel)
+        }
         return out
     }
 

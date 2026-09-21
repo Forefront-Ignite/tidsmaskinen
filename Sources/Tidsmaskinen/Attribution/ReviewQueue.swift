@@ -243,10 +243,11 @@ enum ReviewQueue {
             guard st == .open else {
                 rows.append(signalRow(.urlHost, host, acc)); continue
             }
-            // Open paths that clear the threshold become a host group; a host
-            // stays assignable on its own even when no single path clears it.
+            // Every open path with a minute or more gets its own assign row — the
+            // review threshold gates the host, not which of its paths can be sorted
+            // (under a 10-minute threshold no GitHub repo page would ever qualify).
             let openPaths = (paths[host] ?? [:]).compactMap { path, pacc -> AppDatabase.SignalAggregate? in
-                guard pacc.open >= minSec else { return nil }
+                guard pacc.open >= 60 else { return nil }
                 return .init(kind: .urlPath, value: path, totalSeconds: pacc.open)
             }.sorted { $0.totalSeconds > $1.totalSeconds }
             let aggregate = AppDatabase.SignalAggregate(kind: .urlHost, value: host, totalSeconds: acc.open)

@@ -9,6 +9,9 @@ struct TimelineView: View {
     @State private var customers: [Customer] = []
     @State private var projects: [Project] = []
     @State private var selectedBlock: TimelineBlock?
+    /// A moment Review asked for (a stretch's start): once the day is loaded,
+    /// the block covering it is selected so its popover opens right there.
+    @State private var pendingFocus: Date?
     @State private var refreshTimer: Timer?
     @State private var nowTimer: Timer?
     @State private var now: Date = Date()
@@ -151,11 +154,22 @@ struct TimelineView: View {
         .onChange(of: state.commandCenterLastSyncAt) { _, _ in reload() }
     }
 
-    /// A report cell asked for a specific day.
+    /// A report cell asked for a day; a Review stretch asked for a moment in it.
     private func consumeTimelineTarget() {
         guard let target = state.timelineTargetDay else { return }
         state.timelineTargetDay = nil
-        day = Calendar.current.startOfDay(for: target)
+        let start = Calendar.current.startOfDay(for: target)
+        pendingFocus = target > start ? target : nil
+        if day == start { reload() } else { day = start }   // onChange(of: day) reloads
+    }
+
+    private func focusPendingBlock() {
+        guard let at = pendingFocus else { return }
+        pendingFocus = nil
+        let candidates = bundle.foreground + bundle.calls + bundle.calendar + bundle.claudeCode
+        guard let block = candidates.first(where: { !$0.isIdle && $0.startedAt <= at && at < $0.endedAt }) else { return }
+        closeAgendaPopover()
+        selectedBlock = block
     }
 
     // MARK: - Day stats
@@ -1261,6 +1275,7 @@ struct TimelineView: View {
             dayMeetingSeconds = bundle.calendar.filter { !$0.isIgnored }.reduce(0) { $0 + $1.durationSeconds }
             recomputeDerived()
             loadError = nil
+            focusPendingBlock()
         } catch {
             loadError = error.localizedDescription
         }

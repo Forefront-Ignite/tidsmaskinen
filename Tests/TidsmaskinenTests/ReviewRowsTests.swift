@@ -91,6 +91,23 @@ final class ReviewRowsTests: XCTestCase {
         XCTAssertEqual(repo.stretchCount, 2)
     }
 
+    /// A host with any open path of a minute or more is a host group, whatever
+    /// the review threshold, so single pages can be assigned on their own.
+    func testHostSplitsIntoPathsBelowTheReviewThreshold() throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        for i in 0..<48 {   // 12 min on the host: 8 min on /a/b, 3.5 min on /c/d, 30 s on /e/f
+            let path = i < 32 ? "a/b" : (i < 46 ? "c/d" : "e/f")
+            var s = sample(at(15, 10).addingTimeInterval(Double(i) * 15), host: "x.com")
+            s.chromeURL = "https://x.com/\(path)/page"
+            _ = try db.insert(s)
+        }
+        let rows = try ReviewQueue.rows(database: db, interval: week, sampleIntervalSeconds: 15,
+                                        idleThresholdSeconds: 300, minMinutes: 10)
+        let host = try XCTUnwrap(rows.first { $0.id == "host:x.com" })
+        XCTAssertEqual(host.unit.hostPaths.map(\.value), ["x.com/a/b", "x.com/c/d"])
+        XCTAssertEqual(host.totalSeconds, 720)   // the host's open time, not the sum of the listed paths
+    }
+
     /// Browsing a repo on a forge is that repo: the slug rule covers
     /// github.com/owner/repo pages, and the report names the repo for them.
     func testForgeURLMatchesRepoRule() {
