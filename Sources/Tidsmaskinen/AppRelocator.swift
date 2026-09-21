@@ -53,7 +53,7 @@ enum AppRelocator {
             // path can't be moved. The user has to drag the app out first.
             && !bundleURL.path.contains("/AppTranslocation/")
             && isInSystemApplications(bundleURL)
-            && updatesNeedAdmin(bundleURL)
+            && installFolderIsNotOurs(bundleURL)
             && !AppSettings.relocationPromptSuppressed
     }
 
@@ -212,13 +212,22 @@ enum AppRelocator {
         NotificationCenter.default.post(name: didSettle, object: nil)
     }
 
-    /// Mirrors Sparkle's check: no admin needed only when the bundle and its
-    /// parent are writable and the bundle is owned by the current user.
-    static func updatesNeedAdmin(_ bundleURL: URL) -> Bool {
-        let fm = FileManager.default
+    /// Whether the folder holding the app belongs to somebody else. This is
+    /// the durable form of "updates here will need admin rights".
+    ///
+    /// Sparkle decides by asking whether the bundle and its parent are
+    /// writable *right now*, and mirroring that here is a trap: Admin By
+    /// Request grants a temporary admin session for the very update that
+    /// relaunches us, and while it lasts `/Applications` is writable and the
+    /// app concludes it never needs to move — exactly when it just proved it
+    /// does. Session length is policy (15 minutes by default), so the window
+    /// comfortably covers a download, install and relaunch. Ownership doesn't
+    /// move with the session, so it answers the question that actually
+    /// matters: is this somebody else's folder?
+    static func installFolderIsNotOurs(_ bundleURL: URL) -> Bool {
         let parent = bundleURL.deletingLastPathComponent().path
-        guard fm.isWritableFile(atPath: bundleURL.path), fm.isWritableFile(atPath: parent) else { return true }
-        let owner = (try? fm.attributesOfItem(atPath: bundleURL.path)[.ownerAccountID] as? NSNumber)?.uint32Value
+        let owner = (try? FileManager.default.attributesOfItem(atPath: parent)[.ownerAccountID] as? NSNumber)?
+            .uint32Value
         return owner != getuid()
     }
 
