@@ -12,11 +12,13 @@ enum SettingsKey {
     static let commandCenterEnabled = "commandCenterEnabled"
     static let commandCenterBaseURL = "commandCenterBaseURL"
     static let commandCenterLastSyncAt = "commandCenterLastSyncAt"
-    static let timelineShowForeground = "timelineShowForeground"
     // AppRelocator: "Don't ask again" on the move-to-~/Applications prompt,
     // and whether to re-register the login item after a completed move.
     static let relocationPromptSuppressed = "relocationPromptSuppressed"
     static let relocationRestoreLoginItem = "relocationRestoreLoginItem"
+    /// Comma-joined `TimelineBlock.Track` raw values the user switched off in
+    /// My day's Lanes menu. Every lane, foreground included, is on by default.
+    static let timelineHiddenLanes = "timelineHiddenLanes"
 }
 
 enum GraphPreset: String, CaseIterable, Identifiable {

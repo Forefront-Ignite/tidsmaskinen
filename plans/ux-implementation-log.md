@@ -34,6 +34,9 @@ Stages (from the review's "Suggested order of work"):
 | D14 | Evidence in the detail pane: the three longest sessions with window titles / paths linking into My day | Needs sample-level session grouping per signal; the per-day strip and the meeting/call cards are in | Stage 4 (agenda grouping produces the same sessions) |
 | D15 | Delete `SearchableEntityPicker` (`CustomerProjectPicker` covers it; `AddRuleSheet` needs one flag) | Still used by the Customers rule editor | Stage 6 |
 | D16 | Host groups as a path checklist with one Confirm (mock) instead of whole-host + per-path Assign rows | Functional today; checklist is a UI refinement | After stage 6 if time allows |
+| D17 | A black horizontal scrollbar thumb is drawn under My day's Gantt card | Pre-existing; the inner horizontal ScrollView already hides its indicators, so the thumb comes from elsewhere — needs a look with the view debugger | Stage 6 polish |
+| D18 | Undo toast for the Calls tab's inline Ignore (Review and My day have one) | Reversible today via the call sheet or Review's Ignored filter | Stage 6 polish |
+| D19 | Day stats "attributed" can exceed "active" (per-customer sums with quarter-hour rounding vs distinct wall clock, as in the report) — the judge read it as contradictory | Same math as the report by design; a caption could explain it | Stage 6 (report compaction touches the same numbers) |
 
 ## Stage 1 — Defaults and scope (2026-09-21)
 
@@ -130,3 +133,38 @@ days, scrollbar inset; header density noted but kept (four rows: navigator, filt
 progress).
 
 **Deferred from this stage:** D2, D4, D13 (deviation), D14, D15, D16.
+
+## Stage 4 — My day: calls lane, grouped agenda, stable live block (2026-09-21)
+
+**Shipped**
+
+- `TimelineBlock.Track.calls`: each mic session's ad-hoc ranges (mic minus the meetings it *is*, the
+  Calls tab's own helper) become blocks with the mic-session attribution and a `slackChannel` rule
+  signal; the popover saves them to the session. Ignored calls follow the reveal toggle.
+- Work in ignored repos is kept on both tracks and drawn dimmed (`isIgnored`) instead of vanishing;
+  ignored meetings and calls share the flag. Test updated (`testTimelineKeepsIgnoredRepoBlocksFlagged`).
+- The in-progress foreground block keeps a stable id (first sample only), so its popover survives
+  new samples.
+- Day stats: active / attributed / open · N items / in meetings — `WeeklyReport.compute` over the
+  day and `ReviewQueue.build`, so they agree with the report and Review.
+- Agenda grouped by repo, host, app, meeting or call: one row per group with times and total,
+  group-wide attribution state ("3 of 17 unattributed"), "Attribute all N" (a synthesized block over
+  every sample for foreground groups), "Ignore app" for app-only time, "Ignored repo" tags.
+- A Lanes menu (every lane on by default, persisted as `timelineHiddenLanes`) with the hidden/ignored
+  reveal replaces the two unlabelled icon toggles; ⌘← ⌘→ ⌘T on the day navigator.
+- Timeline blocks and agenda rows carry accessibility labels and actions — VoiceOver and the dev
+  driver can open the popover (D10 done). That is how the popover was captured for the judge.
+- The block popover is anchored with `.position` instead of `.offset`: `.offset` never moved the
+  layout frame, so every popover opened at the row's origin — a pre-existing bug the judge caught.
+- Calls tab: All / Unattributed filter with an empty state, inline Attribute / Ignore, no chevron.
+
+**Independent review (ig-review):** pass 1 REQUEST CHANGES — day stat read the wrong report index
+(now `grandTotal` of the day), ignored calls missing from the reveal gate, group state read from the
+first block only, override flag, Calls empty state — all fixed; ⌘←/⌘→ vs text editing noted but kept
+(My day's window has no text fields; the picker's live in popovers). Pass 2 COMMENT — reveal gate
+counted ignored repos, fixed.
+**Independent judge (ig-judge):** 5/10 (blocker: the popover anchoring bug) → 8/10 after the fixes,
+no blocking items. Remaining minors → D17, D18; the pickers' crowding was spaced out.
+
+**Deferred from this stage:** D14 (evidence sessions — the agenda groups now compute them), D17,
+D18, D19.

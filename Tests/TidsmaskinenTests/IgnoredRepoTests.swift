@@ -166,7 +166,10 @@ final class IgnoredRepoTests: XCTestCase {
         XCTAssertTrue(ignored.rows.isEmpty)
     }
 
-    func testTimelineHidesBothRepoTracksAndShowHiddenRestoresThem() throws {
+    /// My day keeps work in an ignored repo on both tracks, flagged so it draws
+    /// dimmed, instead of dropping it — the day stays complete and the repo
+    /// can be un-ignored from where it shows.
+    func testTimelineKeepsIgnoredRepoBlocksFlagged() throws {
         let db = try AppDatabase.inMemoryForTesting()
         _ = try db.insert(sample(privateRemote))
         _ = try db.insert(sample(workRemote, offset: 900))
@@ -176,19 +179,15 @@ final class IgnoredRepoTests: XCTestCase {
                                        gainedSeconds: 1800)
         try db.hideSignal(kind: .gitRepoSlug, value: "Personal/private")
         let day = try XCTUnwrap(cal.dateInterval(of: .day, for: start))
-        func timeline(showHidden: Bool) throws -> TimelineBuilder.DayBundle {
-            try TimelineBuilder.build(day: day, samples: db.samples(in: day), events: [],
-                                      sessions: db.sessions(in: day), claudeDeltas: db.claudeActiveDeltas(in: day),
-                                      matcher: RuleMatcher.load(from: db), sampleIntervalSeconds: 900,
-                                      claudeIdleThresholdSeconds: 300, includeIgnoredRepos: showHidden)
+        let bundle = try TimelineBuilder.build(day: day, samples: db.samples(in: day), events: [],
+                                               sessions: db.sessions(in: day), claudeDeltas: db.claudeActiveDeltas(in: day),
+                                               matcher: RuleMatcher.load(from: db), sampleIntervalSeconds: 900,
+                                               claudeIdleThresholdSeconds: 300)
+        XCTAssertEqual(bundle.foreground.count, 2)
+        XCTAssertEqual(bundle.claudeCode.count, 2)
+        for track in [bundle.foreground, bundle.claudeCode] {
+            XCTAssertEqual(track.first { $0.ruleSignal?.pattern == "Personal/private" }?.isIgnored, true)
+            XCTAssertEqual(track.first { $0.ruleSignal?.pattern == "Personal/work" }?.isIgnored, false)
         }
-        let visible = try timeline(showHidden: false)
-        XCTAssertEqual(visible.foreground.count, 1)
-        XCTAssertEqual(visible.claudeCode.count, 1)
-        XCTAssertEqual(visible.foreground.first?.ruleSignal?.pattern, "Personal/work")
-        XCTAssertEqual(visible.claudeCode.first?.ruleSignal?.pattern, "Personal/work")
-        let all = try timeline(showHidden: true)
-        XCTAssertEqual(all.foreground.count, 2)
-        XCTAssertEqual(all.claudeCode.count, 2)
     }
 }

@@ -19,6 +19,10 @@ struct DateNavigator: View {
     var titleMinWidth: CGFloat = 150
     var nextDisabled: Bool = false
     var nowDisabled: Bool = false
+    /// Optional key equivalents (My day uses ⌘← / ⌘→ / ⌘T).
+    var prevShortcut: KeyboardShortcut? = nil
+    var nextShortcut: KeyboardShortcut? = nil
+    var nowShortcut: KeyboardShortcut? = nil
     let onPrev: () -> Void
     let onNext: () -> Void
     let onNow: () -> Void
@@ -26,6 +30,7 @@ struct DateNavigator: View {
     var body: some View {
         HStack(spacing: 12) {
             Button(action: onPrev) { Image(systemName: "chevron.left") }
+                .keyboardShortcut(prevShortcut)
                 .help(prevHelp)
                 .accessibilityLabel(prevHelp)
 
@@ -34,11 +39,13 @@ struct DateNavigator: View {
                 .frame(minWidth: titleMinWidth, alignment: .center)
 
             Button(action: onNext) { Image(systemName: "chevron.right") }
+                .keyboardShortcut(nextShortcut)
                 .help(nextHelp)
                 .accessibilityLabel(nextHelp)
                 .disabled(nextDisabled)
 
             Button(nowLabel, action: onNow)
+                .keyboardShortcut(nowShortcut)
                 .fixedSize()
                 .disabled(nowDisabled)
         }

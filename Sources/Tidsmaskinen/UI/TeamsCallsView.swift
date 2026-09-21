@@ -94,6 +94,7 @@ struct TeamsCallsView: View {
     @State private var matcher: RuleMatcher?
     @State private var loadError: String?
     @State private var attributing: CallSegment?
+    @State private var unattributedOnly = false
     /// How many sessions were hidden because they were a meeting's own audio,
     /// fully covered by the meetings that own them. Surfaced in the empty state
     /// so the user knows time isn't being silently lost. Sessions dropped merely
@@ -107,6 +108,9 @@ struct TeamsCallsView: View {
             Divider()
             if segments.isEmpty {
                 empty
+            } else if groupedByDay.isEmpty {
+                ContentUnavailableView("Every call in this range has a home", systemImage: "checkmark.circle",
+                                       description: Text("Switch to All to see them."))
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 6) {
@@ -167,6 +171,12 @@ struct TeamsCallsView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: 440, alignment: .leading)
                 Spacer()
+                Picker("", selection: $unattributedOnly) {
+                    Text("All").tag(false)
+                    Text("Unattributed").tag(true)
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
+                .padding(.trailing, 16)
                 RangeScopePicker(scope: $scope)
             }
             if scope.isDay {
@@ -197,10 +207,7 @@ struct TeamsCallsView: View {
         let customer = attribution.customer
         let project = attribution.project
 
-        Button {
-            attributing = seg
-        } label: {
-            HStack(spacing: 12) {
+        HStack(spacing: 12) {
                 Image(systemName: icon(for: seg))
                     .frame(width: 22)
                     .foregroundStyle(color(for: seg))
@@ -248,23 +255,27 @@ struct TeamsCallsView: View {
                     }
                 } else if seg.endedAt != nil {
                     UnattributedTag()
+                    Button("Attribute") { attributing = seg }.controlSize(.small)
+                    Button("Ignore") {
+                        do { try setIgnored(session: s, isIgnored: true) } catch { loadError = error.localizedDescription }
+                    }
+                    .controlSize(.small)
                 } else {
                     Label("Ongoing", systemImage: "dot.radiowaves.left.and.right")
                         .labelStyle(.titleAndIcon)
                         .font(.caption)
                         .foregroundStyle(.green)
                 }
-                Image(systemName: "chevron.right")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
             }
             .padding(.vertical, 6)
             .padding(.horizontal, 10)
             .contentShape(Rectangle())
             .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.controlBackgroundColor)))
             .opacity(s.isIgnored ? 0.55 : 1)
-        }
-        .buttonStyle(.plain)
+            .onTapGesture { attributing = seg }
+            .accessibilityElement(children: .contain)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { attributing = seg }
     }
 
     private func icon(for seg: CallSegment) -> String {
@@ -332,7 +343,10 @@ struct TeamsCallsView: View {
 
     private var groupedByDay: [(Date, [CallSegment])] {
         let cal = Calendar.current
-        let grouped = Dictionary(grouping: segments) { cal.startOfDay(for: $0.startedAt) }
+        let shown = unattributedOnly
+            ? segments.filter { $0.endedAt != nil && !$0.session.isIgnored && effective(for: $0.session).customer == nil }
+            : segments
+        let grouped = Dictionary(grouping: shown) { cal.startOfDay(for: $0.startedAt) }
         return grouped.keys.sorted(by: >).map { ($0, grouped[$0]!.sorted { $0.startedAt < $1.startedAt }) }
     }
 
