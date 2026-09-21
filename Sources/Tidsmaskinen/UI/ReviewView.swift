@@ -244,7 +244,7 @@ struct ReviewView: View {
         .onChange(of: selectedDay) { _, _ in
             initialLookupTask?.cancel()
             skipped = []
-            scope = .always   // "This day" is only offered while a day is picked
+            scope = selectedRow?.unit.defaultScope ?? .always   // "This day" is only offered while a day is picked
             reload()
         }
         .onChange(of: selectedID) { _, _ in prepareDetail() }
@@ -982,10 +982,10 @@ struct ReviewView: View {
         selProjectID = s[i].projectID ?? ""
     }
 
-    /// Reset the form for the newly selected row: scope back to Always, the
-    /// picker prefilled with the current attribution.
+    /// Reset the form for the newly selected row: scope back to the unit's
+    /// default, the picker prefilled with the current attribution.
     private func prepareDetail() {
-        scope = .always
+        scope = selectedRow?.unit.defaultScope ?? .always
         pickerError = nil
         if case .attributed(let cid, let pid, _)? = selectedRow?.status {
             selCustomerID = cid; selProjectID = pid ?? ""
@@ -1525,6 +1525,18 @@ enum ReviewUnit: Identifiable {
     }
 
     var isHostGroup: Bool { if case .hostGroup = self { return true }; return false }
+
+    /// The scope Review preselects. Always where the pattern names one customer
+    /// for good (a repo, a site, a recurring meeting, a Slack channel); narrower
+    /// where one pattern legitimately serves several: an app is ambient, and a
+    /// colleague talks about many things, so a person rule is opt-in.
+    var defaultScope: AttributionScope {
+        switch self {
+        case .signal(let s):        return s.kind == .appBundleID ? .thisWeek : .always
+        case .hostGroup, .series, .event: return .always
+        case .call(let s, _):       return s.learnableRule?.kind == .slackChannel ? .always : .justThis
+        }
+    }
 
     var hostPaths: [AppDatabase.SignalAggregate] {
         if case .hostGroup(_, let paths) = self { return paths }; return []
