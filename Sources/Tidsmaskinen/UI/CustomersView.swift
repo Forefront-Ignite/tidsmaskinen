@@ -114,13 +114,11 @@ struct CustomersView: View {
             List(selection: $selectedCustomerID) {
                 let external = customers.filter(\.isExternal), local = customers.filter { !$0.isExternal }
                 if !external.isEmpty {
-                    Section("From Command Center · \(external.count)") {
-                        ForEach(external) { customer in sidebarRow(customer) }
-                    }
+                    Section { ForEach(external) { customer in sidebarRow(customer) } }
+                        header: { sectionHeader("From Command Center", count: external.count) }
                 }
-                Section("Local · \(local.count)") {
-                    ForEach(local) { customer in sidebarRow(customer) }
-                }
+                Section { ForEach(local) { customer in sidebarRow(customer) } }
+                    header: { sectionHeader("Local", count: local.count) }
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
@@ -185,7 +183,8 @@ struct CustomersView: View {
                 AddRuleSheet(
                     customerID: customer.id,
                     availableProjects: customerProjects,
-                    existing: edit.rule
+                    existing: edit.rule,
+                    database: state.database
                 ) { rule in
                     // Same (kind, pattern, window) replaces rather than duplicates.
                     try state.database.upsertReplacingWindow(rule)
@@ -276,6 +275,7 @@ struct CustomersView: View {
         .init(title: "Apps", icon: "app", kinds: [.appBundleID]),
         .init(title: "Window titles", icon: "macwindow", kinds: [.windowTitle]),
         .init(title: "Slack channels", icon: "number", kinds: [.slackChannel]),
+        .init(title: "Call participants", icon: "person.crop.circle", kinds: [.participant]),
     ]
 
     /// This customer's rules grouped by (kind, pattern), newest first.
@@ -440,7 +440,7 @@ struct CustomersView: View {
         HStack(spacing: 6) {
             Text(title.uppercased())
                 .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.secondary)
             Text("\(count)")
                 .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(.secondary)
@@ -578,6 +578,7 @@ private struct AddRuleSheet: View {
     let customerID: String
     let availableProjects: [Project]
     var existing: Rule? = nil
+    let database: AppDatabase
     let onSave: (Rule) throws -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -585,6 +586,9 @@ private struct AddRuleSheet: View {
     @State private var pattern: String = ""
     @State private var projectID: String = ""
     @State private var saveError: String?
+    /// What the pattern matches in the last 90 days, refreshed as you type.
+    @State private var matchSummary: String?
+    private static let matchWindowDays = 90
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -605,6 +609,12 @@ private struct AddRuleSheet: View {
             Text(helpText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let matchSummary {
+                Label(matchSummary, systemImage: "scope")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("ruleMatchSummary")
+            }
 
             if !availableProjects.isEmpty {
                 Picker("Project", selection: $projectID) {
@@ -656,6 +666,35 @@ private struct AddRuleSheet: View {
                 projectID = existing.projectID ?? ""
             }
         }
+        .task(id: "\(kind.rawValue):\(pattern)") { await refreshMatchSummary() }
+    }
+
+    /// Debounced so a keystroke burst runs one query; the read happens off
+    /// the main thread because it groups every sample of the window.
+    private func refreshMatchSummary() async {
+        let trimmed = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { matchSummary = nil; return }
+        try? await Task.sleep(for: .milliseconds(300))
+        guard !Task.isCancelled else { return }
+        let db = database, kind = kind
+        let since = Calendar.current.date(byAdding: .day, value: -Self.matchWindowDays, to: Date()) ?? Date()
+        let interval = AppSettings.sampleIntervalSeconds
+        let result = try? await Task.detached(priority: .userInitiated) {
+            try db.ruleMatchCount(kind: kind, pattern: trimmed, since: since, sampleIntervalSeconds: interval)
+        }.value
+        guard !Task.isCancelled else { return }
+        matchSummary = result.map(Self.describe) ?? "Couldn't count matches"
+    }
+
+    private static func describe(_ r: AppDatabase.RuleMatchCount) -> String {
+        if r.isEmpty { return "No matches in the last \(matchWindowDays) days" }
+        var parts: [String] = []
+        if r.sampleSeconds > 0 {
+            let h = r.sampleSeconds / 3600
+            parts.append(h < 1 ? "\(Int((r.sampleSeconds / 60).rounded())) min of activity" : String(format: "%.1f h of activity", h))
+        }
+        if r.calls > 0 { parts.append("\(r.calls) call\(r.calls == 1 ? "" : "s")") }
+        return "Matches " + parts.joined(separator: " · ") + " in the last \(matchWindowDays) days"
     }
 
     private var helpText: String {
@@ -674,6 +713,8 @@ private struct AddRuleSheet: View {
             return "App bundle identifier of the frontmost app. Wildcards supported."
         case .slackChannel:
             return "Slack channel name (no #), e.g. `nfc-internal`. Attributes both foreground time in that channel and huddles started there. Wildcards supported, e.g. `nfc-*`."
+        case .participant:
+            return "The other person in a 1:1 Teams, Zoom or Slack call, as the Calls tab shows them. Wildcards supported, e.g. `Anna *`."
         }
     }
 }

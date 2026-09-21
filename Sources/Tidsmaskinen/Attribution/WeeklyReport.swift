@@ -643,7 +643,7 @@ struct WeeklyReport {
                         seriesMasterID: nil
                     )
                 }
-            case .appBundleID:
+            case .appBundleID, .participant:
                 break
             }
         }

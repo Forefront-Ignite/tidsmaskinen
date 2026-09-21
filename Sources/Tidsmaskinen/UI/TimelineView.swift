@@ -217,6 +217,7 @@ struct TimelineView: View {
         HStack(spacing: 28) {
             stat(durationLabel(dayActiveSeconds), "active")
             stat(durationLabel(dayAttributedSeconds), "attributed")
+                .help("Hours credited to customers, as the report counts them. Meetings bill their booked length and a call during a meeting bills on top, so this can exceed active time at the keyboard.")
             stat(durationLabel(dayOpenSeconds),
                  dayOpenCount == 0 ? "open" : "open · \(dayOpenCount) item\(dayOpenCount == 1 ? "" : "s")")
             stat(durationLabel(dayMeetingSeconds), "in meetings")
@@ -261,7 +262,8 @@ struct TimelineView: View {
                     .padding(.trailing, 12)
                     .padding(.bottom, 12)
                 }
-                .scrollIndicators(.hidden)
+                // .never, not .hidden: on macOS .hidden still draws the bar while a mouse is connected.
+                .scrollIndicators(.never)
                 .background(
                     TimelineScrollZoom { deltaY in
                         let factor = pow(1.01, deltaY)

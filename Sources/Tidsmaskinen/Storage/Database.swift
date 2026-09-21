@@ -854,6 +854,55 @@ struct AppDatabase {
         }
     }
 
+    /// What a rule pattern matches in the recent past — the preview shown while
+    /// editing a rule. Samples are grouped by their signal column first so the
+    /// glob runs once per distinct value, not once per sample.
+    struct RuleMatchCount: Equatable {
+        var sampleSeconds: Double = 0
+        var calls: Int = 0
+        var isEmpty: Bool { sampleSeconds == 0 && calls == 0 }
+    }
+
+    func ruleMatchCount(kind: Rule.Kind, pattern: String, since: Date,
+                        sampleIntervalSeconds: Int) throws -> RuleMatchCount {
+        try dbQueue.read { db in
+            var out = RuleMatchCount()
+            let secs = Double(sampleIntervalSeconds)
+            let base = ActivitySample.Columns.capturedAt >= since && ActivitySample.Columns.isIdle == false
+            func tally(_ column: Column, where extra: SQLExpression? = nil, value: (String) -> String?) throws {
+                var request = ActivitySample.filter(base && column != nil)
+                if let extra { request = request.filter(extra) }
+                let rows = try request.select(column, count(Column("id")), as: Row.self).group(column).fetchAll(db)
+                for row in rows {
+                    guard let raw: String = row[0], let n: Int = row[1], let v = value(raw),
+                          RuleMatcher.matches(kind: kind, pattern: pattern, value: v) else { continue }
+                    out.sampleSeconds += Double(n) * secs
+                }
+            }
+            switch kind {
+            case .gitRepoSlug:   try tally(Column("gitRemoteURL")) { RuleMatcher.gitSlug(fromRemote: $0) }
+            case .gitRemoteHost: try tally(Column("gitRemoteURL")) { RuleMatcher.gitHost(fromRemote: $0) }
+            case .urlHost:       try tally(Column("chromeHost")) { $0 }
+            case .urlPath:       try tally(Column("chromeURL")) { RuleMatcher.normalizedURL($0) }
+            case .windowTitle:   try tally(Column("windowTitle")) { $0 }
+            case .appBundleID:   try tally(Column("appBundleID")) { $0 }
+            case .slackChannel:
+                try tally(Column("windowTitle"), where: Column("appBundleID").like("%slack%")) {
+                    MicSession.parseSlackChannel(fromTitle: $0)
+                }
+            case .participant:   break
+            }
+            if kind == .slackChannel || kind == .participant {
+                let sessions = try MicSession.filter(MicSession.Columns.startedAt >= since).fetchAll(db)
+                out.calls = sessions.filter { s in
+                    guard let v = kind == .slackChannel ? s.slackChannel : s.participant else { return false }
+                    return RuleMatcher.matches(kind: kind, pattern: pattern, value: v)
+                }.count
+            }
+            return out
+        }
+    }
+
     /// Ignore a repo, app, browser host or URL path. No-op if already hidden.
     func hideSignal(kind: HiddenSignal.Kind, value: String) throws {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)

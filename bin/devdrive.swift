@@ -9,7 +9,7 @@
 //   build/devdrive press <pid> <substring>    # AXPress the first element whose title/description/value matches
 //                                              ("role=AXMenuBarItem" matches by role, "title=Settings…" / "desc=All" exactly by title / description;
 //                                              the app menu's Settings… item opens the main window without any keystroke)
-//   build/devdrive set <pid> <substring> <v>  # set AXValue on the first matching element
+//   build/devdrive set <pid> <substring> <v>  # set AXValue on the first matching element ("<substring>#2" = the second match)
 //   build/devdrive select <pid> <substring>   # select the list row containing the first matching element
 //   build/devdrive extras <pid>               # press the app's menu-bar status item (opens the tray popover)
 import ApplicationServices
@@ -108,11 +108,17 @@ case "extras":
     print("press status item → \(AXUIElementPerformAction(item, kAXPressAction as CFString).rawValue)")
 case "press", "set":
     guard args.count > 3 else { print("usage"); exit(2) }
-    let needle = args[3].lowercased()
+    // "<needle>#3" targets the third match, e.g. the sheet's text field behind the sidebar's.
+    var needle = args[3].lowercased()
+    var skip = 0
+    if let hash = needle.lastIndex(of: "#"), let n = Int(needle[needle.index(after: hash)...]) {
+        skip = max(0, n - 1); needle = String(needle[..<hash])
+    }
     var done = false
     walk(app, 0, 40) { e, _ in
         if done { return false }
         guard matches(e, needle) else { return true }
+        if skip > 0 { skip -= 1; return true }
         if args[1] == "press", actions(e).contains(kAXPressAction) {
             let r = AXUIElementPerformAction(e, kAXPressAction as CFString)
             print("press \(str(e, kAXRoleAttribute)) '\(str(e, kAXDescriptionAttribute))' → \(r.rawValue)")

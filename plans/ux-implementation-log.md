@@ -13,35 +13,36 @@ Stages (from the review's "Suggested order of work"):
 4. Calls lane, grouped agenda, stable live-block id
 5. Tray health + Setup pane + mic permission; Debug → Advanced
 6. Report compaction and Customers rule hygiene
+7. The deferred items that needed no model decision
 
 ## Deferred items (all stages)
 
 | # | Item | Why deferred | Revisit when |
 |---|---|---|---|
 | D1 | "This and following" option on recurring-meeting attribution | Needs a validity window on `meeting_series_attributions` (schema migration + `RuleMatcher.attribute(event:)` + every reader) | Stage 3 touches series attribution |
-| D2 | Retroactive impact count on Confirm ("also changes 14 items, 9.2 h") | Needs a new query over samples/events/calls per candidate rule | Stage 3 (Review list) or later; ship the button without the number first |
-| D3 | Popover declares existing rules for the pattern before overwriting | Belongs with the rule-conflict work (write-time flagging) | Stage 6 (Customers rule hygiene) |
-| D4 | Shared-host guard (localhost / Azure / Microsoft portals → "assign paths instead") | Belongs with Review list mode and the path checklist | Stage 3 |
-| D5 | Live match count while editing a rule ("62 samples in the last 90 days") | Needs a new query | Stage 6 |
-| D6 | Learnable rule kind for Teams/Zoom 1:1 calls (participant-keyed) | New rule kind + matcher + Calls sheet; or an honest "not supported" note | Stage 4 (Calls) |
+| D2 | Retroactive impact count on Confirm ("also changes 14 items, 9.2 h") | **Done in stage 7** as open time the Always rule also clears in the other weeks of the backlog window; the full re-attribution diff over all history was judged not worth a per-selection re-resolve | — |
+| D3 | Popover declares existing rules for the pattern before overwriting | **Done in stage 7** in Review's decision note (Customers flags conflicts since stage 6); the Timeline popover still doesn't | Timeline popover, if it nags |
+| D4 | Shared-host guard (localhost / Azure / Microsoft portals → "assign paths instead") | **Done in stage 7** (warn, not block) | — |
+| D5 | Live match count while editing a rule ("62 samples in the last 90 days") | **Done in stage 7** (`ruleMatchCount`) | — |
+| D6 | Learnable rule kind for Teams/Zoom 1:1 calls (participant-keyed) | **Done in stage 7** (`participant` rule kind, no migration) | — |
 | D7 | Manual time entry | Missing concept in the schema; needs a data-model decision first | Stage 6 |
-| D8 | Review shows a vertical scroll indicator although the card fits | Pre-existing; the card ScrollView goes away with list mode | Stage 3 |
-| D9 | Discover's auto-opened customer picker covers the scope control | Pre-existing; Discover is deleted | Stage 3 (moot once Discover goes) |
-| D10 | Timeline blocks are tap gestures, not buttons: no accessibility action, not keyboard-reachable, not drivable headlessly | Needs `Button`-based blocks; touches the popover anchoring | Stage 4 (Calls lane / agenda rework) |
-| D11 | Tertiary captions ("Attributed on its own — no rule is created", "each cell is that project's hours that day") are low-contrast on the gradient wallpaper | Pre-existing style; judge minor in stage 2 | Stage 6 (report compaction) or a global caption pass |
-| D12 | Project labels wrap mid-word in the report grid ("Scenarioplane ring - Lumorio") although the column has room | Pre-existing; the grid is rebuilt in stage 6 | Stage 6 |
-| D13 | **Deviation from the mock:** app-only time is listed in Review (Apps & sites, "Unattributed") but is *not* counted as open, so the report/tray backlog numbers are unchanged. The mock counts apps as open. | `ReviewQueue.build` deliberately excluded apps (an editor or browser can't be pinned to one customer; counting them would nag every week) and the report/tray depend on it | Revisit if the user wants apps in the open count — one line in `ReviewQueue.rows` (`ambientWhenOpen`) |
-| D14 | Evidence in the detail pane: the three longest sessions with window titles / paths linking into My day | Needs sample-level session grouping per signal; the per-day strip and the meeting/call cards are in | Stage 4 (agenda grouping produces the same sessions) |
-| D15 | Delete `SearchableEntityPicker` (`CustomerProjectPicker` covers it; `AddRuleSheet` needs one flag) | Still used by the Customers rule editor | Stage 6 |
-| D16 | Host groups as a path checklist with one Confirm (mock) instead of whole-host + per-path Assign rows | Functional today; checklist is a UI refinement | After stage 6 if time allows |
-| D17 | A black horizontal scrollbar thumb is drawn under My day's Gantt card | Pre-existing; the inner horizontal ScrollView already hides its indicators, so the thumb comes from elsewhere — needs a look with the view debugger | Stage 6 polish |
-| D18 | Undo toast for the Calls tab's inline Ignore (Review and My day have one) | Reversible today via the call sheet or Review's Ignored filter | Stage 6 polish |
+| D8 | Review shows a vertical scroll indicator although the card fits | Gone with list mode (stage 3) | — |
+| D9 | Discover's auto-opened customer picker covers the scope control | Moot: Discover deleted (stage 3) | — |
+| D10 | Timeline blocks are tap gestures, not buttons: no accessibility action, not keyboard-reachable, not drivable headlessly | **Done in stage 4** (accessibility labels and actions) | — |
+| D11 | Tertiary captions ("Attributed on its own — no rule is created", "each cell is that project's hours that day") are low-contrast on the gradient wallpaper | Largely done in stage 6 (`.secondary` captions) | — |
+| D12 | Project labels wrap mid-word in the report grid ("Scenarioplane ring - Lumorio") although the column has room | Done in stage 6 (tail truncation) | — |
+| D13 | **Deviation from the mock, kept after stage 7:** app-only time is listed in Review (Apps & sites, "Unattributed") but is *not* counted as open, so the report/tray backlog numbers are unchanged. The mock counts apps as open. | `ReviewQueue.build` deliberately excluded apps (an editor or browser can't be pinned to one customer; counting them would nag every week) and the report/tray depend on it | Revisit if the user wants apps in the open count — one line in `ReviewQueue.rows` (`ambientWhenOpen`) |
+| D14 | Evidence in the detail pane: the three longest sessions with window titles / paths linking into My day | **Done in stage 7** (`ReviewRow.evidence`, computed in `ReviewQueue.rows` rather than reusing My day's per-day grouping) | — |
+| D15 | Delete `SearchableEntityPicker` (`CustomerProjectPicker` covers it; `AddRuleSheet` needs one flag) | Done in stage 6 | — |
+| D16 | Host groups as a path checklist with one Confirm (mock) instead of whole-host + per-path Assign rows | Skipped: per-path Assign rows work; a checklist replaces working UI with a visual variant and adds selection state for no new capability | Only if per-path assignment proves too slow in practice |
+| D17 | A black horizontal scrollbar thumb is drawn under My day's Gantt card | **Fixed in stage 7**: `.scrollIndicators(.hidden)` still draws the bar on macOS while a mouse is connected; `.never` doesn't | Verify on the signed build with a mouse |
+| D18 | Undo toast for the Calls tab's inline Ignore (Review and My day have one) | **Done in stage 7** | — |
 | D20 | Menu-bar icon visibility is inferred from the status-bar window being ordered in with a width; macOS 26's "Allow in the Menu Bar" off state was not reproduced, so the check warns rather than fails | Needs a machine with the item disabled to confirm the signal | Stage 6 or when it misfires |
 | D21 | Notification on permission loss is verified in code only — needs a real revocation on the signed build to see the prompt and the banner | Dev copy can't lose a grant it never had | First release build test |
-| D22 | Customers sidebar section headers ("From Command Center · 22") are low-contrast on the wallpaper; the sidebar scrollbar sits on the split divider | Judge nits in stage 6 | Polish pass |
-| D23 | Week strip (a per-week coloured strip per pattern) instead of the text "week 30, week 35, week 37 only" | The stack row already lists the weeks; the strip is a visual refinement | Polish pass |
-| D24 | Live match count while editing a rule ("62 samples in the last 90 days") and the shared-host "Assign paths…" affordance in Customers | Both need new queries (same as D5 / D4) | With D5 / D4 |
-| D19 | Day stats "attributed" can exceed "active" (per-customer sums with quarter-hour rounding vs distinct wall clock, as in the report) — the judge read it as contradictory | Same math as the report by design; a caption could explain it | Stage 6 (report compaction touches the same numbers) |
+| D22 | Customers sidebar section headers ("From Command Center · 22") are low-contrast on the wallpaper; the sidebar scrollbar sits on the split divider | Headers **done in stage 7** (`.secondary`, same header style as the detail sections); the scrollbar position is untouched | Polish pass, needs a look in the view debugger |
+| D23 | Week strip (a per-week coloured strip per pattern) instead of the text "week 30, week 35, week 37 only" | Skipped: the stack row already lists the weeks in words; a strip is decoration with no new information | Never, unless a stack grows past what a sentence can hold |
+| D24 | Live match count while editing a rule and the shared-host "Assign paths…" affordance in Customers | Duplicate of D5 / D4. The match count is in the Customers editor; the host guard lives in Review, where hosts are assigned | — |
+| D19 | Day stats "attributed" can exceed "active" (per-customer sums with quarter-hour rounding vs distinct wall clock, as in the report) — the judge read it as contradictory | Same math as the report by design; **stage 7** adds a tooltip on the stat explaining it (meetings bill their booked length, a call during a meeting bills on top) | — |
 
 ## Stage 1 — Defaults and scope (2026-09-21)
 
@@ -245,3 +246,55 @@ bare project count — now "N projects"). Sidebar header contrast → D22.
 **Deferred from this stage:** D4, D5, D7 (manual entry — still a data-model decision), D11 (largely
 addressed by the new captions using `.secondary`), D12 (the grid now truncates project names with
 a tail), D15 done, D22, D23, D24.
+
+## Stage 7 — The deferred items that needed no model decision (2026-09-21)
+
+Went through every deferred row and sorted them by the real reason. Only D1 (a validity window
+on series attributions) and D7 (manual entry) need a data-model decision; they stay deferred.
+D13 stays a deliberate deviation. D16 and D23 are skipped for good: both replace working UI with
+a visual variant. D20 and D21 need the signed build.
+
+**Shipped**
+
+- **D6** `participant` rule kind (a string enum case, no migration): `RuleMatcher.attribute(micSession:)`
+  matches it after the channel; `MicSession.learnableRule` picks channel, else participant, and the
+  Calls sheet, Review's Confirm and the decision note all write whichever it returns. Customers gets
+  a "Call participants" group and help text. A recurring Teams/Zoom 1:1 no longer lands in Review
+  every week.
+- **D5** Live match preview in the Customers rule editor: `AppDatabase.ruleMatchCount` groups the
+  last 90 days by the signal column and runs the glob once per distinct value (calls come from mic
+  sessions); debounced 300 ms, read off the main thread.
+- **D14** `ReviewRow.evidence`: the three longest stretches of consecutive samples on a signal (a gap
+  over 2 min starts a new one; open rows list only open stretches) with the title seen most, shown
+  as a "Longest stretches" card whose rows open that day in My day.
+- **D4** Assigning a whole host warns when it is localhost, a Microsoft/Azure portal, GitHub/GitLab/
+  Bitbucket/Atlassian, or already ruled to a customer, pointing at the path rows. Warn, not block.
+- **D3** Review's decision note names an existing rule for the same pattern by another customer and
+  how the matcher resolves the overlap.
+- **D2** For Always, the note says what the rule also clears in the other weeks of the backlog
+  window ("Also clears 2.1 h open in 3 other weeks"), resolved off the main thread per selection.
+  The full re-attribution diff over all history is not computed: it would need a hypothetical
+  matcher re-run over every sample on each picker change for a number that rarely changes a decision.
+- **D18** Undo toast (⌘Z, 5 s) for the Calls tab's inline Ignore.
+- **D19** Tooltip on My day's "attributed" stat explaining why it can exceed "active".
+- **D17** `.scrollIndicators(.never)` on the Gantt: `.hidden` still draws the bar on macOS with a mouse.
+- **D22** Customers sidebar section headers use the same `.secondary` header style as the detail sections.
+- Table cleanup: D8–D12 and D15 marked done, D24 marked a duplicate of D5/D4.
+
+**Tests:** `CallRuleTests` (participant match, learnable-rule precedence, match count) and an
+evidence test in `ReviewRowsTests`. 93 green.
+
+**Independent review (ig-review):** REQUEST CHANGES, all fixed — the impact worker was a detached
+task the parent's cancel never reached and ran on every J/K press (now debounced 200 ms, cancellation
+forwarded with `withTaskCancellationHandler`, checked between weeks, cancelled on disappear); the
+existing-rule note and host warning matched expired day/week rules from months ago (now only
+permanent rules or windows overlapping the period on screen); a host that is a plain signal this
+week missed its host-group id in other weeks; a dead `.hostGroup` branch in `decisionNote`; per-call
+`DateFormatter`s. Not re-reviewed after these mechanical fixes.
+**Independent judge (ig-judge):** 8/10, no blocking items, on three captures of the dev copy
+(Review with a 1:1 call, the github.com host group with the evidence card and warning, the New rule
+sheet with "Matches 39.6 h of activity in the last 90 days"). Its minor note — the day strip printed
+"0.046" — is fixed (same `formatHours` as the header: "3 min" / "1.2 h"); its nit about the path
+eye icon was already covered by a tooltip and accessibility label the capture can't show. The
+judge's proxy rejects more than ~2 MB of PNG, so captures are downscaled to 1200 px; `devdrive`
+gained `"<needle>#2"` to reach the second match (a sheet's text field behind the sidebar's).

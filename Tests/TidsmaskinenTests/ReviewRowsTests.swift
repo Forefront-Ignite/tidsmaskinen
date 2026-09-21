@@ -13,8 +13,8 @@ final class ReviewRowsTests: XCTestCase {
     private var week: DateInterval { DateInterval(start: at(13, 0), end: at(20, 0)) }
 
     private func sample(_ when: Date, host: String? = nil, remote: String? = nil,
-                        app: String = "com.google.Chrome") -> ActivitySample {
-        ActivitySample(id: nil, capturedAt: when, appBundleID: app, appName: nil, windowTitle: nil,
+                        app: String = "com.google.Chrome", title: String? = nil) -> ActivitySample {
+        ActivitySample(id: nil, capturedAt: when, appBundleID: app, appName: nil, windowTitle: title,
                        chromeURL: host.map { "https://\($0)/x/y" }, chromeHost: host,
                        gitRepoPath: nil, gitRemoteURL: remote, isIdle: false,
                        customerID: nil, projectID: nil)
@@ -55,5 +55,38 @@ final class ReviewRowsTests: XCTestCase {
         let backlog = try ReviewQueue.build(database: db, interval: week, sampleIntervalSeconds: 15,
                                             idleThresholdSeconds: 300, minMinutes: 5)
         XCTAssertEqual(backlog.map(\.id), ["sig:gitRepoSlug:acme/repo"])
+    }
+
+    /// Evidence: consecutive samples on a signal form a stretch, a gap over two
+    /// minutes starts a new one, an open row lists only its open stretches, and
+    /// each stretch names the title seen most.
+    func testRowsCarryLongestStretchesAsEvidence() throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        try db.upsert(Customer(id: "A", name: "A", color: nil, createdAt: Date()))
+        let remote = "git@github.com:acme/repo.git"
+        // Wednesday 10:00: 20 samples (5 min) — "main.swift" 12×, "README" 8×.
+        for i in 0..<20 {
+            _ = try db.insert(sample(at(15, 10).addingTimeInterval(Double(i) * 15), remote: remote,
+                                     app: "com.microsoft.VSCode", title: i < 12 ? "main.swift" : "README"))
+        }
+        // Wednesday 11:00: 8 samples (2 min) after a gap.
+        for i in 0..<8 {
+            _ = try db.insert(sample(at(15, 11).addingTimeInterval(Double(i) * 15), remote: remote,
+                                     app: "com.microsoft.VSCode", title: "tests.swift"))
+        }
+        // Thursday: 40 attributed samples (a manual override) — not evidence for an open row.
+        for i in 0..<40 {
+            var s = sample(at(16, 9).addingTimeInterval(Double(i) * 15), remote: remote, app: "com.microsoft.VSCode", title: "other")
+            s.customerID = "A"
+            _ = try db.insert(s)
+        }
+        let rows = try ReviewQueue.rows(database: db, interval: week, sampleIntervalSeconds: 15,
+                                        idleThresholdSeconds: 300, minMinutes: 5)
+        let repo = try XCTUnwrap(rows.first { $0.id == "sig:gitRepoSlug:acme/repo" })
+        XCTAssertEqual(repo.status, .open)
+        XCTAssertEqual(repo.evidence.map(\.seconds), [300, 120])
+        XCTAssertEqual(repo.evidence.map(\.detail), ["main.swift", "tests.swift"])
+        XCTAssertEqual(repo.evidence.first?.start, at(15, 10))
+        XCTAssertEqual(repo.evidence.first?.end, at(15, 10).addingTimeInterval(20 * 15))
     }
 }

@@ -95,6 +95,9 @@ struct TeamsCallsView: View {
     @State private var loadError: String?
     @State private var attributing: CallSegment?
     @State private var unattributedOnly = false
+    /// The call the inline Ignore just hid, while its undo toast is up.
+    @State private var undoIgnore: MicSession?
+    @State private var undoIgnoreTask: Task<Void, Never>?
     /// How many sessions were hidden because they were a meeting's own audio,
     /// fully covered by the meetings that own them. Surfaced in the empty state
     /// so the user knows time isn't being silently lost. Sessions dropped merely
@@ -126,6 +129,7 @@ struct TeamsCallsView: View {
                 }
             }
         }
+        .overlay(alignment: .bottom) { ignoreToast }
         .onAppear { reload() }
         .onChange(of: scope) { _, _ in reload() }
         .onChange(of: state.sampleCount) { _, _ in reload() }
@@ -244,7 +248,7 @@ struct TeamsCallsView: View {
                             Image(systemName: "wand.and.stars")
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
-                                .help("Auto-matched from a Slack channel rule")
+                                .help("Auto-matched from a channel or participant rule")
                         }
                         Circle()
                             .fill(Color(hex: project?.displayColor ?? c.displayColor) ?? .blue)
@@ -257,7 +261,7 @@ struct TeamsCallsView: View {
                     UnattributedTag()
                     Button("Attribute") { attributing = seg }.controlSize(.small)
                     Button("Ignore") {
-                        do { try setIgnored(session: s, isIgnored: true) } catch { loadError = error.localizedDescription }
+                        do { try setIgnored(session: s, isIgnored: true); showUndo(for: s) } catch { loadError = error.localizedDescription }
                     }
                     .controlSize(.small)
                 } else {
@@ -424,7 +428,7 @@ struct TeamsCallsView: View {
     }
 
     /// Resolved attribution for a session: a manual save wins, otherwise a
-    /// `slackChannel` rule auto-attributes the huddle. `fromRule` is true only
+    /// `slackChannel` / `participant` rule auto-attributes the call. `fromRule` is true only
     /// for the rule-derived case, so the row can hint that it wasn't pinned.
     private func effective(for s: MicSession) -> (customer: Customer?, project: Project?, fromRule: Bool) {
         guard let result = matcher?.attribute(micSession: s) else {
@@ -437,14 +441,14 @@ struct TeamsCallsView: View {
 
     private func save(session: MicSession, customerID: String?, projectID: String?, scope: AttributionScope) throws {
         var rule: Rule?
-        // Beyond "just this", also teach a Slack-channel rule (bounded by the
-        // session's day/week, or permanent) so future huddles in that channel
-        // auto-attribute. Only possible when the channel is known.
-        if scope.createsRule, let cid = customerID, let channel = session.slackChannel {
+        // Beyond "just this", also teach a Slack-channel or participant rule
+        // (bounded by the session's day/week, or permanent) so future huddles in
+        // that channel / calls with that person auto-attribute.
+        if scope.createsRule, let cid = customerID, let learn = session.learnableRule {
             let (validFrom, validTo) = scope.bounds(reference: session.startedAt)
             rule = Rule(
                 id: UUID().uuidString, customerID: cid, projectID: projectID,
-                kind: .slackChannel, pattern: channel, priority: 100, createdAt: Date(),
+                kind: learn.kind, pattern: learn.pattern, priority: 100, createdAt: Date(),
                 validFrom: validFrom, validTo: validTo)
         }
         // Pin the session and teach its optional rule together: neither should
@@ -458,6 +462,37 @@ struct TeamsCallsView: View {
     private func setIgnored(session: MicSession, isIgnored: Bool) throws {
         try state.database.setMicSessionIgnored(id: session.id, isIgnored: isIgnored)
         reload()
+    }
+
+    private func showUndo(for session: MicSession) {
+        undoIgnoreTask?.cancel()
+        withAnimation { undoIgnore = session }
+        undoIgnoreTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(5))
+            if !Task.isCancelled { withAnimation { undoIgnore = nil } }
+        }
+    }
+
+    /// Undo for the inline Ignore, matching Review and My day.
+    @ViewBuilder
+    private var ignoreToast: some View {
+        if let session = undoIgnore {
+            HStack(spacing: 10) {
+                Image(systemName: "eye.slash.fill").foregroundStyle(.secondary)
+                Text("Ignored \(ReviewUnit.callTitle(session))").font(.system(size: 12, weight: .semibold))
+                Button("Undo") {
+                    do { try setIgnored(session: session, isIgnored: false) } catch { loadError = error.localizedDescription }
+                    undoIgnoreTask?.cancel()
+                    withAnimation { undoIgnore = nil }
+                }
+                .buttonStyle(.borderless).font(.system(size: 12, weight: .semibold))
+                .keyboardShortcut("z", modifiers: .command)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 8)
+            .glassCard(radius: 12)
+            .padding(.bottom, 14)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
     }
 }
 
@@ -551,8 +586,8 @@ private struct CallDetailSheet: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Text("Attribution").font(.subheadline.bold())
-                if autoMatched, session.customerID == nil, let ch = session.slackChannel {
-                    Label("Auto-matched from #\(ch) — Save to pin it", systemImage: "wand.and.stars")
+                if autoMatched, session.customerID == nil, let what = session.learnableRuleLabel {
+                    Label("Auto-matched from \(what) — Save to pin it", systemImage: "wand.and.stars")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -567,13 +602,13 @@ private struct CallDetailSheet: View {
                 emptyCustomerLabel: "Unattributed",
                 error: Binding(get: { loadError }, set: { loadError = $0 })
             )
-            if session.slackChannel != nil {
+            if let what = session.learnableRuleLabel {
                 AttributionScopePicker(
                     scope: $scope,
                     options: AttributionScope.allCases,
                     hint: scope == .justThis
                         ? "Attributes just this call."
-                        : "Also teaches a #\(session.slackChannel ?? "") rule\(scope == .always ? "" : " for \(scope.label.lowercased())").")
+                        : "Also teaches a rule for \(what)\(scope == .always ? "" : " for \(scope.label.lowercased())").")
             }
         }
     }

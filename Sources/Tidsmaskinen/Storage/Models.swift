@@ -138,6 +138,8 @@ struct Rule: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, E
         case windowTitle
         case appBundleID
         case slackChannel
+        /// The other party of a 1:1 call (Teams/Zoom/Slack), as `MicSession.participant` records it.
+        case participant
 
         var id: String { rawValue }
 
@@ -150,6 +152,7 @@ struct Rule: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, E
             case .windowTitle:   return "Window title contains"
             case .appBundleID:   return "App bundle ID"
             case .slackChannel:  return "Slack channel"
+            case .participant:   return "Call participant"
             }
         }
 
@@ -162,6 +165,7 @@ struct Rule: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, E
             case .windowTitle:   return "Acme staging"
             case .appBundleID:   return "com.acme.app"
             case .slackChannel:  return "nfc-internal"
+            case .participant:   return "Anna Andersson"
             }
         }
 
@@ -576,6 +580,20 @@ struct MicSession: Codable, FetchableRecord, MutablePersistableRecord, Identifia
         static let projectID = Column(CodingKeys.projectID)
         static let isIgnored = Column(CodingKeys.isIgnored)
         static let updatedAt = Column(CodingKeys.updatedAt)
+    }
+
+    /// The (kind, pattern) a call can teach a rule for: its Slack channel, else
+    /// the other party of a 1:1 call. nil when the call carries neither.
+    var learnableRule: (kind: Rule.Kind, pattern: String)? {
+        if let ch = slackChannel, !ch.isEmpty { return (.slackChannel, ch) }
+        if let p = participant, !p.isEmpty { return (.participant, p) }
+        return nil
+    }
+
+    /// How the UI names `learnableRule`: "#nfc-internal" or "calls with Anna".
+    var learnableRuleLabel: String? {
+        guard let r = learnableRule else { return nil }
+        return r.kind == .slackChannel ? "#\(r.pattern)" : "calls with \(r.pattern)"
     }
 
     var voipApps: [String] {

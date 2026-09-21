@@ -42,13 +42,42 @@ struct ReviewRow: Identifiable {
     /// Open time under the review threshold: hidden from Review by default and
     /// never part of the backlog count.
     let belowThreshold: Bool
+    /// The longest stretches of this signal in the period (open ones for an open
+    /// row), longest first — the evidence the detail pane shows. Signals only.
+    var evidence: [ReviewEvidence] = []
 
     var id: String { unit.id }
     var totalSeconds: Double { unit.totalSeconds }
     var isOpen: Bool { status == .open }
 }
 
+/// One stretch of consecutive samples on a signal, with the window title (or
+/// URL path for a browser host) seen most in it.
+struct ReviewEvidence: Identifiable, Equatable {
+    let start: Date
+    let end: Date
+    /// Sampled seconds inside the stretch (brief switches elsewhere are not counted).
+    let seconds: Double
+    let detail: String?
+    var id: Date { start }
+}
+
 enum ReviewQueue {
+    /// Samples further apart than this start a new evidence stretch, so a quick
+    /// look at Slack doesn't split a morning on one repo into two.
+    static let evidenceGapSeconds: TimeInterval = 120
+
+    /// The scope a rule was written with, as Review prints it.
+    static func scopeLabel(_ rule: Rule?) -> String {
+        guard let rule else { return "Manual" }
+        guard rule.isTemporary else { return "Always" }
+        if let from = rule.validFrom, let to = rule.validTo {
+            if to.timeIntervalSince(from) <= 86_400 + 3_600 { return "This day" }
+            if to.timeIntervalSince(from) <= 7 * 86_400 + 3_600 { return "This week" }
+        }
+        return "Bounded"
+    }
+
     /// The triage backlog: the open rows above the threshold, largest first.
     static func build(database: AppDatabase,
                       interval: DateInterval,
@@ -88,11 +117,13 @@ enum ReviewQueue {
 
         /// Time for one signal, split by how it was attributed.
         struct Share: Hashable { let customerID: String?; let projectID: String?; let scope: String }
+        struct Stretch { var start: Date; var end: Date; var open: Bool; var seconds: Double; var details: [String: Int] = [:] }
         struct Acc {
             var shares: [Share: Double] = [:]
             var perDay: [Double]        // all time, for attributed / ambient rows
             var openPerDay: [Double]    // open time only, for open rows (matches their total)
             var hidden = false
+            var stretches: [Stretch] = []
             init(days: Int) { perDay = Array(repeating: 0, count: days); openPerDay = perDay }
             var total: Double { shares.values.reduce(0, +) }
             var open: Double { shares.filter { $0.key.customerID == nil }.values.reduce(0, +) }
@@ -101,19 +132,33 @@ enum ReviewQueue {
                 perDay[day] += seconds
                 if r.customer == nil { openPerDay[day] += seconds }
             }
-        }
-        func scopeLabel(_ rule: Rule?) -> String {
-            guard let rule else { return "Manual" }
-            guard rule.isTemporary else { return "Always" }
-            if let from = rule.validFrom, let to = rule.validTo {
-                if to.timeIntervalSince(from) <= 86_400 + 3_600 { return "This day" }
-                if to.timeIntervalSince(from) <= 7 * 86_400 + 3_600 { return "This week" }
+            /// Extend the current stretch with a sample, or start a new one after
+            /// a gap or when the attribution state flips. Samples arrive in time order.
+            mutating func note(_ seconds: Double, at: Date, open: Bool, detail: String?) {
+                if var last = stretches.last, last.open == open, at.timeIntervalSince(last.end) <= ReviewQueue.evidenceGapSeconds {
+                    last.end = max(last.end, at.addingTimeInterval(seconds))
+                    last.seconds += seconds
+                    if let detail { last.details[detail, default: 0] += 1 }
+                    stretches[stretches.count - 1] = last
+                } else {
+                    var s = Stretch(start: at, end: at.addingTimeInterval(seconds), open: open, seconds: seconds)
+                    if let detail { s.details[detail] = 1 }
+                    stretches.append(s)
+                }
             }
-            return "Bounded"
+            /// The three longest stretches — only the open ones for an open row.
+            func evidence(openOnly: Bool) -> [ReviewEvidence] {
+                stretches.filter { !openOnly || $0.open }
+                    .sorted { $0.seconds > $1.seconds }.prefix(3)
+                    .map { s in
+                        let top = s.details.max { a, b in a.value != b.value ? a.value < b.value : a.key > b.key }?.key
+                        return ReviewEvidence(start: s.start, end: s.end, seconds: s.seconds, detail: top)
+                    }
+            }
         }
         func share(for r: AttributionResult) -> Share {
             guard let c = r.customer else { return Share(customerID: nil, projectID: nil, scope: "") }
-            return Share(customerID: c.id, projectID: r.project?.id, scope: scopeLabel(r.matchingRule))
+            return Share(customerID: c.id, projectID: r.project?.id, scope: ReviewQueue.scopeLabel(r.matchingRule))
         }
         /// The row status for a signal: open when open time remains, else its
         /// largest attribution (flagged Mixed when others exist), else ambient.
@@ -135,28 +180,35 @@ enum ReviewQueue {
             let seconds = min(Double(sampleIntervalSeconds), interval.end.timeIntervalSince(sample.capturedAt))
             let day = dayIndex(sample.capturedAt)
             let r = m.attribute(sample)
+            let open = r.customer == nil
+            let title = sample.windowTitle?.trimmingCharacters(in: .whitespaces)
             if let remote = sample.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: remote) {
                 var acc = repos[slug] ?? Acc(days: dayCount)
                 acc.hidden = m.isRepoIgnored(slug: slug)
                 acc.add(seconds, day: day, r)
+                acc.note(seconds, at: sample.capturedAt, open: open, detail: title)
                 repos[slug] = acc
             } else if let host = sample.chromeHost {
-                if let url = sample.chromeURL, let path = RuleMatcher.urlPathPrefix(url) {
+                let path = sample.chromeURL.flatMap { RuleMatcher.urlPathPrefix($0) }
+                if let path {
                     // Hidden paths are dropped entirely, host included — as the
                     // backlog always did. Settings → Ignored still lists them.
                     guard !hiddenPaths.contains(path) else { continue }
                     var pacc = paths[host]?[path] ?? Acc(days: dayCount)
                     pacc.add(seconds, day: day, r)
+                    pacc.note(seconds, at: sample.capturedAt, open: open, detail: title)
                     paths[host, default: [:]][path] = pacc
                 }
                 var acc = hosts[host] ?? Acc(days: dayCount)
                 acc.hidden = hiddenHosts.contains(host)
                 acc.add(seconds, day: day, r)
+                acc.note(seconds, at: sample.capturedAt, open: open, detail: path ?? title)
                 hosts[host] = acc
             } else if let bundle = sample.appBundleID {
                 var acc = apps[bundle] ?? Acc(days: dayCount)
                 acc.hidden = hiddenApps.contains(bundle)
                 acc.add(seconds, day: day, r)
+                acc.note(seconds, at: sample.capturedAt, open: open, detail: title)
                 apps[bundle] = acc
             }
         }
@@ -177,7 +229,8 @@ enum ReviewQueue {
             let seconds = st == .open ? acc.open : acc.total
             return ReviewRow(unit: .signal(.init(kind: kind, value: value, totalSeconds: seconds)),
                              status: st, perDay: st == .open ? acc.openPerDay : acc.perDay,
-                             belowThreshold: st == .open && seconds < minSec)
+                             belowThreshold: st == .open && seconds < minSec,
+                             evidence: acc.evidence(openOnly: st == .open))
         }
         for (slug, acc) in repos { rows.append(signalRow(.gitRepoSlug, slug, acc)) }
         for (bundle, acc) in apps { rows.append(signalRow(.appBundleID, bundle, acc, ambient: true)) }
@@ -194,7 +247,8 @@ enum ReviewQueue {
             }.sorted { $0.totalSeconds > $1.totalSeconds }
             let aggregate = AppDatabase.SignalAggregate(kind: .urlHost, value: host, totalSeconds: acc.open)
             rows.append(ReviewRow(unit: openPaths.isEmpty ? .signal(aggregate) : .hostGroup(host: aggregate, paths: openPaths),
-                                  status: .open, perDay: acc.openPerDay, belowThreshold: acc.open < minSec))
+                                  status: .open, perDay: acc.openPerDay, belowThreshold: acc.open < minSec,
+                                  evidence: acc.evidence(openOnly: true)))
         }
 
         // Meetings, stretched over the mic time each one owns (as the report and
@@ -285,7 +339,7 @@ enum ReviewQueue {
                     let r = m.attribute(micSession: session)
                     if let c = r.customer {
                         st = .attributed(customerID: c.id, projectID: r.project?.id,
-                                         scope: r.matchingRule == nil ? "Pinned" : scopeLabel(r.matchingRule))
+                                         scope: r.matchingRule == nil ? "Pinned" : ReviewQueue.scopeLabel(r.matchingRule))
                     } else { st = .open }
                 }
                 rows.append(ReviewRow(unit: .call(session: session, seconds: adHoc), status: st,

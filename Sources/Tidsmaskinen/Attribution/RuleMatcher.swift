@@ -192,6 +192,10 @@ struct RuleMatcher {
            let r = match(kind: .slackChannel, against: channel, at: s.startedAt) {
             return result(for: r)
         }
+        if let participant = s.participant,
+           let r = match(kind: .participant, against: participant, at: s.startedAt) {
+            return result(for: r)
+        }
         return .unattributed
     }
 

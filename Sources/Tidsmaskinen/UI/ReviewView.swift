@@ -46,6 +46,10 @@ struct ReviewView: View {
     @State private var initialLookupTask: Task<Void, Never>?
     @State private var weekStart: Date = Calendar.weekStartingMonday().currentWeekInterval().start
     @State private var selectedDay: Date? = nil    // nil = whole selected week
+    /// What an Always rule for the selected signal also clears in the other
+    /// weeks of the backlog window — computed off the main thread per selection.
+    @State private var impact: (weeks: Int, seconds: Double)?
+    @State private var impactTask: Task<Void, Never>?
 
     private let calendar = Calendar.weekStartingMonday()
 
@@ -222,7 +226,7 @@ struct ReviewView: View {
                 reload()
             }
         }
-        .onDisappear { initialLookupTask?.cancel(); toastTask?.cancel() }
+        .onDisappear { initialLookupTask?.cancel(); toastTask?.cancel(); impactTask?.cancel() }
         .onChange(of: state.reviewTargetWeekStart) { _, _ in _ = consumeReviewTarget() }
         .onChange(of: state.reviewTargetDay) { _, _ in _ = consumeReviewTarget() }
         .onChange(of: weekStart) { _, _ in
@@ -644,6 +648,7 @@ struct ReviewView: View {
 
             statusBanner(row)
             detailPanel(for: unit)
+            if !row.evidence.isEmpty { evidenceCard(row.evidence) }
 
             if row.status == .ignored {
                 HStack(spacing: 6) {
@@ -684,7 +689,7 @@ struct ReviewView: View {
         HStack(spacing: 6) {
             ForEach(0..<7, id: \.self) { i in
                 VStack(spacing: 3) {
-                    Text(perDay[i] > 0 ? String(format: "%.2g", perDay[i] / 3600) : "–")
+                    Text(perDay[i] > 0 ? formatHours(perDay[i]) : "–")
                         .font(.system(size: 12, weight: .semibold)).monospacedDigit()
                         .foregroundStyle(perDay[i] > 0 ? Color.primary : Color.secondary)
                     Text(DateFormatting.weekdayShort.string(from: days[i]))
@@ -802,7 +807,7 @@ struct ReviewView: View {
         if selectedDay != nil { options.append(.today) }
         switch unit {
         case .event: return nil
-        case .call(let s, _): return s.slackChannel == nil ? nil : options + [.justThis]
+        case .call(let s, _): return s.learnableRule == nil ? nil : options + [.justThis]
         case .signal, .hostGroup, .series: return options
         }
     }
@@ -812,21 +817,95 @@ struct ReviewView: View {
         switch unit {
         case .signal(let s):
             let what = "\(unit.kindLabel.lowercased()) · \(s.value)"
+            let existing = existingRuleNote(kind: ruleKind(s.kind), pattern: s.kind == .urlPath ? s.value + "*" : s.value)
             if s.kind == .appBundleID {
                 return (scope == .always ? "Writes a permanent app rule for \(what): foreground time in this app without a repo or site attributes here."
-                        : "Attributes \(what) for \(scopeWindowLabel) only.") + undo
+                        : "Attributes \(what) for \(scopeWindowLabel) only.") + impactNote + existing + undo
             }
-            return (scope == .always ? "Writes a permanent rule for \(what)." : "Attributes \(what) for \(scopeWindowLabel) only; other periods can go elsewhere.") + undo
-        case .hostGroup(let h, _):
-            return (scope == .always ? "Writes a permanent rule for every path under \(h.value)." : "Attributes \(h.value) for \(scopeWindowLabel) only.") + undo
+            return (scope == .always ? "Writes a permanent rule for \(what)." : "Attributes \(what) for \(scopeWindowLabel) only; other periods can go elsewhere.") + impactNote + existing + undo
+        case .hostGroup:
+            return ""   // host groups render `hostGroupBody`, which carries its own caption
         case .series:
             return (scope == .always ? "Applies to every occurrence of the series, past and future." : "Overrides only the occurrences in \(scopeWindowLabel); the series itself stays as it is.") + undo
         case .event:
             return "Attributes just this meeting." + undo
         case .call(let s, _):
-            guard let ch = s.slackChannel else { return "Pins just this call — no rule is created." + undo }
+            guard let what = s.learnableRuleLabel else { return "Pins just this call — no rule is created." + undo }
             return (scope == .justThis ? "Pins just this call — no rule is created."
-                    : "Pins this call and teaches a #\(ch) rule\(scope == .always ? "" : " for \(scopeWindowLabel)").") + undo
+                    : "Pins this call and teaches a rule for \(what)\(scope == .always ? "" : " for \(scopeWindowLabel)").") + undo
+        }
+    }
+
+    /// " Also clears 2.1 h open in 3 other weeks." — only for Always, which is
+    /// the scope that reaches beyond the period on screen.
+    private var impactNote: String {
+        guard scope == .always, let impact, impact.seconds > 0 else { return "" }
+        return " Also clears \(formatHours(impact.seconds)) open in \(impact.weeks) other week\(impact.weeks == 1 ? "" : "s")."
+    }
+
+    /// Names the rule already written for this pattern by another customer, so
+    /// Confirm never silently overrides it. Same scope replaces; a narrower
+    /// window wins where they overlap (the matcher's specificity order).
+    private func existingRuleNote(kind: Rule.Kind, pattern: String) -> String {
+        let others = rulesTouchingPeriod.filter { $0.kind == kind && $0.pattern == pattern && $0.customerID != selCustomerID }
+        guard let r = others.sorted(by: { $0.createdAt > $1.createdAt }).first else { return "" }
+        return " Already ruled → \(attrLabel(r.customerID, r.projectID)) · \(ReviewQueue.scopeLabel(r)); the same scope replaces it, a narrower one wins where they overlap."
+    }
+
+    /// Hosts that serve several customers, where a whole-host rule sends every
+    /// project to one place. Paths are the right unit there.
+    private static let sharedHosts = ["localhost", "127.0.0.1", "portal.azure.com", "*.cloud.microsoft", "*.microsoft.com",
+                                      "*.office.com", "*.sharepoint.com", "github.com", "gitlab.com", "bitbucket.org", "*.atlassian.net"]
+
+    /// Permanent rules plus the bounded ones whose window overlaps the period on
+    /// screen — an expired day rule from months ago is history, not a conflict.
+    private var rulesTouchingPeriod: [Rule] {
+        allRules.filter { !$0.isTemporary || (($0.validFrom ?? .distantPast) < period.end && ($0.validTo ?? .distantFuture) > period.start) }
+    }
+
+    private func sharedHostWarning(_ host: String) -> String? {
+        if let r = rulesTouchingPeriod.first(where: { $0.kind == .urlHost && $0.pattern == host }) {
+            return "\(host) is already assigned to \(attrLabel(r.customerID, r.projectID)) (\(ReviewQueue.scopeLabel(r).lowercased())). Assign the paths below instead if this host serves more than one customer."
+        }
+        if Self.sharedHosts.contains(where: { RuleMatcher.globMatch(pattern: $0, value: host) }) {
+            return "\(host) is shared across customers — a whole-host rule would send every project here. Assign the paths below instead."
+        }
+        return nil
+    }
+
+    /// The longest stretches of the signal: when, how long, and what was on
+    /// screen. Each opens that day in My day.
+    private static let stretchStart: DateFormatter = { let f = DateFormatter(); f.dateFormat = "EEE d MMM HH:mm"; return f }()
+    private static let stretchEnd: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm"; return f }()
+    private func stretchLabel(_ e: ReviewEvidence) -> String {
+        "\(Self.stretchStart.string(from: e.start))–\(Self.stretchEnd.string(from: e.end))"
+    }
+
+    private func evidenceCard(_ evidence: [ReviewEvidence]) -> some View {
+        detailCard {
+            Text("LONGEST STRETCHES").font(.system(size: 10, weight: .bold)).foregroundStyle(.tertiary)
+            ForEach(evidence) { e in
+                Button {
+                    state.timelineTargetDay = e.start
+                    state.selectedSection = .timeline
+                } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(stretchLabel(e))
+                            .font(.system(size: 12, weight: .semibold)).monospacedDigit()
+                        Text(formatHours(e.seconds)).font(.system(size: 12)).foregroundStyle(.secondary).monospacedDigit()
+                        if let d = e.detail, !d.isEmpty {
+                            Text(d).font(.system(size: 12)).foregroundStyle(.secondary)
+                                .lineLimit(1).truncationMode(.middle)
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right").font(.system(size: 10)).foregroundStyle(.tertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Open this day in My day")
+                .accessibilityLabel("Open \(stretchLabel(e)) in My day")
+            }
         }
     }
 
@@ -845,7 +924,7 @@ struct ReviewView: View {
         switch unit {
         case .signal(let s):        pattern = (ruleKind(s.kind), s.kind == .urlPath ? s.value + "*" : s.value)
         case .hostGroup(let h, _):  pattern = (.urlHost, h.value)
-        case .call(let s, _):       pattern = s.slackChannel.map { (.slackChannel, $0) }
+        case .call(let s, _):       pattern = s.learnableRule.map { ($0.kind, $0.pattern) }
         case .series, .event:       pattern = nil
         }
         if let (kind, value) = pattern {
@@ -875,6 +954,51 @@ struct ReviewView: View {
         } else {
             selCustomerID = ""; selProjectID = ""
         }
+        loadImpact()
+    }
+
+    /// Open time for the selected signal in the other weeks of the backlog
+    /// window (`ReviewQueue.defaultBacklogWeeksBack`), so the Always note can
+    /// say what else the rule clears. Resolves those weeks off the main thread;
+    /// a whole host counts under both its group id and its plain signal id.
+    private func loadImpact() {
+        impactTask?.cancel()
+        impact = nil
+        guard let row = selectedRow, row.isOpen else { return }
+        let ids: Set<String>
+        switch row.unit {
+        case .signal(let s):         ids = s.kind == .urlHost ? [row.id, "host:\(s.value)"] : [row.id]
+        case .hostGroup(let h, _):   ids = [row.id, "sig:urlHost:\(h.value)"]
+        case .series, .event, .call: return
+        }
+        let db = state.database, cal = calendar, viewed = weekStart
+        let currentStart = cal.currentWeekInterval().start
+        let interval = AppSettings.sampleIntervalSeconds
+        let idle = TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60)
+        let minMinutes = AppSettings.reviewMinMinutes
+        impactTask = Task {
+            // Debounced: J/K runs through rows faster than four weeks resolve.
+            // The worker is detached, so cancellation is forwarded by hand and
+            // checked between weeks.
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled else { return }
+            let worker = Task.detached(priority: .utility) { () -> (weeks: Int, seconds: Double) in
+                var weeks = 0, seconds = 0.0
+                for w in 0...ReviewQueue.defaultBacklogWeeksBack where !Task.isCancelled {
+                    guard let start = cal.date(byAdding: .day, value: -7 * w, to: currentStart), start != viewed,
+                          let end = cal.date(byAdding: .day, value: 7, to: start),
+                          let rows = try? ReviewQueue.rows(database: db, interval: DateInterval(start: start, end: end),
+                                                           sampleIntervalSeconds: interval, idleThresholdSeconds: idle,
+                                                           minMinutes: minMinutes) else { continue }
+                    let open = rows.filter { ids.contains($0.id) && $0.isOpen }.reduce(0) { $0 + $1.totalSeconds }
+                    if open > 0 { weeks += 1; seconds += open }
+                }
+                return (weeks, seconds)
+            }
+            let found = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
+            guard !Task.isCancelled else { return }
+            impact = found
+        }
     }
 
     @ViewBuilder
@@ -889,10 +1013,16 @@ struct ReviewView: View {
                     onCreateProject: { try state.database.createLocalProject(customerID: $0, name: $1) },
                     onConfirm: { cust, proj in assignSignal(row.unit, host, customerID: cust, projectID: proj) }
                 )
-                Text(scope == .always
-                     ? "All current and future paths under \(host.value) attribute here."
-                     : "Paths under \(host.value) during \(scopeWindowLabel) attribute here.")
-                    .font(.caption).foregroundStyle(.tertiary)
+                if let warning = sharedHostWarning(host.value) {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text((scope == .always
+                          ? "All current and future paths under \(host.value) attribute here."
+                          : "Paths under \(host.value) during \(scopeWindowLabel) attribute here.") + impactNote)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             Divider()
             Text("OR ASSIGN INDIVIDUAL PATHS").font(.system(size: 10, weight: .bold)).foregroundStyle(.tertiary)
@@ -992,11 +1122,11 @@ struct ReviewView: View {
         detailCard {
             if let timeRange { detailRow("clock", timeRange) }
             if !apps.isEmpty { detailRow("app", "Running: \(apps.joined(separator: ", "))") }
-            if let p = s.participant, !p.isEmpty { detailRow("person.crop.circle", "With \(p)") }
+            if let p = s.participant, !p.isEmpty { detailRow("person.crop.circle", "1:1 with \(p) — Always teaches a rule for calls with them") }
             if let ch = s.slackChannel, !ch.isEmpty {
                 detailRow("number", "Huddle in #\(ch)")
-            } else {
-                detailRow("info.circle", "Ad-hoc call — assigns just this session. Only Slack channels can teach a rule.")
+            } else if s.participant == nil {
+                detailRow("info.circle", "Ad-hoc call — assigns just this session. No channel or participant was captured, so there is nothing to learn a rule from.")
             }
         }
     }
@@ -1066,14 +1196,14 @@ struct ReviewView: View {
         case .event(let e):
             ok = run { try state.database.setCalendarEventAttribution(eventID: e.id, customerID: cid, projectID: pid) }
         case .call(let session, _):
-            // Pin the session; a channel huddle also teaches a channel rule under
-            // Always / This week / This day. One transaction: a failed rule
-            // insert never leaves the session pinned on its own.
+            // Pin the session; a channel huddle or a 1:1 call also teaches a
+            // channel / participant rule under Always / This week / This day. One
+            // transaction: a failed rule insert never leaves the session pinned on its own.
             var rule: Rule?
-            if scope.createsRule, let channel = session.slackChannel {
+            if scope.createsRule, let learn = session.learnableRule {
                 let (validFrom, validTo) = scopeBounds
                 rule = Rule(id: UUID().uuidString, customerID: cid, projectID: pid,
-                            kind: .slackChannel, pattern: channel, priority: 100, createdAt: Date(),
+                            kind: learn.kind, pattern: learn.pattern, priority: 100, createdAt: Date(),
                             validFrom: validFrom, validTo: validTo)
             }
             ok = run { try state.database.setMicSessionAttribution(id: session.id, customerID: cid, projectID: pid, rule: rule) }
@@ -1431,12 +1561,12 @@ enum ReviewUnit: Identifiable {
     }
 
     /// Confirming this unit writes a reusable rule (vs a one-off attribution).
-    /// A call only teaches a rule when it carries a Slack channel.
+    /// A call only teaches a rule when it carries a Slack channel or a participant.
     var createsRule: Bool {
         switch self {
         case .signal, .hostGroup, .series: return true
         case .event:                       return false
-        case .call(let s, _):              return s.slackChannel != nil
+        case .call(let s, _):              return s.learnableRule != nil
         }
     }
 
