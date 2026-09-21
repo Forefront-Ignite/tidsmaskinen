@@ -22,6 +22,9 @@ struct TimelineView: View {
     @State private var zoomAtPinchStart: CGFloat?
     @State private var showLegend: Bool = false
     @State private var showHidden: Bool = false
+    /// Agenda rows that are open and under the Review threshold are noise
+    /// (a 15 s glance at Discord); this reveals them, like Review's toggle.
+    @State private var showShortAgenda: Bool = false
     @State private var hasHiddenSignals: Bool = false
     @State private var hasIgnoredMeetings: Bool = false
     @State private var pendingUndo: PendingUndo?
@@ -191,8 +194,20 @@ struct TimelineView: View {
         var isIgnored: Bool { blocks.allSatisfy(\.isIgnored) }
     }
 
-    /// Reads the cache; recomputed only in `recomputeDerived()`.
-    private var agendaGroups: [AgendaGroup] { cachedAgendaGroups }
+    /// Reads the cache (recomputed only in `recomputeDerived()`), minus the
+    /// short open rows unless revealed.
+    private var agendaGroups: [AgendaGroup] {
+        showShortAgenda ? cachedAgendaGroups : cachedAgendaGroups.filter { !isShort($0) }
+    }
+    private var shortAgendaCount: Int { cachedAgendaGroups.filter(isShort).count }
+
+    /// Same rule as `ReviewQueue`: only an *open* row under `reviewMinMinutes`
+    /// is below the threshold; attributed and ignored rows always show.
+    private func isShort(_ group: AgendaGroup) -> Bool {
+        !group.isIgnored
+            && group.blocks.contains { $0.attribution.customer == nil }
+            && group.total < Double(AppSettings.reviewMinMinutes * 60)
+    }
 
     private func computeAgendaGroups() -> [AgendaGroup] {
         var groups: [String: [TimelineBlock]] = [:]
@@ -306,12 +321,23 @@ struct TimelineView: View {
     @ViewBuilder
     private var agendaSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Agenda · grouped by repo, meeting and call")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.tertiary)
-                .textCase(.uppercase)
+            HStack {
+                Text("Agenda · grouped by repo, meeting and call")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .textCase(.uppercase)
+                Spacer()
+                if shortAgendaCount > 0 {
+                    Toggle(isOn: $showShortAgenda) {
+                        Text("Show \(shortAgendaCount) under \(AppSettings.reviewMinMinutes) min")
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                    .toggleStyle(.checkbox)
+                }
+            }
             if agendaGroups.isEmpty {
-                Text("No activity recorded for this day yet.")
+                Text(shortAgendaCount > 0 ? "Only items under \(AppSettings.reviewMinMinutes) min · reveal them above."
+                                          : "No activity recorded for this day yet.")
                     .font(.callout).foregroundStyle(.secondary)
                     .padding(.vertical, 12)
             } else {
