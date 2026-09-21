@@ -159,7 +159,7 @@ enum TimelineBuilder {
                         isIdle: false,
                         appBundleID: nil,
                         seriesMasterID: nil,
-                        ruleSignal: session.slackChannel.map { TimelineBlock.RuleSignal(kind: .slackChannel, pattern: $0) },
+                        ruleSignal: session.learnableRule.map { TimelineBlock.RuleSignal(kind: $0.kind, pattern: $0.pattern) },
                         isIgnored: session.isIgnored
                     )
                 }

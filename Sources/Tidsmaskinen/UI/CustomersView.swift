@@ -426,8 +426,7 @@ struct CustomersView: View {
     private func makePermanent(_ stack: RuleStack, customer: Customer) {
         let lead = stack.rules[0]
         do {
-            for r in stack.bounded { try state.database.deleteRule(id: r.id) }
-            try state.database.upsertReplacingWindow(Rule(
+            try state.database.replaceRules(deleting: stack.bounded.map(\.id), with: Rule(
                 id: UUID().uuidString, customerID: customer.id, projectID: lead.projectID,
                 kind: stack.kind, pattern: stack.pattern, priority: 100, createdAt: Date()))
             reload()

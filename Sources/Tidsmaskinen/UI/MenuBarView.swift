@@ -296,6 +296,7 @@ struct MenuBarView: View {
         let week = cal.currentWeekInterval()
         let sampleInterval = AppSettings.sampleIntervalSeconds
         let idleMinutes = AppSettings.claudeIdleThresholdMinutes
+        let rounding = AppSettings.reportRounding
         reloadTask = Task { @MainActor in
             do {
                 let (report, now) = try await Task.detached(priority: .utility) { () -> (WeeklyReport, NowCard?) in
@@ -310,7 +311,7 @@ struct MenuBarView: View {
                         week: week, samples: samples, events: events, sessions: sessions,
                         claudeDeltas: deltas, micSessions: micSessions,
                         idleThresholdSeconds: TimeInterval(idleMinutes * 60),
-                        matcher: matcher, sampleIntervalSeconds: sampleInterval)
+                        matcher: matcher, sampleIntervalSeconds: sampleInterval, rounding: rounding)
                     return (report, Self.nowCard(recent: try db.recentSamples(limit: 120), matcher: matcher))
                 }.value
                 if Task.isCancelled { return }

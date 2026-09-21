@@ -121,6 +121,37 @@ final class ReviewRowsTests: XCTestCase {
         XCTAssertEqual(visible.map(\.capturedAt), [site.capturedAt, repo.capturedAt])
     }
 
+    private func event(_ id: String, from: Date, to: Date, series: String? = nil) -> CalendarEvent {
+        CalendarEvent(id: id, iCalUID: nil, subject: "Meeting", bodyPreview: nil,
+                      startAt: from, endAt: to, isAllDay: false,
+                      organizerEmail: nil, organizerName: nil, rsvpStatus: "accepted",
+                      isOnlineMeeting: false, onlineMeetingProvider: nil, attendeeDomainsCSV: nil,
+                      location: nil, verifiedAttended: false, customerID: nil, projectID: nil,
+                      eventType: series == nil ? "singleInstance" : "occurrence", seriesMasterID: series, isIgnored: false,
+                      createdAt: Date(), updatedAt: Date())
+    }
+
+    /// A meeting across midnight lands on both days of the strip, as in the
+    /// report; a series row counts only the occurrences it stands for.
+    func testDayStripSplitsAtMidnightAndSeriesCountsRetainedOccurrences() throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        try db.upsertEvents([
+            event("late", from: at(15, 23), to: at(16, 1)),                 // Wed 23:00 – Thu 01:00
+            event("s1", from: at(14, 9), to: at(14, 10), series: "S"),
+            event("s2", from: at(16, 9), to: at(16, 10), series: "S"),
+            event("s3", from: at(17, 9), to: at(17, 10), series: "S"),
+        ])
+        try db.setCalendarEventIgnored(eventID: "s2", isIgnored: true)
+        let rows = try ReviewQueue.rows(database: db, interval: week, sampleIntervalSeconds: 15,
+                                        idleThresholdSeconds: 300, minMinutes: 5)
+        let late = try XCTUnwrap(rows.first { $0.id == "event:late" })
+        XCTAssertEqual(late.perDay, [0, 0, 3600, 3600, 0, 0, 0])
+        guard case .series(let s) = try XCTUnwrap(rows.first { $0.id == "series:S" }).unit else { return XCTFail("no series row") }
+        XCTAssertEqual(s.occurrenceCount, 2)
+        XCTAssertEqual(s.lastStartAt, at(17, 9))
+        XCTAssertEqual(rows.first { $0.id == "event:s2" }?.status, .ignored)
+    }
+
     /// Browsing a repo on a forge is that repo: the slug rule covers
     /// github.com/owner/repo pages, and the report names the repo for them.
     func testForgeURLMatchesRepoRule() {

@@ -12,6 +12,8 @@ struct TimelineView: View {
     /// A moment Review asked for (a stretch's start): once the day is loaded,
     /// the block covering it is selected so its popover opens right there.
     @State private var pendingFocus: Date?
+    /// The other sessions of an agent agenda group, pinned along with the first.
+    @State private var agendaSessionIDs: [String] = []
     @State private var refreshTimer: Timer?
     @State private var nowTimer: Timer?
     @State private var now: Date = Date()
@@ -205,7 +207,7 @@ struct TimelineView: View {
         switch b.source {
         case .calendarEvent(let id): return "evt:\(id)"
         case .micSession(let id):    return "call:\(id)"
-        case .claudeSession:         return "agent:\(b.title)"
+        case .claudeSession:         return "agent:\(b.ruleSignal?.pattern ?? b.title)"   // the repo, not a folder name two repos can share
         case .foregroundSamples:
             if let sig = b.ruleSignal { return "fg:\(sig.kind.rawValue):\(sig.pattern)" }
             return "fg:\(b.title)"
@@ -380,23 +382,29 @@ struct TimelineView: View {
                                state: state,
                                onSaved: { closeAgendaPopover(); reload() },
                                onCancel: { closeAgendaPopover() },
-                               onIgnored: { event in closeAgendaPopover(); stageUndo(event) })
+                               onIgnored: { event in closeAgendaPopover(); stageUndo(event) },
+                               extraSessionIDs: agendaSessionIDs)
         }
     }
 
     /// Clear the Gantt-strip selection so the two popovers can never both open.
     /// A multi-block foreground group edits one synthesized block covering
     /// every sample, so "Just this" reaches all of them; an agent group edits
-    /// its first session and relies on the rule scopes for the rest.
+    /// its first session and hands the popover the other session ids so a
+    /// pin reaches every session the row claims.
     private func openAgendaPopover(_ group: AgendaGroup) {
         selectedBlock = nil
         agendaBlock = groupBlock(group)
+        agendaSessionIDs = group.blocks.dropFirst().compactMap { b in
+            if case .claudeSession(let id) = b.source { return id } else { return nil }
+        }
         agendaGroupID = group.id
     }
 
     private func closeAgendaPopover() {
         agendaGroupID = nil
         agendaBlock = nil
+        agendaSessionIDs = []
     }
 
     private func groupBlock(_ group: AgendaGroup) -> TimelineBlock {
@@ -1252,7 +1260,7 @@ struct TimelineView: View {
                 week: dayInterval, samples: allSamples, events: events, sessions: sessions,
                 claudeDeltas: claudeDeltas, micSessions: micSessions,
                 idleThresholdSeconds: idleThreshold, matcher: matcher,
-                sampleIntervalSeconds: AppSettings.sampleIntervalSeconds)
+                sampleIntervalSeconds: AppSettings.sampleIntervalSeconds, rounding: AppSettings.reportRounding)
             dayActiveSeconds = report.activeHours * 3600
             dayAttributedSeconds = report.grandTotal * 3600
             let open = try ReviewQueue.build(
@@ -1390,6 +1398,8 @@ private struct ReattributePopover: View {
     /// Fires after a successful ignore so the Timeline can stage an undo
     /// toast. Restore actions don't fire this — restore *is* the undo.
     let onIgnored: (MeetingIgnoreEvent) -> Void
+    /// Further coding sessions a "Just this" pin must reach (an agenda group).
+    var extraSessionIDs: [String] = []
 
     @State private var selectedCustomerID: String = ""
     @State private var selectedProjectID: String = ""
@@ -1743,7 +1753,7 @@ private struct ReattributePopover: View {
             case .calendarEvent(let id):
                 try state.database.setCalendarEventAttribution(eventID: id, customerID: customerID, projectID: projectID)
             case .claudeSession(let id):
-                try state.database.setClaudeSessionAttribution(sessionID: id, customerID: customerID, projectID: projectID)
+                try state.database.setClaudeSessionAttribution(sessionIDs: [id] + extraSessionIDs, customerID: customerID, projectID: projectID)
             case .foregroundSamples(let ids):
                 try state.database.setSampleAttribution(sampleIDs: ids, customerID: customerID, projectID: projectID)
             case .micSession(let id):

@@ -321,3 +321,14 @@ blocks for a whole day and the github.com stretch could not be found (the popove
 meeting that overlapped it). `TimelineBuilder.visibleSamples` now applies a hide the way Review
 reads it — an app hide covers only app-only time, a host hide covers that site, repo time is never
 hidden — so My day, Review and the report agree on what a hide means.
+
+**Copilot review on the PR (8 findings, all confirmed and fixed):** Make permanent deleted the
+bounded rules and inserted the permanent one in separate transactions (`replaceRules`, one write);
+Review's day strip credited a whole overnight coding session, meeting or call to its start day
+(`spread` splits at midnight, delta-backed sessions by their deltas); a series row counted and
+spanned occurrences that were individually ignored and already listed on their own; My day's call
+blocks only carried a Slack-channel signal, so a 1:1 call could not teach a participant rule from
+the popover (`learnableRule` now); the tray report and My day's day stats ignored the rounding
+setting; an agent agenda row said "Attribute all N" but pinned only the first session (the popover
+now pins every session in the group, in one transaction, and groups by repo slug rather than folder
+name); a doc comment had drifted onto `ReportedWeek`.

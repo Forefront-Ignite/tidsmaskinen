@@ -504,9 +504,14 @@ struct AppDatabase {
     }
 
     func setClaudeSessionAttribution(sessionID: String, customerID: String?, projectID: String?) throws {
+        try setClaudeSessionAttribution(sessionIDs: [sessionID], customerID: customerID, projectID: projectID)
+    }
+
+    /// Several sessions at once (an agenda group), in one transaction.
+    func setClaudeSessionAttribution(sessionIDs: [String], customerID: String?, projectID: String?) throws {
         _ = try dbQueue.write { db in
             try ClaudeSession
-                .filter(ClaudeSession.Columns.id == sessionID)
+                .filter(sessionIDs.contains(ClaudeSession.Columns.id))
                 .updateAll(db,
                            ClaudeSession.Columns.customerID.set(to: customerID),
                            ClaudeSession.Columns.projectID.set(to: projectID))
@@ -745,6 +750,15 @@ struct AppDatabase {
     /// — e.g. a permanent "always" rule, a "this week" override, and a "today"
     /// override — so creating one scoped rule never destroys the others. The
     /// matcher then picks the most precise applicable rule per timestamp.
+    /// Make-permanent in one transaction: the bounded rules go and the
+    /// permanent one lands together, or neither does.
+    func replaceRules(deleting ids: [String], with rule: Rule) throws {
+        try dbQueue.write { db in
+            _ = try Rule.filter(ids.contains(Rule.Columns.id)).deleteAll(db)
+            try upsertReplacingWindow(rule, in: db)
+        }
+    }
+
     func upsertReplacingWindow(_ rule: Rule) throws {
         try dbQueue.write { db in
             try upsertReplacingWindow(rule, in: db)

@@ -117,6 +117,23 @@ enum ReviewQueue {
             let d = cal.dateComponents([.day], from: cal.startOfDay(for: interval.start), to: date).day ?? 0
             return min(max(d, 0), dayCount - 1)
         }
+        /// Seconds of [start, end) ∩ interval on each day of the period, so a
+        /// meeting, call or coding session that crosses midnight lands on both
+        /// days as it does in the report.
+        func spread(_ start: Date, _ end: Date) -> [Double] {
+            var d = Array(repeating: 0.0, count: dayCount)
+            var cursor = max(start, interval.start)
+            let stop = min(end, interval.end)
+            let periodStart = cal.startOfDay(for: interval.start)
+            while cursor < stop {
+                let i = dayIndex(cursor)
+                let next = min(stop, cal.date(byAdding: .day, value: i + 1, to: periodStart) ?? stop)
+                guard next > cursor else { break }
+                d[i] += next.timeIntervalSince(cursor)
+                cursor = next
+            }
+            return d
+        }
 
         /// Time for one signal, split by how it was attributed.
         struct Share: Hashable { let customerID: String?; let projectID: String?; let scope: String }
@@ -217,13 +234,26 @@ enum ReviewQueue {
             }
         }
         let sessionSeconds = try database.sessionActiveSeconds(in: interval, idleThresholdSeconds: idleThresholdSeconds)
+        // Delta-backed sessions know when they were active, so an overnight
+        // session splits across its days; the total stays `sessionActiveSeconds`.
+        var deltaDays: [String: [Double]] = [:]
+        for delta in try database.claudeActiveDeltas(in: interval) where delta.gainedSeconds > 0 {
+            let days = spread(delta.occurredAt.addingTimeInterval(-delta.gainedSeconds), delta.occurredAt)
+            var acc = deltaDays[delta.sessionID] ?? Array(repeating: 0.0, count: dayCount)
+            for i in 0..<dayCount { acc[i] += days[i] }
+            deltaDays[delta.sessionID] = acc
+        }
         for session in try database.sessions(in: interval) {
             guard let remote = session.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: remote),
                   let seconds = sessionSeconds[session.id], seconds > 0 else { continue }
             var acc = repos[slug] ?? Acc(days: dayCount)
             acc.hidden = m.isRepoIgnored(slug: slug)
-            // Active seconds aren't split by day; credit the session's day in the period.
-            acc.add(seconds, day: dayIndex(max(session.startedAt, interval.start)), m.attribute(session: session))
+            let attribution = m.attribute(session: session)
+            if let days = deltaDays[session.id], case let total = days.reduce(0, +), total > 0 {
+                for i in 0..<dayCount where days[i] > 0 { acc.add(seconds * days[i] / total, day: i, attribution) }
+            } else {
+                acc.add(seconds, day: dayIndex(max(session.startedAt, interval.start)), attribution)
+            }
             repos[slug] = acc
         }
 
@@ -263,14 +293,10 @@ enum ReviewQueue {
         let extendedEvents = micSessions.isEmpty ? rawEvents
             : CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions, matcher: m)
         let events = extendedEvents.filter { $0.rsvpStatus != "declined" }
-        func eventDays(_ e: CalendarEvent) -> [Double] {
-            var d = Array(repeating: 0.0, count: dayCount)
-            d[dayIndex(max(e.startAt, interval.start))] += e.seconds(within: interval)
-            return d
-        }
+        func eventDays(_ e: CalendarEvent) -> [Double] { spread(e.startAt, e.endAt) }
         for (seriesID, occurrences) in Dictionary(grouping: events.filter { $0.seriesMasterID != nil }, by: { $0.seriesMasterID! }) {
             let sorted = occurrences.sorted { $0.startAt < $1.startAt }
-            guard let first = sorted.first, let last = sorted.last else { continue }
+            var retained: [CalendarEvent] = []   // the occurrences the series row stands for
             var perDay = Array(repeating: 0.0, count: dayCount)
             var openPerDay = perDay
             var open = 0.0, total = 0.0
@@ -287,11 +313,12 @@ enum ReviewQueue {
                     rows.append(ReviewRow(unit: .event(clipped), status: .ignored, perDay: eventDays(e), belowThreshold: false))
                     continue
                 }
+                retained.append(e)
                 total += secs
-                let day = dayIndex(max(e.startAt, interval.start))
-                perDay[day] += secs
+                let days = eventDays(e)
+                for i in 0..<dayCount { perDay[i] += days[i] }
                 switch attribution {
-                case .unattributed: open += secs; openPerDay[day] += secs
+                case .unattributed: open += secs; for i in 0..<dayCount { openPerDay[i] += days[i] }
                 case .ignored: break
                 case .attributed(let c, let p, let src):
                     shares[Share(customerID: c.id, projectID: p?.id, scope: src == .series ? "Series" : "This meeting"), default: 0] += secs
@@ -304,9 +331,10 @@ enum ReviewQueue {
             else if let top = shares.max(by: { $0.value < $1.value }), let cid = top.key.customerID {
                 st = .attributed(customerID: cid, projectID: top.key.projectID, scope: shares.count > 1 ? "Mixed" : top.key.scope)
             } else { continue }   // every occurrence was ignored on its own: each is already listed
+            guard let first = retained.first, let last = retained.last else { continue }
             let seconds = st == .open ? open : total
             let unit = ReviewUnit.series(.init(seriesMasterID: seriesID, sampleSubject: first.subject,
-                                               occurrenceCount: sorted.count, totalSeconds: seconds,
+                                               occurrenceCount: retained.count, totalSeconds: seconds,
                                                firstStartAt: first.startAt, lastStartAt: last.startAt))
             rows.append(ReviewRow(unit: unit, status: st, perDay: st == .open ? openPerDay : perDay,
                                   belowThreshold: st == .open && seconds < minSec))
@@ -331,13 +359,14 @@ enum ReviewQueue {
             let owned = CalendarEvent.meetingMicSessionIDs(events: extendedEvents, micSessions: micSessions, matcher: m)
             for session in micSessions {
                 guard let endedAt = session.endedAt, endedAt > session.startedAt else { continue }
-                let adHoc = CallSegment.adHocRanges(
-                    of: session, endedAt: endedAt, events: extendedEvents,
-                    owned: owned, minimumSeconds: 30
-                ).reduce(0.0) { $0 + max(0, min($1.end, interval.end).timeIntervalSince(max($1.start, interval.start))) }
-                guard adHoc > 0 else { continue }
                 var perDay = Array(repeating: 0.0, count: dayCount)
-                perDay[dayIndex(max(session.startedAt, interval.start))] = adHoc
+                for range in CallSegment.adHocRanges(of: session, endedAt: endedAt, events: extendedEvents,
+                                                     owned: owned, minimumSeconds: 30) {
+                    let days = spread(range.start, range.end)
+                    for i in 0..<dayCount { perDay[i] += days[i] }
+                }
+                let adHoc = perDay.reduce(0, +)
+                guard adHoc > 0 else { continue }
                 let st: ReviewRow.Status
                 if session.isIgnored { st = .ignored }
                 else {
