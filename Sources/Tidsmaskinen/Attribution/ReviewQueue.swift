@@ -303,6 +303,8 @@ enum ReviewQueue {
         var totalCount: Int = 0
         var totalSeconds: Double = 0
         var currentWeekCount: Int = 0
+        /// Open time in the current week only (the tray's week line).
+        var currentWeekSeconds: Double = 0
         var earlierCount: Int = 0
         /// Start of the oldest week (within the window) that still has open
         /// items — where Review should land so you clear the backlog tail first.
@@ -337,6 +339,10 @@ enum ReviewQueue {
                                   idleThresholdSeconds: idleThresholdSeconds,
                                   minMinutes: minMinutes)
             result.totalSeconds += units.reduce(0) { $0 + $1.totalSeconds }
+            // Every unit's time counts here, including ones an earlier week
+            // already owns for the count — a repo open last week and this week
+            // still has this week's hours open.
+            if w == 0 { result.currentWeekSeconds = units.reduce(0) { $0 + $1.totalSeconds } }
             let fresh = units.filter { seen.insert($0.id).inserted }
             guard !fresh.isEmpty else { continue }
             result.totalCount += fresh.count

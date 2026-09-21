@@ -16,6 +16,11 @@ final class AppState: ObservableObject {
     /// oldest week that still has unattributed items.
     @Published var reviewTargetWeekStart: Date?
     @Published var showSignIn: Bool = false
+    /// True until the stored Microsoft identity has been looked up at launch,
+    /// so the health check doesn't report "signed out" for the first second.
+    @Published private(set) var isRestoringSignIn: Bool = true
+    /// Set by the tray to open Settings on a specific pane; SettingsView consumes it.
+    @Published var settingsTarget: SettingsCategory?
 
     // Command Center sync state — driven by `commandCenter.runSync()`.
     @Published var commandCenterLastSyncAt: Date? = AppSettings.commandCenterLastSyncAt
@@ -32,6 +37,7 @@ final class AppState: ObservableObject {
     let micMonitor: MicMonitor
     let commandCenter: CommandCenterClient
     let commandCenterSync: CommandCenterSync
+    let health: CaptureHealth
     let updaterController: SPUStandardUpdaterController
 
     // Rolling review backlog shared by the menu-bar glance and Review's landing
@@ -85,12 +91,20 @@ final class AppState: ObservableObject {
             userDriverDelegate: nil
         )
         self.updaterStarted = !holdUpdater
+        self.health = CaptureHealth(database: database, calendarSync: calendarSync)
 
         // Every instance listens: the transient ones are discarded, and the
         // retained one must not be left with a stopped updater.
         NotificationCenter.default.publisher(for: AppRelocator.didSettle)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.startUpdaterIfNeeded() }
+            .store(in: &cancellables)
+
+        health.isSignedIn = { [weak self] in self?.signedInPrincipal != nil }
+        health.isRestoringSignIn = { [weak self] in self?.isRestoringSignIn ?? false }
+        health.isCallDetectionRunning = { [weak self] in self?.micMonitor.isPolling ?? false }
+        health.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
         // Forward nested ObservableObject changes so views observing AppState
@@ -100,7 +114,10 @@ final class AppState: ObservableObject {
             .store(in: &cancellables)
         calendarSync.$lastSyncedAt
             .dropFirst()
-            .sink { [weak self] _ in self?.invalidateReviewBacklog() }
+            .sink { [weak self] _ in
+                self?.invalidateReviewBacklog()
+                self?.health.probe()
+            }
             .store(in: &cancellables)
 
         self.monitor.onSample = { [weak self] sample in
@@ -123,6 +140,7 @@ final class AppState: ObservableObject {
             Task { @MainActor in self?.objectWillChange.send() }
         }
         self.micMonitor.start()
+        self.health.start()
 
         // Restore signed-in identity (best-effort, non-blocking).
         Task { @MainActor in
@@ -130,6 +148,8 @@ final class AppState: ObservableObject {
                 signedInPrincipal = await graph.signedInPrincipal
                 calendarSync.startAutoSync()
             }
+            isRestoringSignIn = false
+            health.probe()   // the first probe ran before identity was restored
         }
 
         // Best-effort: try a sync on launch if we have a token + CC is enabled.
@@ -144,6 +164,7 @@ final class AppState: ObservableObject {
     func didSignIn(principal: String) {
         signedInPrincipal = principal
         calendarSync.startAutoSync()
+        health.probe()
     }
 
     var isSignedIn: Bool {
@@ -154,6 +175,7 @@ final class AppState: ObservableObject {
         await graph.signOut()
         signedInPrincipal = nil
         calendarSync.stopAutoSync()
+        health.probe()
     }
 
     // MARK: - Review backlog

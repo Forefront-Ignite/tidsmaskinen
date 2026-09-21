@@ -11,6 +11,7 @@
 //                                              the app menu's Settings… item opens the main window without any keystroke)
 //   build/devdrive set <pid> <substring> <v>  # set AXValue on the first matching element
 //   build/devdrive select <pid> <substring>   # select the list row containing the first matching element
+//   build/devdrive extras <pid>               # press the app's menu-bar status item (opens the tray popover)
 import ApplicationServices
 import CoreGraphics
 import Foundation
@@ -98,6 +99,13 @@ case "select":
         done = true; return false
     }
     if !done { print("no match for '\(needle)'"); exit(1) }
+case "extras":
+    // Press the app's own menu-bar status item (its AXExtrasMenuBar child).
+    guard let extras = attr(app, "AXExtrasMenuBar"),
+          let item = (attr(extras as! AXUIElement, kAXChildrenAttribute) as? [AXUIElement])?.first else {
+        print("no status item"); exit(1)
+    }
+    print("press status item → \(AXUIElementPerformAction(item, kAXPressAction as CFString).rawValue)")
 case "press", "set":
     guard args.count > 3 else { print("usage"); exit(2) }
     let needle = args[3].lowercased()

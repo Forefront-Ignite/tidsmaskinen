@@ -75,7 +75,7 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
             switch self {
             case .reports: return [.weeklyReport, .timeline]
             case .sources: return [.review, .calls, .customers]
-            case .system:  return [.debug, .settings]
+            case .system:  return [.settings]   // Debug lives under Settings › Advanced
             }
         }
     }
@@ -202,12 +202,16 @@ struct DebugHubView: View {
         }
     }
     @State private var tab: Tab = .calendar
+    /// Inside Settings › Advanced the pane header already names the screen.
+    var embedded: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Debug").font(.system(size: 24, weight: .bold))
-                Spacer()
+                if !embedded {
+                    Text("Debug").font(.system(size: 24, weight: .bold))
+                    Spacer()
+                }
                 Picker("", selection: $tab) {
                     ForEach(Tab.allCases) { t in
                         Label(t.item.title, systemImage: t.item.systemImage).tag(t)
@@ -216,8 +220,9 @@ struct DebugHubView: View {
                 .pickerStyle(.segmented)
                 .labelStyle(.titleAndIcon)
                 .fixedSize()
+                if embedded { Spacer() }
             }
-            .padding(.horizontal, 28).padding(.vertical, 14)
+            .padding(.horizontal, embedded ? 24 : 28).padding(.vertical, embedded ? 4 : 14)
             Divider()
             Group {
                 switch tab {

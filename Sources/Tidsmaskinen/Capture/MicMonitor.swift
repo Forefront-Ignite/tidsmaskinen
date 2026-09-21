@@ -106,6 +106,9 @@ final class MicMonitor {
         self.database = database
     }
 
+    /// True while this instance owns the poll timer (the health check).
+    var isPolling: Bool { timer != nil }
+
     func start() {
         guard timer == nil else { return }
         if let other = Self.active, other !== self { return }

@@ -36,6 +36,8 @@ Stages (from the review's "Suggested order of work"):
 | D16 | Host groups as a path checklist with one Confirm (mock) instead of whole-host + per-path Assign rows | Functional today; checklist is a UI refinement | After stage 6 if time allows |
 | D17 | A black horizontal scrollbar thumb is drawn under My day's Gantt card | Pre-existing; the inner horizontal ScrollView already hides its indicators, so the thumb comes from elsewhere — needs a look with the view debugger | Stage 6 polish |
 | D18 | Undo toast for the Calls tab's inline Ignore (Review and My day have one) | Reversible today via the call sheet or Review's Ignored filter | Stage 6 polish |
+| D20 | Menu-bar icon visibility is inferred from the status-bar window being ordered in with a width; macOS 26's "Allow in the Menu Bar" off state was not reproduced, so the check warns rather than fails | Needs a machine with the item disabled to confirm the signal | Stage 6 or when it misfires |
+| D21 | Notification on permission loss is verified in code only — needs a real revocation on the signed build to see the prompt and the banner | Dev copy can't lose a grant it never had | First release build test |
 | D19 | Day stats "attributed" can exceed "active" (per-customer sums with quarter-hour rounding vs distinct wall clock, as in the report) — the judge read it as contradictory | Same math as the report by design; a caption could explain it | Stage 6 (report compaction touches the same numbers) |
 
 ## Stage 1 — Defaults and scope (2026-09-21)
@@ -168,3 +170,36 @@ no blocking items. Remaining minors → D17, D18; the pickers' crowding was spac
 
 **Deferred from this stage:** D14 (evidence sessions — the agenda groups now compute them), D17,
 D18, D19.
+
+## Stage 5 — Capture health: tray, Setup pane, Debug → Advanced (2026-09-21)
+
+**Shipped**
+
+- `CaptureHealth`: seven checks probed functionally every minute, on activation, on sign-in /
+  sign-out / every calendar sync and whenever the tray or Setup opens — `AXIsProcessTrusted`, a
+  real `AEDeterminePermissionToAutomateTarget` with `prompt: false` (catching −1743/−1744),
+  CoreAudio call detection running (no microphone permission is needed; the check says so),
+  Microsoft sign-in plus sync age against a user threshold (default 2 days), hook install state
+  plus the events log's mtime, the status-bar window being ordered in (warn only), and customers.
+  One notification when Accessibility or Chrome automation flips from working to failed.
+- Tray: week line with this week's hours and open hours, "Capturing / Partly capturing", banners
+  with a fix for failed checks (plus a stale calendar and missing customers), `state.lastError`,
+  a Now card (the current foreground stretch, where it lands, Attribute / Not this?), a two-row
+  health stripe, and Review · N / Report / My day. "· N samples" and the meter card are gone.
+- Settings: a Setup pane first in the rail (7 live rows, one action each — Grant…, Request access,
+  Sign in, Sync now, Set up, Open System Settings with a plain fallback — and the staleness
+  threshold) that is the landing pane while anything is not green and stays afterwards; an
+  Advanced pane hosting the Debug hub (removed from the sidebar); the static Attribution text in
+  Tracking removed. A dot on the tray icon while a source is failing.
+
+**Independent review (ig-review):** three passes. Pass 1: this week's open hours excluded units
+seen in earlier weeks, no re-probe after sign-in restore, the Now card walked across gaps, strong
+captures — fixed. Pass 2: an explicit Settings target lost to the Setup fallback, a stale Now card,
+the occlusion-based menu-bar check misfiring in full-screen/lock (now ordered-in + width, warn),
+"signed out" during identity restore — fixed. Pass 3: two action guards — fixed.
+**Independent judge (ig-judge):** 6/10 (truncated week line, rail subtitle, Advanced header) →
+8/10 after fixes; its last three notes (embedded picker alignment, Now card redundancy, customers
+missing from the stripe → tray banner) are applied.
+
+**Deferred from this stage:** D20, D21. The mic check verifies call detection rather than an
+AVFoundation permission because detection reads the CoreAudio process list, which needs none.

@@ -21,7 +21,7 @@ struct TidsmaskinenApp: App {
         } label: {
             // Monochrome segmented-clock mark — the design's tray glyph.
             // Must be a template NSImage; a SwiftUI Canvas doesn't render here.
-            Image(nsImage: AppMark.trayImage)
+            Image(nsImage: state.health.hasFailure ? AppMark.trayImageAlert : AppMark.trayImage)
         }
         .menuBarExtraStyle(.window)
 
