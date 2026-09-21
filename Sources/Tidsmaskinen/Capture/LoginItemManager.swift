@@ -31,6 +31,20 @@ enum LoginItemManager {
         }
     }
 
+    /// Re-points the login item at the current bundle. A registration records
+    /// the bundle's location, so after the app moves, `register()` alone would
+    /// return early against the stale record and macOS would keep launching
+    /// the old path. Unregister first, so this always re-registers.
+    static func reregister() throws {
+        let service = SMAppService.mainApp
+        // Not `try?`: this is the only step that drops the old path, so if it
+        // fails, registering again can't be trusted to repoint the item.
+        if service.status == .enabled || service.status == .requiresApproval {
+            try service.unregister()
+        }
+        try service.register()
+    }
+
     /// Registers or unregisters Tidsmaskinen as a login item. Throws if the
     /// system refuses (typically because the binary isn't a proper .app).
     static func setEnabled(_ enabled: Bool) throws {

@@ -39,7 +39,7 @@ CERT_CN="Tidsmaskinen Self-Signed"
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
 NOTARIZE="${NOTARIZE:-0}"
 SPARKLE_PUBLIC_ED_KEY="${SPARKLE_PUBLIC_ED_KEY:-}"
-SPARKLE_FEED_URL="${SPARKLE_FEED_URL:-https://raw.githubusercontent.com/Forefront-Ignite/tidsmaskinen/main/appcast.xml}"
+SPARKLE_FEED_URL="${SPARKLE_FEED_URL:-https://forefront-ignite.github.io/tidsmaskinen/appcast.xml}"
 
 # ---- Ensure stable signing identity --------------------------------------
 

@@ -6,7 +6,8 @@
 #
 # The second argument is the verbatim stdout of Sparkle's `sign_update` tool
 # (a single line: `sparkle:edSignature="..." length="..."`). The enclosure URL
-# is derived from the version and points at the GitHub Release asset.
+# is derived from the version and points at the copy the release workflow
+# publishes to GitHub Pages (the repo itself may be private).
 
 set -euo pipefail
 
@@ -17,7 +18,7 @@ fi
 
 VERSION="$1"
 SIG_LINE="$2"
-REPO="Forefront-Ignite/tidsmaskinen"
+PAGES_BASE="https://forefront-ignite.github.io/tidsmaskinen"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APPCAST="$ROOT/appcast.xml"
@@ -28,7 +29,7 @@ if [[ ! -f "$APPCAST" ]]; then
 fi
 
 PUB_DATE=$(LC_TIME=C TZ=UTC date "+%a, %d %b %Y %H:%M:%S +0000")
-ENCLOSURE_URL="https://github.com/$REPO/releases/download/v$VERSION/Tidsmaskinen.zip"
+ENCLOSURE_URL="$PAGES_BASE/releases/v$VERSION/Tidsmaskinen.zip"
 
 NEW_ITEM=$(cat <<EOF
         <item>

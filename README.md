@@ -2,6 +2,16 @@
 
 Native macOS menu-bar app that records what you work on (frontmost app, window title, Chrome URL, git repo) and produces a weekly report grouped by `Customer · Project`. Built for personal use at Forefront Ignite to take the friction out of weekly time reports.
 
+## Install
+
+Download `Tidsmaskinen.zip` from the latest release, unzip it, and drag
+`Tidsmaskinen.app` into the `Applications` folder in your **home** folder
+(`~/Applications`; create it if it doesn't exist). Don't use the system
+`/Applications` folder: on a standard-user Mac every update from there needs
+admin rights. If an older copy already lives in `/Applications`, just launch
+it — the app offers to move itself (one last admin request), then relaunches.
+Updates are checked daily and offered from the menu bar.
+
 ## Build & run
 
 Requires macOS 26 (Tahoe) and Swift 6.0+.

@@ -79,5 +79,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // and key equivalents (⌘C/⌘V/⌘W/⌘Q) still dispatch through the main
         // menu even though accessory apps don't display it.
         NSApp.setActivationPolicy(.accessory)
+        // Offer to leave /Applications so Sparkle can update without admin
+        // rights. Relaunches from ~/Applications when the user accepts.
+        // Deferred one turn so the menu-bar item exists before the modal
+        // prompt (and a possibly slow admin approval) blocks the main thread.
+        Task { AppRelocator.run() }
     }
 }

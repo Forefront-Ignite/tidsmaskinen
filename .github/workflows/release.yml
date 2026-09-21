@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write   # creates the GitHub Release and pushes appcast.xml back to main
+  pages: write      # publishes appcast.xml + the zip to GitHub Pages
+  id-token: write   # deploy-pages verifies the deployment origin with OIDC
 
 # Serialize releases because each publishes an update to the same appcast branch.
 concurrency:
@@ -15,6 +17,12 @@ concurrency:
 
 jobs:
   build-and-release:
+    # deploy-pages runs in this job, so it targets the github-pages environment.
+    # That environment must allow deployments from v* tags (its default only
+    # allows main): Settings → Environments → github-pages.
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     # macOS 26 (Tahoe) runner — required for the macOS 26 SDK that the app's
     # Liquid Glass APIs (glassEffect, .rect, …) build against. macos-15/Xcode 16
     # has no macOS 26 SDK and the build fails to compile.
@@ -122,12 +130,61 @@ jobs:
             **Install:**
 
             1. Download `Tidsmaskinen.zip` below and unzip it.
-            2. Drag `Tidsmaskinen.app` to `/Applications` (replacing any older copy).
+            2. Drag `Tidsmaskinen.app` into the `Applications` folder in your **home** folder (`~/Applications`; create it if it doesn't exist). Don't use the system `/Applications` folder: updates there need admin rights. If an older copy already lives in `/Applications`, just launch it — it offers to move itself.
             3. Launch from the menu bar.
 
             Future updates are offered inside the app — check the menu bar dropdown.
 
-      - name: Update appcast.xml on main
+      - name: Build update feed
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          git fetch origin main
+          git checkout -B appcast-update origin/main
+          ./bin/update-appcast.sh "$VERSION" "$SIG_LINE"
+          mkdir -p "_site/releases/v$VERSION"
+          cp appcast.xml _site/appcast.xml
+          cp build/Tidsmaskinen.zip "_site/releases/v$VERSION/Tidsmaskinen.zip"
+
+      # Installed apps read the feed and download the zip from GitHub Pages,
+      # which stays public even when the repository is private. Each deploy
+      # replaces the whole site, so it only ever carries the newest zip;
+      # Sparkle never downloads anything older than the top item anyway.
+      - name: Upload update site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+      # Deploy before the appcast is pushed to main: builds ≤ 0.3.15 read
+      # main's copy the moment it lands, and their download would 404 until
+      # Pages serves the zip.
+      - name: Deploy update site to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
+
+      - name: Verify update site
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          URL="https://forefront-ignite.github.io/tidsmaskinen/releases/v$VERSION/Tidsmaskinen.zip"
+          for attempt in $(seq 1 12); do
+            # -L: without it curl exits 0 on a redirect without checking
+            # where it lands.
+            if curl -fsSLI "$URL" >/dev/null; then
+              echo "Update zip reachable at $URL"
+              exit 0
+            fi
+            echo "Not reachable yet (attempt $attempt); waiting" >&2
+            sleep 10
+          done
+          echo "Update zip never became reachable at $URL" >&2
+          exit 1
+
+      - name: Publish appcast.xml to main
         env:
           VERSION: ${{ github.ref_name }}
         run: |
@@ -135,13 +192,11 @@ jobs:
           VERSION="${VERSION#v}"
           git config user.name  "tidsmaskinen-release-bot"
           git config user.email "tidsmaskinen-release-bot@users.noreply.github.com"
-          # The release asset is already published, so a rejected push here
-          # would leave installed apps never offered the update. Rebuild the
-          # appcast on a fresh main and retry if someone pushed in between.
+          # The Pages site and the release asset are already published, so a
+          # rejected push here would leave older installs never offered the
+          # update. Regenerate on a fresh main and retry if someone pushed in
+          # between (only pubDate can differ from the deployed copy).
           for attempt in 1 2 3; do
-            git fetch origin main
-            git checkout -B appcast-update origin/main
-            ./bin/update-appcast.sh "$VERSION" "$SIG_LINE"
             git add appcast.xml
             git commit -m "release: appcast for v$VERSION"
             if git push origin HEAD:main; then
@@ -149,6 +204,9 @@ jobs:
             fi
             echo "appcast push rejected (attempt $attempt); retrying" >&2
             sleep 5
+            git fetch origin main
+            git checkout -B appcast-update origin/main
+            ./bin/update-appcast.sh "$VERSION" "$SIG_LINE"
           done
           echo "Failed to publish appcast.xml after 3 attempts" >&2
           exit 1
@@ -156,3 +214,4 @@ jobs:
       - name: Cleanup signing keychain
         if: always()
         run: security delete-keychain "$RUNNER_TEMP/build.keychain" || true
+

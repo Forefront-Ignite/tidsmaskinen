@@ -13,6 +13,10 @@ enum SettingsKey {
     static let commandCenterBaseURL = "commandCenterBaseURL"
     static let commandCenterLastSyncAt = "commandCenterLastSyncAt"
     static let timelineShowForeground = "timelineShowForeground"
+    // AppRelocator: "Don't ask again" on the move-to-~/Applications prompt,
+    // and whether to re-register the login item after a completed move.
+    static let relocationPromptSuppressed = "relocationPromptSuppressed"
+    static let relocationRestoreLoginItem = "relocationRestoreLoginItem"
 }
 
 enum GraphPreset: String, CaseIterable, Identifiable {
@@ -100,6 +104,12 @@ enum AppSettings {
     static var idleThresholdSeconds: Int {
         let v = defaults.integer(forKey: SettingsKey.idleThresholdSeconds)
         return v <= 0 ? 300 : v
+    }
+
+    /// Set by "Don't ask again" on the move-to-~/Applications prompt.
+    static var relocationPromptSuppressed: Bool {
+        get { defaults.bool(forKey: SettingsKey.relocationPromptSuppressed) }
+        set { defaults.set(newValue, forKey: SettingsKey.relocationPromptSuppressed) }
     }
 
     static var meetingRSVPFilter: MeetingRSVPFilter {

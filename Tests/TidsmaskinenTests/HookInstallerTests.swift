@@ -40,6 +40,25 @@ final class HookInstallerTests: XCTestCase {
         }
     }
 
+    /// The relocation flow relies on this: after AppRelocator moves the bundle,
+    /// hooks still name the old absolute tm-hook path, and reinstalling must
+    /// repoint them rather than leave a second, dead entry behind.
+    func testReinstallRepointsHooksAfterTheBundleMoves() throws {
+        try withFile { url in
+            let old = "/Applications/Tidsmaskinen.app/Contents/MacOS/tm-hook"
+            let new = "/Users/me/Applications/Tidsmaskinen.app/Contents/MacOS/tm-hook"
+            try HookInstaller.install(provider: .claude, fileURL: url, executablePath: old)
+            XCTAssertEqual(HookInstaller.currentState(provider: .claude, fileURL: url, executablePath: new),
+                           .stale(installedPath: old, expectedPath: new))
+
+            try HookInstaller.install(provider: .claude, fileURL: url, executablePath: new)
+            XCTAssertEqual(HookInstaller.currentState(provider: .claude, fileURL: url, executablePath: new),
+                           .installed(path: new))
+            let text = try String(contentsOf: url, encoding: .utf8)
+            XCTAssertFalse(text.contains(old), "the dead path must be gone, not merely joined by the new one")
+        }
+    }
+
     func testMalformedConfigurationIsNeverOverwritten() throws {
         for input in ["{", "[]", #"{"hooks":true}"#, #"{"hooks":{"Stop":[{"hooks":"bad"}]}}"#] {
             try withFile { url in
