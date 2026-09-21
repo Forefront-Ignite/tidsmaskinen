@@ -15,106 +15,284 @@ import Foundation
 ///  - **Anything below `minMinutes`** — short fragments are ambient, not a to-do.
 ///
 /// That excluded time is real tracked time, but it's *ambient*, not a review
-/// backlog, so it never inflates the count.
+/// backlog, so it never inflates the count. `rows` lists it anyway (as
+/// `.ambient` / `belowThreshold`) so Review can still teach an app rule from it.
+
+/// One row of the Review list: the item, how it stands in the period, and
+/// how its time falls across the period's days.
+struct ReviewRow: Identifiable {
+    enum Status: Equatable {
+        /// Unattributed time worth a decision. `unit.totalSeconds` is that open time only.
+        case open
+        /// `scope` says how: "Always", "This week", "This day", "Bounded" (a rule
+        /// window), "Manual" (per-item override), "Series", "This meeting",
+        /// "Pinned" (a saved call), or "Mixed" when the period's time splits
+        /// across several attributions — `customerID` is then the largest share.
+        case attributed(customerID: String, projectID: String?, scope: String)
+        case ignored
+        /// App-only time with no home. Not a to-do — an editor or browser can't be
+        /// pinned to one customer — but an app rule can be taught from it.
+        case ambient
+    }
+
+    let unit: ReviewUnit
+    let status: Status
+    /// Seconds per day of the period, first day first.
+    let perDay: [Double]
+    /// Open time under the review threshold: hidden from Review by default and
+    /// never part of the backlog count.
+    let belowThreshold: Bool
+
+    var id: String { unit.id }
+    var totalSeconds: Double { unit.totalSeconds }
+    var isOpen: Bool { status == .open }
+}
+
 enum ReviewQueue {
+    /// The triage backlog: the open rows above the threshold, largest first.
     static func build(database: AppDatabase,
                       interval: DateInterval,
                       sampleIntervalSeconds: Int,
                       idleThresholdSeconds: TimeInterval,
                       minMinutes: Int) throws -> [ReviewUnit] {
+        try rows(database: database, interval: interval,
+                 sampleIntervalSeconds: sampleIntervalSeconds,
+                 idleThresholdSeconds: idleThresholdSeconds,
+                 minMinutes: minMinutes)
+            .filter { $0.isOpen && !$0.belowThreshold }
+            .map(\.unit)
+            .sorted { $0.totalSeconds > $1.totalSeconds }
+    }
+
+    /// Every item with time in the period — open, attributed, ignored or
+    /// ambient — resolved per sample at its own timestamp, so a Monday rule
+    /// cannot hide Tuesday's backlog and a Wednesday-only rule shows as such.
+    static func rows(database: AppDatabase,
+                     interval: DateInterval,
+                     sampleIntervalSeconds: Int,
+                     idleThresholdSeconds: TimeInterval,
+                     minMinutes: Int) throws -> [ReviewRow] {
         let m = try RuleMatcher.load(from: database)
         let hidden = try database.allHiddenSignals()
         let hiddenHosts = Set(hidden.filter { $0.kind == .urlHost }.map { $0.value })
         let hiddenPaths = Set(hidden.filter { $0.kind == .urlPath }.map { $0.value })
+        let hiddenApps = Set(hidden.filter { $0.kind == .appBundleID }.map { $0.value })
         let minSec = Double(minMinutes) * 60
-        var built: [ReviewUnit] = []
+        let cal = Calendar.weekStartingMonday()
+        let dayCount = max(1, (cal.dateComponents([.day], from: cal.startOfDay(for: interval.start),
+                                                  to: cal.startOfDay(for: interval.end.addingTimeInterval(-1))).day ?? 0) + 1)
+        func dayIndex(_ date: Date) -> Int {
+            let d = cal.dateComponents([.day], from: cal.startOfDay(for: interval.start), to: date).day ?? 0
+            return min(max(d, 0), dayCount - 1)
+        }
 
-        // Resolve each sample at its actual timestamp before aggregating. A
-        // Monday rule cannot hide Tuesday's backlog, and manual assignments or
-        // a Wednesday-only rule must clear the activity they actually cover.
-        var repos: [String: Double] = [:]
-        var hosts: [String: Double] = [:]
-        var pathsByHost: [String: [String: Double]] = [:]
+        /// Time for one signal, split by how it was attributed.
+        struct Share: Hashable { let customerID: String?; let projectID: String?; let scope: String }
+        struct Acc {
+            var shares: [Share: Double] = [:]
+            var perDay: [Double]        // all time, for attributed / ambient rows
+            var openPerDay: [Double]    // open time only, for open rows (matches their total)
+            var hidden = false
+            init(days: Int) { perDay = Array(repeating: 0, count: days); openPerDay = perDay }
+            var total: Double { shares.values.reduce(0, +) }
+            var open: Double { shares.filter { $0.key.customerID == nil }.values.reduce(0, +) }
+            mutating func add(_ seconds: Double, day: Int, _ r: AttributionResult) {
+                shares[share(for: r), default: 0] += seconds
+                perDay[day] += seconds
+                if r.customer == nil { openPerDay[day] += seconds }
+            }
+        }
+        func scopeLabel(_ rule: Rule?) -> String {
+            guard let rule else { return "Manual" }
+            guard rule.isTemporary else { return "Always" }
+            if let from = rule.validFrom, let to = rule.validTo {
+                if to.timeIntervalSince(from) <= 86_400 + 3_600 { return "This day" }
+                if to.timeIntervalSince(from) <= 7 * 86_400 + 3_600 { return "This week" }
+            }
+            return "Bounded"
+        }
+        func share(for r: AttributionResult) -> Share {
+            guard let c = r.customer else { return Share(customerID: nil, projectID: nil, scope: "") }
+            return Share(customerID: c.id, projectID: r.project?.id, scope: scopeLabel(r.matchingRule))
+        }
+        /// The row status for a signal: open when open time remains, else its
+        /// largest attribution (flagged Mixed when others exist), else ambient.
+        func status(_ acc: Acc, ambientWhenOpen: Bool) -> ReviewRow.Status {
+            if acc.hidden { return .ignored }
+            if acc.open > 0 { return ambientWhenOpen ? .ambient : .open }
+            let attributed = acc.shares.filter { $0.key.customerID != nil }
+            guard let top = attributed.max(by: { $0.value < $1.value }), let cid = top.key.customerID else { return .ambient }
+            let scope = attributed.count > 1 ? "Mixed" : top.key.scope
+            return .attributed(customerID: cid, projectID: top.key.projectID, scope: scope)
+        }
+
+        var repos: [String: Acc] = [:]
+        var hosts: [String: Acc] = [:]
+        var paths: [String: [String: Acc]] = [:]     // host → path → acc
+        var apps: [String: Acc] = [:]
+
         for sample in try database.samples(in: interval) where !sample.isIdle {
-            guard !m.isRepoIgnored(remoteURL: sample.gitRemoteURL), m.attribute(sample).customer == nil else { continue }
             let seconds = min(Double(sampleIntervalSeconds), interval.end.timeIntervalSince(sample.capturedAt))
+            let day = dayIndex(sample.capturedAt)
+            let r = m.attribute(sample)
             if let remote = sample.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: remote) {
-                repos[slug, default: 0] += seconds
-            } else if let host = sample.chromeHost, !hiddenHosts.contains(host) {
+                var acc = repos[slug] ?? Acc(days: dayCount)
+                acc.hidden = m.isRepoIgnored(slug: slug)
+                acc.add(seconds, day: day, r)
+                repos[slug] = acc
+            } else if let host = sample.chromeHost {
                 if let url = sample.chromeURL, let path = RuleMatcher.urlPathPrefix(url) {
+                    // Hidden paths are dropped entirely, host included — as the
+                    // backlog always did. Settings → Ignored still lists them.
                     guard !hiddenPaths.contains(path) else { continue }
-                    pathsByHost[host, default: [:]][path, default: 0] += seconds
+                    var pacc = paths[host]?[path] ?? Acc(days: dayCount)
+                    pacc.add(seconds, day: day, r)
+                    paths[host, default: [:]][path] = pacc
                 }
-                hosts[host, default: 0] += seconds
+                var acc = hosts[host] ?? Acc(days: dayCount)
+                acc.hidden = hiddenHosts.contains(host)
+                acc.add(seconds, day: day, r)
+                hosts[host] = acc
+            } else if let bundle = sample.appBundleID {
+                var acc = apps[bundle] ?? Acc(days: dayCount)
+                acc.hidden = hiddenApps.contains(bundle)
+                acc.add(seconds, day: day, r)
+                apps[bundle] = acc
             }
         }
         let sessionSeconds = try database.sessionActiveSeconds(in: interval, idleThresholdSeconds: idleThresholdSeconds)
         for session in try database.sessions(in: interval) {
-            guard !m.isRepoIgnored(remoteURL: session.gitRemoteURL),
-                  m.attribute(session: session).customer == nil,
-                  let remote = session.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: remote),
+            guard let remote = session.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: remote),
                   let seconds = sessionSeconds[session.id], seconds > 0 else { continue }
-            repos[slug, default: 0] += seconds
-        }
-        for (slug, seconds) in repos where seconds >= minSec {
-            built.append(.signal(.init(kind: .gitRepoSlug, value: slug, totalSeconds: seconds)))
-        }
-        for (host, seconds) in hosts where seconds >= minSec {
-            let aggregate = AppDatabase.SignalAggregate(kind: .urlHost, value: host, totalSeconds: seconds)
-            let paths = (pathsByHost[host] ?? [:]).compactMap { path, seconds -> AppDatabase.SignalAggregate? in
-                guard seconds >= minSec else { return nil }
-                return .init(kind: .urlPath, value: path, totalSeconds: seconds)
-            }.sorted { $0.totalSeconds > $1.totalSeconds }
-            // Many short paths can collectively be worth reviewing. Keep the
-            // host assignable even when no individual path clears the threshold.
-            built.append(paths.isEmpty ? .signal(aggregate) : .hostGroup(host: aggregate, paths: paths))
+            var acc = repos[slug] ?? Acc(days: dayCount)
+            acc.hidden = m.isRepoIgnored(slug: slug)
+            // Active seconds aren't split by day; credit the session's day in the period.
+            acc.add(seconds, day: dayIndex(max(session.startedAt, interval.start)), m.attribute(session: session))
+            repos[slug] = acc
         }
 
-        let rawEvents = try database.calendarEvents(in: interval)
-        let unresolved = rawEvents.filter { $0.rsvpStatus != "declined" && m.attribute(event: $0) == .unattributed }
-        let recurring = Dictionary(grouping: unresolved.filter { $0.seriesMasterID != nil }, by: { $0.seriesMasterID! })
-        for (seriesID, events) in recurring {
-            let sorted = events.sorted { $0.startAt < $1.startAt }
-            guard let first = sorted.first, let last = sorted.last else { continue }
-            let seconds = sorted.reduce(0.0) {
-                $0 + max(0, min($1.endAt, interval.end).timeIntervalSince(max($1.startAt, interval.start)))
-            }
-            guard seconds >= minSec else { continue }
-            built.append(.series(.init(seriesMasterID: seriesID, sampleSubject: first.subject,
-                                       occurrenceCount: sorted.count, totalSeconds: seconds,
-                                       firstStartAt: first.startAt, lastStartAt: last.startAt)))
+        var rows: [ReviewRow] = []
+        func signalRow(_ kind: AppDatabase.SignalAggregate.Kind, _ value: String, _ acc: Acc, ambient: Bool = false) -> ReviewRow {
+            let st = status(acc, ambientWhenOpen: ambient)
+            let seconds = st == .open ? acc.open : acc.total
+            return ReviewRow(unit: .signal(.init(kind: kind, value: value, totalSeconds: seconds)),
+                             status: st, perDay: st == .open ? acc.openPerDay : acc.perDay,
+                             belowThreshold: st == .open && seconds < minSec)
         }
-        for var event in unresolved where event.seriesMasterID == nil {
+        for (slug, acc) in repos { rows.append(signalRow(.gitRepoSlug, slug, acc)) }
+        for (bundle, acc) in apps { rows.append(signalRow(.appBundleID, bundle, acc, ambient: true)) }
+        for (host, acc) in hosts {
+            let st = status(acc, ambientWhenOpen: false)
+            guard st == .open else {
+                rows.append(signalRow(.urlHost, host, acc)); continue
+            }
+            // Open paths that clear the threshold become a host group; a host
+            // stays assignable on its own even when no single path clears it.
+            let openPaths = (paths[host] ?? [:]).compactMap { path, pacc -> AppDatabase.SignalAggregate? in
+                guard pacc.open >= minSec else { return nil }
+                return .init(kind: .urlPath, value: path, totalSeconds: pacc.open)
+            }.sorted { $0.totalSeconds > $1.totalSeconds }
+            let aggregate = AppDatabase.SignalAggregate(kind: .urlHost, value: host, totalSeconds: acc.open)
+            rows.append(ReviewRow(unit: openPaths.isEmpty ? .signal(aggregate) : .hostGroup(host: aggregate, paths: openPaths),
+                                  status: .open, perDay: acc.openPerDay, belowThreshold: acc.open < minSec))
+        }
+
+        // Meetings, stretched over the mic time each one owns (as the report and
+        // My day count them). Declined bookings never bill, so they are not listed.
+        let rawEvents = try database.calendarEvents(in: interval)
+        let micSessions = try database.micSessions(in: interval)
+        let extendedEvents = micSessions.isEmpty ? rawEvents
+            : CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions, matcher: m)
+        let events = extendedEvents.filter { $0.rsvpStatus != "declined" }
+        func eventDays(_ e: CalendarEvent) -> [Double] {
+            var d = Array(repeating: 0.0, count: dayCount)
+            d[dayIndex(max(e.startAt, interval.start))] += e.seconds(within: interval)
+            return d
+        }
+        for (seriesID, occurrences) in Dictionary(grouping: events.filter { $0.seriesMasterID != nil }, by: { $0.seriesMasterID! }) {
+            let sorted = occurrences.sorted { $0.startAt < $1.startAt }
+            guard let first = sorted.first, let last = sorted.last else { continue }
+            var perDay = Array(repeating: 0.0, count: dayCount)
+            var openPerDay = perDay
+            var open = 0.0, total = 0.0
+            var shares: [Share: Double] = [:]
+            for e in sorted {
+                let secs = e.seconds(within: interval)
+                let attribution = m.attribute(event: e)
+                // An occurrence ignored on its own is its own row and not part
+                // of the series' time; a series ignore covers every occurrence.
+                if case .ignored(.event) = attribution {
+                    var clipped = e
+                    clipped.startAt = max(e.startAt, interval.start)
+                    clipped.endAt = min(e.endAt, interval.end)
+                    rows.append(ReviewRow(unit: .event(clipped), status: .ignored, perDay: eventDays(e), belowThreshold: false))
+                    continue
+                }
+                total += secs
+                let day = dayIndex(max(e.startAt, interval.start))
+                perDay[day] += secs
+                switch attribution {
+                case .unattributed: open += secs; openPerDay[day] += secs
+                case .ignored: break
+                case .attributed(let c, let p, let src):
+                    shares[Share(customerID: c.id, projectID: p?.id, scope: src == .series ? "Series" : "This meeting"), default: 0] += secs
+                }
+            }
+            let ignoredWholeSeries = m.seriesAttributionsByID[seriesID]?.isIgnored == true
+            let st: ReviewRow.Status
+            if open > 0 { st = .open }
+            else if ignoredWholeSeries { st = .ignored }
+            else if let top = shares.max(by: { $0.value < $1.value }), let cid = top.key.customerID {
+                st = .attributed(customerID: cid, projectID: top.key.projectID, scope: shares.count > 1 ? "Mixed" : top.key.scope)
+            } else { continue }   // every occurrence was ignored on its own: each is already listed
+            let seconds = st == .open ? open : total
+            let unit = ReviewUnit.series(.init(seriesMasterID: seriesID, sampleSubject: first.subject,
+                                               occurrenceCount: sorted.count, totalSeconds: seconds,
+                                               firstStartAt: first.startAt, lastStartAt: last.startAt))
+            rows.append(ReviewRow(unit: unit, status: st, perDay: st == .open ? openPerDay : perDay,
+                                  belowThreshold: st == .open && seconds < minSec))
+        }
+        for var event in events where event.seriesMasterID == nil {
+            let perDay = eventDays(event)
+            let secs = event.seconds(within: interval)
+            let st: ReviewRow.Status
+            switch m.attribute(event: event) {
+            case .unattributed: st = .open
+            case .ignored: st = .ignored
+            case .attributed(let c, let p, _): st = .attributed(customerID: c.id, projectID: p?.id, scope: "This meeting")
+            }
             event.startAt = max(event.startAt, interval.start)
             event.endAt = min(event.endAt, interval.end)
-            if event.endAt.timeIntervalSince(event.startAt) >= minSec {
-                built.append(.event(event))
-            }
+            rows.append(ReviewRow(unit: .event(event), status: st, perDay: perDay, belowThreshold: st == .open && secs < minSec))
         }
 
-        // Ad-hoc calls: ended mic sessions whose impromptu time (mic minus any
-        // mic-extended meeting) clears the threshold and that aren't already
-        // attributed (no manual save, no matching Slack-channel rule). This
-        // mirrors the Calls tab's segmentation so a huddle or stray Teams call
-        // can be attributed from Review instead of being stranded.
-        let micSessions = try database.micSessions(in: interval)
+        // Ad-hoc calls: mic time minus the meetings each session *is*, mirroring
+        // the Calls tab, so a huddle can be attributed from Review too.
         if !micSessions.isEmpty {
-            let extendedEvents = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions, matcher: m)
             let owned = CalendarEvent.meetingMicSessionIDs(events: extendedEvents, micSessions: micSessions, matcher: m)
             for session in micSessions {
                 guard let endedAt = session.endedAt, endedAt > session.startedAt else { continue }
-                if session.isIgnored { continue }                                  // user said don't ask
-                if m.attribute(micSession: session).customer != nil { continue }   // already has a home
                 let adHoc = CallSegment.adHocRanges(
                     of: session, endedAt: endedAt, events: extendedEvents,
                     owned: owned, minimumSeconds: 30
                 ).reduce(0.0) { $0 + max(0, min($1.end, interval.end).timeIntervalSince(max($1.start, interval.start))) }
-                if adHoc > 0, adHoc >= minSec { built.append(.call(session: session, seconds: adHoc)) }
+                guard adHoc > 0 else { continue }
+                var perDay = Array(repeating: 0.0, count: dayCount)
+                perDay[dayIndex(max(session.startedAt, interval.start))] = adHoc
+                let st: ReviewRow.Status
+                if session.isIgnored { st = .ignored }
+                else {
+                    let r = m.attribute(micSession: session)
+                    if let c = r.customer {
+                        st = .attributed(customerID: c.id, projectID: r.project?.id,
+                                         scope: r.matchingRule == nil ? "Pinned" : scopeLabel(r.matchingRule))
+                    } else { st = .open }
+                }
+                rows.append(ReviewRow(unit: .call(session: session, seconds: adHoc), status: st,
+                                      perDay: perDay, belowThreshold: st == .open && adHoc < minSec))
             }
         }
-
-        built.sort { $0.totalSeconds > $1.totalSeconds }
-        return built
+        return rows
     }
 
     /// Aggregate review backlog across the current week plus the previous

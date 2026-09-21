@@ -30,6 +30,10 @@ Stages (from the review's "Suggested order of work"):
 | D10 | Timeline blocks are tap gestures, not buttons: no accessibility action, not keyboard-reachable, not drivable headlessly | Needs `Button`-based blocks; touches the popover anchoring | Stage 4 (Calls lane / agenda rework) |
 | D11 | Tertiary captions ("Attributed on its own — no rule is created", "each cell is that project's hours that day") are low-contrast on the gradient wallpaper | Pre-existing style; judge minor in stage 2 | Stage 6 (report compaction) or a global caption pass |
 | D12 | Project labels wrap mid-word in the report grid ("Scenarioplane ring - Lumorio") although the column has room | Pre-existing; the grid is rebuilt in stage 6 | Stage 6 |
+| D13 | **Deviation from the mock:** app-only time is listed in Review (Apps & sites, "Unattributed") but is *not* counted as open, so the report/tray backlog numbers are unchanged. The mock counts apps as open. | `ReviewQueue.build` deliberately excluded apps (an editor or browser can't be pinned to one customer; counting them would nag every week) and the report/tray depend on it | Revisit if the user wants apps in the open count — one line in `ReviewQueue.rows` (`ambientWhenOpen`) |
+| D14 | Evidence in the detail pane: the three longest sessions with window titles / paths linking into My day | Needs sample-level session grouping per signal; the per-day strip and the meeting/call cards are in | Stage 4 (agenda grouping produces the same sessions) |
+| D15 | Delete `SearchableEntityPicker` (`CustomerProjectPicker` covers it; `AddRuleSheet` needs one flag) | Still used by the Customers rule editor | Stage 6 |
+| D16 | Host groups as a path checklist with one Confirm (mock) instead of whole-host + per-path Assign rows | Functional today; checklist is a UI refinement | After stage 6 if time allows |
 
 ## Stage 1 — Defaults and scope (2026-09-21)
 
@@ -86,3 +90,43 @@ The error banner is verified in code only — it needs a database fault to rende
 
 **Deferred from this stage:** D11, D12. Review card v2 (evidence, suggestions, keyboard) is folded
 into stage 3's detail pane.
+
+## Stage 3 — Review as list + detail; Discover removed (2026-09-21)
+
+**Shipped**
+
+- `ReviewQueue.rows` classifies every item of the period — open, attributed (with the scope the
+  rule was written with: Always / This week / This day / Manual / Series / Pinned / Mixed), ignored,
+  or ambient (app-only) — resolved per sample at its own timestamp, with an open-only per-day split
+  for open rows. Meetings use mic-extended bounds like the report. `build` is now the open rows, so
+  the report and tray backlog are unchanged (test: `ReviewRowsTests`).
+- `ReviewView` rewritten: Open / All / Ignored filter, customer filter, search, "Show N under 5 min"
+  toggle, list grouped into Git repos / Meetings / Calls / Apps & sites with status chips, a
+  permanent detail pane (kind, title, hours, per-day strip, evidence card, suggestions 1–3 with
+  earlier answers first, picker, scope, a note on exactly what Confirm writes, Skip H / Ignore E /
+  Confirm ↵ with keycaps, contextual legend). Confirm is bordered and inert until a target is
+  picked. Attributed rows change in place; ignored rows Restore. Series rows accept This week /
+  This day (per-occurrence overrides). Reload after every write, selection kept by id, undo stack
+  (⌘Z) that deletes exactly the written rule. Single-key grammar via a local key monitor that
+  defers whenever a text field is being edited.
+- `DiscoverView` and `AssignmentSheet` deleted; sidebar group "Sources" → "Attribution".
+- Verified in the dev copy through accessibility: suggestion → Confirm moved 11 → 10 open and
+  advanced the selection; Undo restored 11 and reselected the item; Skip advanced; Ignore → 10 and
+  its Undo → 11.
+
+**Independent review (ig-review):** three passes. Pass 1 (REQUEST CHANGES): ⌘Z/⌘←/⌘→ live while
+typing in search, meetings not mic-extended, series rows counting individually-ignored occurrences
+(and a duplicate ignored row), single-day periods getting a 2-slot day strip — all fixed. Pass 2:
+single-key shortcuts vs text fields and `?` needing shift — replaced the SwiftUI shortcut buttons
+with an NSEvent monitor gated on the first responder; selection dropping to nothing in All — fixed;
+open rows' day strip counting attributed time — fixed; scope lingering on This day — fixed. Pass 3:
+the same open-only split for series rows, clipping of individually-ignored occurrences, deinit
+off-main guard — fixed. Not re-reviewed after pass 3's mechanical fixes.
+
+**Independent judge (ig-judge):** 6/10 on the first build (blocker: legend said "E ignore" under a
+Restore button; majors: disabled Confirm contrast, detail card floating in a void) → 8/10 after the
+fixes, no blocking items. Remaining minors applied: keycaps, "Whole week" chip, legible inactive
+days, scrollbar inset; header density noted but kept (four rows: navigator, filters, day chips,
+progress).
+
+**Deferred from this stage:** D2, D4, D13 (deviation), D14, D15, D16.

@@ -7,9 +7,10 @@
 //   build/devdrive windows <pid>              # CGWindow id, layer, on-screen, name, bounds
 //   build/devdrive dump <pid> [maxDepth]      # pressable elements: role | title | description | value | frame
 //   build/devdrive press <pid> <substring>    # AXPress the first element whose title/description/value matches
-//                                              ("role=AXMenuBarItem" matches by role, "title=Settings…" exactly by title;
+//                                              ("role=AXMenuBarItem" matches by role, "title=Settings…" / "desc=All" exactly by title / description;
 //                                              the app menu's Settings… item opens the main window without any keystroke)
 //   build/devdrive set <pid> <substring> <v>  # set AXValue on the first matching element
+//   build/devdrive select <pid> <substring>   # select the list row containing the first matching element
 import ApplicationServices
 import CoreGraphics
 import Foundation
@@ -46,13 +47,14 @@ func walk(_ e: AXUIElement, _ depth: Int, _ maxDepth: Int, _ visit: (AXUIElement
 func matches(_ e: AXUIElement, _ needle: String) -> Bool {
     if needle.hasPrefix("role=") { return str(e, kAXRoleAttribute).lowercased() == needle.dropFirst(5).lowercased() }
     if needle.hasPrefix("title=") { return str(e, kAXTitleAttribute).lowercased() == needle.dropFirst(6).lowercased() }
+    if needle.hasPrefix("desc=") { return str(e, kAXDescriptionAttribute).lowercased() == needle.dropFirst(5).lowercased() }
     return [str(e, kAXTitleAttribute), str(e, kAXDescriptionAttribute), str(e, kAXValueAttribute)]
         .joined(separator: " | ").lowercased().contains(needle)
 }
 
 let args = CommandLine.arguments
 guard args.count >= 3, let pid = pid_t(args[2]) else {
-    print("usage: devdrive windows|dump|press|set <pid> …"); exit(2)
+    print("usage: devdrive windows|dump|press|select|set <pid> …"); exit(2)
 }
 let app = AXUIElementCreateApplication(pid)
 switch args[1] {
@@ -78,6 +80,24 @@ case "dump":
         }
         return true
     }
+case "select":
+    // Select the list/table row that contains the first matching element.
+    guard args.count > 3 else { print("usage"); exit(2) }
+    let needle = args[3].lowercased()
+    var done = false
+    walk(app, 0, 40) { e, _ in
+        if done { return false }
+        guard matches(e, needle) else { return true }
+        var node: AXUIElement? = e
+        while let n = node, str(n, kAXRoleAttribute) != "AXRow" {
+            node = attr(n, kAXParentAttribute).map { $0 as! AXUIElement }
+        }
+        guard let row = node else { print("no enclosing row for '\(needle)'"); done = true; return false }
+        let r = AXUIElementSetAttributeValue(row, kAXSelectedAttribute as CFString, kCFBooleanTrue)
+        print("select row containing '\(needle)' → \(r.rawValue)")
+        done = true; return false
+    }
+    if !done { print("no match for '\(needle)'"); exit(1) }
 case "press", "set":
     guard args.count > 3 else { print("usage"); exit(2) }
     let needle = args[3].lowercased()
@@ -99,5 +119,5 @@ case "press", "set":
     }
     if !done { print("no match for '\(needle)'"); exit(1) }
 default:
-    print("usage: devdrive windows|dump|press|set <pid> …"); exit(2)
+    print("usage: devdrive windows|dump|press|select|set <pid> …"); exit(2)
 }
