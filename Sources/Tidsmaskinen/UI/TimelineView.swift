@@ -5,10 +5,15 @@ struct TimelineView: View {
     @EnvironmentObject private var state: AppState
 
     @State private var day: Date = Calendar.current.startOfDay(for: Date())
-    @State private var bundle: TimelineBuilder.DayBundle = TimelineBuilder.DayBundle(calendar: [], foreground: [], claudeCode: [])
+    @State private var bundle: TimelineBuilder.DayBundle = TimelineBuilder.DayBundle(calendar: [], calls: [], foreground: [], claudeCode: [])
     @State private var customers: [Customer] = []
     @State private var projects: [Project] = []
     @State private var selectedBlock: TimelineBlock?
+    /// A moment Review asked for (a stretch's start): once the day is loaded,
+    /// the block covering it is selected so its popover opens right there.
+    @State private var pendingFocus: Date?
+    /// The other sessions of an agent agenda group, pinned along with the first.
+    @State private var agendaSessionIDs: [String] = []
     @State private var refreshTimer: Timer?
     @State private var nowTimer: Timer?
     @State private var now: Date = Date()
@@ -22,15 +27,24 @@ struct TimelineView: View {
     @State private var pendingUndo: PendingUndo?
     @State private var pendingUndoDismiss: Task<Void, Never>?
     @State private var undoError: String?
-    /// Block selected from the readable agenda list (separate from `selectedBlock`,
-    /// which drives the Gantt-strip popover, so the two popovers never collide).
+    /// Block the agenda popover edits (separate from `selectedBlock`, which
+    /// drives the Gantt-strip popover, so the two popovers never collide). For
+    /// a multi-block group this is a synthesized block spanning the group.
     @State private var agendaBlock: TimelineBlock?
+    @State private var agendaGroupID: String?
     /// Derived data cached so it isn't recomputed on every body evaluation
     /// (the view re-renders on 8s/30s timers). Refreshed in `reload()` and when
-    /// the foreground-lane toggle changes which tracks are shown.
+    /// the Lanes menu changes which tracks are shown.
     @State private var cachedRowHeights: [TimelineBlock.Track: CGFloat] = [:]
-    @State private var cachedAgendaBlocks: [TimelineBlock] = []
-    @AppStorage(SettingsKey.timelineShowForeground) private var showForeground: Bool = false
+    @State private var cachedAgendaGroups: [AgendaGroup] = []
+    /// Day stats, the same math as the report's day column (`WeeklyReport`)
+    /// and Review's open backlog (`ReviewQueue`).
+    @State private var dayActiveSeconds: TimeInterval = 0
+    @State private var dayAttributedSeconds: TimeInterval = 0
+    @State private var dayOpenSeconds: TimeInterval = 0
+    @State private var dayOpenCount: Int = 0
+    @State private var dayMeetingSeconds: TimeInterval = 0
+    @AppStorage(SettingsKey.timelineHiddenLanes) private var hiddenLanesRaw: String = ""
 
     /// Combined gate for the "show hidden items" eye toggle. The toggle is
     /// disabled when there's nothing to reveal — neither hidden apps/hosts
@@ -57,11 +71,13 @@ struct TimelineView: View {
     private let idleBarHeight: CGFloat = 8
     private let rowSpacing: CGFloat = 8
 
+    private var hiddenLanes: Set<TimelineBlock.Track> {
+        Set(hiddenLanesRaw.split(separator: ",").compactMap { TimelineBlock.Track(rawValue: String($0)) })
+    }
+
+    /// Every lane is on by default; the Lanes menu switches lanes off.
     private var allTracks: [TimelineBlock.Track] {
-        if showForeground {
-            return [.calendar, .foreground, .claudeCode]
-        }
-        return [.calendar, .claudeCode]
+        TimelineBlock.Track.allCases.filter { !hiddenLanes.contains($0) }
     }
 
     private var dayInterval: DateInterval {
@@ -77,7 +93,7 @@ struct TimelineView: View {
         var visibleStart = cal.date(byAdding: .hour, value: 6, to: dayInterval.start) ?? dayInterval.start
         var visibleEnd = cal.date(byAdding: .hour, value: 22, to: dayInterval.start) ?? dayInterval.end
 
-        let allBlocks = bundle.calendar + bundle.foreground + bundle.claudeCode
+        let allBlocks = bundle.calendar + bundle.calls + bundle.foreground + bundle.claudeCode
         for b in allBlocks {
             if b.startedAt < visibleStart { visibleStart = b.startedAt }
             if b.endedAt > visibleEnd { visibleEnd = b.endedAt }
@@ -105,7 +121,9 @@ struct TimelineView: View {
             }
         }
         .overlay(alignment: .bottom) { undoToast }
+        .onChange(of: state.timelineTargetDay) { _, _ in consumeTimelineTarget() }
         .onAppear {
+            consumeTimelineTarget()
             reload()
             let t = Timer(timeInterval: 8, repeats: true) { _ in
                 Task { @MainActor in reload() }
@@ -131,11 +149,29 @@ struct TimelineView: View {
             undoError = nil
         }
         .onChange(of: showHidden) { _, _ in reload() }
-        .onChange(of: showForeground) { _, _ in recomputeDerived() }
+        .onChange(of: hiddenLanesRaw) { _, _ in recomputeDerived() }
         .onChange(of: pendingUndo) { _, _ in undoError = nil }
         .onChange(of: state.sampleCount) { _, _ in reload() }
         .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload() }
         .onChange(of: state.commandCenterLastSyncAt) { _, _ in reload() }
+    }
+
+    /// A report cell asked for a day; a Review stretch asked for a moment in it.
+    private func consumeTimelineTarget() {
+        guard let target = state.timelineTargetDay else { return }
+        state.timelineTargetDay = nil
+        let start = Calendar.current.startOfDay(for: target)
+        pendingFocus = target > start ? target : nil
+        if day == start { reload() } else { day = start }   // onChange(of: day) reloads
+    }
+
+    private func focusPendingBlock() {
+        guard let at = pendingFocus else { return }
+        pendingFocus = nil
+        let candidates = bundle.foreground + bundle.calls + bundle.calendar + bundle.claudeCode
+        guard let block = candidates.first(where: { !$0.isIdle && $0.startedAt <= at && at < $0.endedAt }) else { return }
+        closeAgendaPopover()
+        selectedBlock = block
     }
 
     // MARK: - Day stats
@@ -144,14 +180,38 @@ struct TimelineView: View {
         let f = DateFormatter(); f.dateFormat = "HH:mm"; return f
     }()
 
-    /// Non-idle blocks across all visible tracks, ordered for the agenda list.
-    /// Reads the cache; recomputed only in `recomputeDerived()`.
-    private var agendaBlocks: [TimelineBlock] { cachedAgendaBlocks }
+    /// One agenda row: every non-idle block of the day that shares a repo,
+    /// host, app, meeting or call, so a repo touched five times is one line
+    /// with one "Attribute all 5" instead of five buttons.
+    struct AgendaGroup: Identifiable {
+        let id: String
+        let blocks: [TimelineBlock]       // sorted by start
+        var first: TimelineBlock { blocks[0] }
+        var total: TimeInterval { blocks.reduce(0) { $0 + $1.durationSeconds } }
+        var isIgnored: Bool { blocks.allSatisfy(\.isIgnored) }
+    }
 
-    private func computeAgendaBlocks() -> [TimelineBlock] {
-        allTracks.flatMap { blocks(for: $0) }
-            .filter { !$0.isIdle }
-            .sorted { $0.startedAt < $1.startedAt }
+    /// Reads the cache; recomputed only in `recomputeDerived()`.
+    private var agendaGroups: [AgendaGroup] { cachedAgendaGroups }
+
+    private func computeAgendaGroups() -> [AgendaGroup] {
+        var groups: [String: [TimelineBlock]] = [:]
+        for b in allTracks.flatMap({ blocks(for: $0) }) where !b.isIdle {
+            groups[groupKey(b), default: []].append(b)
+        }
+        return groups.map { AgendaGroup(id: $0.key, blocks: $0.value.sorted { $0.startedAt < $1.startedAt }) }
+            .sorted { $0.first.startedAt < $1.first.startedAt }
+    }
+
+    private func groupKey(_ b: TimelineBlock) -> String {
+        switch b.source {
+        case .calendarEvent(let id): return "evt:\(id)"
+        case .micSession(let id):    return "call:\(id)"
+        case .claudeSession:         return "agent:\(b.ruleSignal?.pattern ?? b.title)"   // the repo, not a folder name two repos can share
+        case .foregroundSamples:
+            if let sig = b.ruleSignal { return "fg:\(sig.kind.rawValue):\(sig.pattern)" }
+            return "fg:\(b.title)"
+        }
     }
 
     /// Cached row height for a track (falls back to a fresh compute before the
@@ -165,16 +225,18 @@ struct TimelineView: View {
         var heights: [TimelineBlock.Track: CGFloat] = [:]
         for t in TimelineBlock.Track.allCases { heights[t] = rowHeight(for: t) }
         cachedRowHeights = heights
-        cachedAgendaBlocks = computeAgendaBlocks()
+        cachedAgendaGroups = computeAgendaGroups()
     }
 
     @ViewBuilder
     private var dayStats: some View {
-        let active = agendaBlocks.reduce(0.0) { $0 + $1.durationSeconds }
         HStack(spacing: 28) {
-            stat(durationLabel(active), "active today")
-            stat("\(agendaBlocks.count)", "sources")
-            stat("\(allTracks.count)", "tracks")
+            stat(durationLabel(dayActiveSeconds), "active")
+            stat(durationLabel(dayAttributedSeconds), "attributed")
+                .help("Hours credited to customers, as the report counts them. Meetings bill their booked length and a call during a meeting bills on top, so this can exceed active time at the keyboard.")
+            stat(durationLabel(dayOpenSeconds),
+                 dayOpenCount == 0 ? "open" : "open · \(dayOpenCount) item\(dayOpenCount == 1 ? "" : "s")")
+            stat(durationLabel(dayMeetingSeconds), "in meetings")
         }
     }
 
@@ -216,7 +278,8 @@ struct TimelineView: View {
                     .padding(.trailing, 12)
                     .padding(.bottom, 12)
                 }
-                .scrollIndicators(.hidden)
+                // .never, not .hidden: on macOS .hidden still draws the bar while a mouse is connected.
+                .scrollIndicators(.never)
                 .background(
                     TimelineScrollZoom { deltaY in
                         let factor = pow(1.01, deltaY)
@@ -243,38 +306,29 @@ struct TimelineView: View {
     @ViewBuilder
     private var agendaSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Timeline · \(dayLabel)")
+            Text("Agenda · grouped by repo, meeting and call")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.tertiary)
                 .textCase(.uppercase)
-            if agendaBlocks.isEmpty {
+            if agendaGroups.isEmpty {
                 Text("No activity recorded for this day yet.")
                     .font(.callout).foregroundStyle(.secondary)
                     .padding(.vertical, 12)
             } else {
-                ForEach(agendaBlocks) { block in
-                    agendaRow(block)
+                ForEach(agendaGroups) { group in
+                    agendaGroupRow(group)
                 }
             }
         }
     }
 
     @ViewBuilder
-    private func agendaRow(_ block: TimelineBlock) -> some View {
+    private func agendaGroupRow(_ group: AgendaGroup) -> some View {
+        let block = group.first
         let tint = color(for: block)
-        let attributed = block.attribution.customer != nil
+        let openCount = group.blocks.filter { $0.attribution.customer == nil }.count
+        let attributed = openCount == 0
         HStack(spacing: 14) {
-            VStack(alignment: .trailing, spacing: 2) {
-                Text("\(Self.hhmm.string(from: block.startedAt))–\(Self.hhmm.string(from: block.endedAt))")
-                    .font(.system(size: 12.5, weight: .semibold)).monospacedDigit()
-                    .foregroundStyle(.secondary)
-                Text(durationLabel(block.durationSeconds))
-                    .font(.system(size: 11)).foregroundStyle(.tertiary).monospacedDigit()
-            }
-            .frame(width: 104, alignment: .trailing)
-
-            RoundedRectangle(cornerRadius: 3).fill(tint).frame(width: 4, height: 38)
-
             ZStack {
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
                     .fill(tint.opacity(attributed ? 0.18 : 0.10))
@@ -285,51 +339,154 @@ struct TimelineView: View {
             .frame(width: 38, height: 38)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(block.title).font(.system(size: 14.5, weight: .semibold)).lineLimit(1)
-                if let sub = block.subtitle {
-                    Text(sub).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
+                Text(groupTitle(group)).font(.system(size: 14.5, weight: .semibold)).lineLimit(1)
+                Text(groupSubtitle(group)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 8)
 
-            if attributed {
+            if group.isIgnored {
+                Text(ignoredTag(block))
+                    .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.secondary)
+            } else if attributed {
                 HStack(spacing: 7) {
                     Circle().fill(tint).frame(width: 10, height: 10)
-                    Text(agendaAttributionLabel(block))
+                    Text(groupAttributionLabel(group))
                         .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.secondary)
                 }
             } else {
-                Button("Attribute") { selectedBlock = nil; agendaBlock = block }
-                    .font(.system(size: 12, weight: .semibold))
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
+                Text(openCount == group.blocks.count ? "Unattributed" : "\(openCount) of \(group.blocks.count) unattributed")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let app = appOnlyBundleID(block) {
+                    Button("Ignore app") { hideApp(app) }.controlSize(.small)
+                }
+                Button(group.blocks.count > 1 ? "Attribute all \(group.blocks.count)" : "Attribute") {
+                    openAgendaPopover(group)
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
         .glassCard(radius: 16)
+        .opacity(group.isIgnored ? 0.55 : 1)
         .contentShape(Rectangle())
-        // Clear the Gantt-strip selection so the two popovers can never both open.
-        .onTapGesture { selectedBlock = nil; agendaBlock = block }
-        .popover(isPresented: agendaPopoverBinding(block)) {
-            ReattributePopover(block: block,
+        .onTapGesture { openAgendaPopover(group) }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(groupTitle(group)), \(groupSubtitle(group)), \(group.isIgnored ? ignoredTag(block) : (attributed ? groupAttributionLabel(group) : "Unattributed"))")
+        .accessibilityAction(named: "Open") { openAgendaPopover(group) }
+        .popover(isPresented: agendaPopoverBinding(group.id)) {
+            ReattributePopover(block: agendaBlock ?? block,
                                customers: customers,
                                projects: projects,
                                state: state,
-                               onSaved: { agendaBlock = nil; reload() },
-                               onCancel: { agendaBlock = nil },
-                               onIgnored: { event in agendaBlock = nil; stageUndo(event) })
+                               onSaved: { closeAgendaPopover(); reload() },
+                               onCancel: { closeAgendaPopover() },
+                               onIgnored: { event in closeAgendaPopover(); stageUndo(event) },
+                               extraSessionIDs: agendaSessionIDs)
         }
     }
 
-    private func agendaPopoverBinding(_ block: TimelineBlock) -> Binding<Bool> {
-        Binding(get: { agendaBlock?.id == block.id },
-                set: { if !$0 { agendaBlock = nil } })
+    /// Clear the Gantt-strip selection so the two popovers can never both open.
+    /// A multi-block foreground group edits one synthesized block covering
+    /// every sample, so "Just this" reaches all of them; an agent group edits
+    /// its first session and hands the popover the other session ids so a
+    /// pin reaches every session the row claims.
+    private func openAgendaPopover(_ group: AgendaGroup) {
+        selectedBlock = nil
+        agendaBlock = groupBlock(group)
+        agendaSessionIDs = group.blocks.dropFirst().compactMap { b in
+            if case .claudeSession(let id) = b.source { return id } else { return nil }
+        }
+        agendaGroupID = group.id
+    }
+
+    private func closeAgendaPopover() {
+        agendaGroupID = nil
+        agendaBlock = nil
+        agendaSessionIDs = []
+    }
+
+    private func groupBlock(_ group: AgendaGroup) -> TimelineBlock {
+        let first = group.first
+        guard group.blocks.count > 1, case .foregroundSamples = first.source else { return first }
+        let ids = group.blocks.flatMap { b -> [Int64] in
+            if case .foregroundSamples(let ids) = b.source { return ids } else { return [] }
+        }
+        return TimelineBlock(
+            id: "group-\(group.id)", track: first.track, source: .foregroundSamples(ids: ids),
+            startedAt: first.startedAt, endedAt: group.blocks.last?.endedAt ?? first.endedAt,
+            title: groupTitle(group), subtitle: "\(group.blocks.count) stretches",
+            attribution: first.attribution, eventAttribution: nil,
+            hasManualOverride: group.blocks.contains(where: \.hasManualOverride), isIdle: false,
+            appBundleID: first.appBundleID, seriesMasterID: nil,
+            ruleSignal: first.ruleSignal, isIgnored: first.isIgnored)
+    }
+
+    private func agendaPopoverBinding(_ groupID: String) -> Binding<Bool> {
+        Binding(get: { agendaGroupID == groupID },
+                set: { if !$0 { closeAgendaPopover() } })
+    }
+
+    private func groupTitle(_ group: AgendaGroup) -> String {
+        let b = group.first
+        if case .foregroundSamples = b.source, let sig = b.ruleSignal, sig.kind != .appBundleID {
+            return sig.pattern      // the repo or host the stretches share
+        }
+        return b.title
+    }
+
+    private func groupSubtitle(_ group: AgendaGroup) -> String {
+        let f = Self.hhmm
+        if group.blocks.count == 1 {
+            let b = group.first
+            var parts = ["\(f.string(from: b.startedAt))–\(f.string(from: b.endedAt))", durationLabel(b.durationSeconds)]
+            if let sub = b.subtitle { parts.append(sub) }
+            return parts.joined(separator: " · ")
+        }
+        let noun: String
+        switch group.first.source {
+        case .claudeSession:     noun = "sessions"
+        case .foregroundSamples: noun = "stretches"
+        default:                 noun = "blocks"
+        }
+        let starts = group.blocks.prefix(3).map { f.string(from: $0.startedAt) }.joined(separator: ", ")
+        return "\(group.blocks.count) \(noun) · \(starts)\(group.blocks.count > 3 ? "…" : "") · \(durationLabel(group.total)) total"
+    }
+
+    private func groupAttributionLabel(_ group: AgendaGroup) -> String {
+        let keys = Set(group.blocks.map { "\($0.attribution.customer?.id ?? "")/\($0.attribution.project?.id ?? "")" })
+        if keys.count > 1 { return "Mixed" }
+        return agendaAttributionLabel(group.first)
     }
 
     private func agendaAttributionLabel(_ block: TimelineBlock) -> String {
         guard let c = block.attribution.customer else { return "Unattributed" }
         if let p = block.attribution.project { return "\(c.name) · \(p.name)" }
         return c.name
+    }
+
+    private func ignoredTag(_ block: TimelineBlock) -> String {
+        switch block.track {
+        case .calendar: return "Ignored"
+        case .calls:    return "Ignored call"
+        default:        return "Ignored repo"
+        }
+    }
+
+    /// Foreground time with no repo or site: an app rule is the only handle.
+    private func appOnlyBundleID(_ block: TimelineBlock) -> String? {
+        guard block.track == .foreground, let sig = block.ruleSignal, sig.kind == .appBundleID else { return nil }
+        return sig.pattern
+    }
+
+    private func hideApp(_ bundleID: String) {
+        do {
+            try state.database.hideSignal(kind: .appBundleID, value: bundleID)
+            reload()
+        } catch {
+            loadError = error.localizedDescription
+        }
     }
 
     // MARK: - Header
@@ -342,9 +499,12 @@ struct TimelineView: View {
             DateNavigator(
                 title: dayLabel,
                 nowLabel: "Today",
-                prevHelp: "Previous day",
-                nextHelp: "Next day",
+                prevHelp: "Previous day (⌘←)",
+                nextHelp: "Next day (⌘→)",
                 nowDisabled: isToday,
+                prevShortcut: KeyboardShortcut(.leftArrow, modifiers: .command),
+                nextShortcut: KeyboardShortcut(.rightArrow, modifiers: .command),
+                nowShortcut: KeyboardShortcut("t", modifiers: .command),
                 onPrev: { day = Calendar.current.date(byAdding: .day, value: -1, to: day) ?? day },
                 onNext: { day = Calendar.current.date(byAdding: .day, value: 1, to: day) ?? day },
                 onNow: { day = Calendar.current.startOfDay(for: Date()) }
@@ -353,8 +513,7 @@ struct TimelineView: View {
             if let err = loadError {
                 Text(err).font(.caption).foregroundStyle(.red).lineLimit(1)
             }
-            foregroundLaneToggle
-            showHiddenToggle
+            lanesMenu
             legendButton
             zoomControls
         }
@@ -362,31 +521,31 @@ struct TimelineView: View {
         .padding(.vertical, 10)
     }
 
+    /// Which lanes are drawn, plus the hidden/ignored reveal — one labelled
+    /// menu in place of two unlabelled icon toggles.
     @ViewBuilder
-    private var foregroundLaneToggle: some View {
-        Button {
-            showForeground.toggle()
+    private var lanesMenu: some View {
+        Menu {
+            ForEach(TimelineBlock.Track.allCases, id: \.self) { track in
+                Toggle(track.label, isOn: laneBinding(track))
+            }
+            Divider()
+            Toggle("Show hidden apps and hosts, ignored meetings and calls", isOn: $showHidden)
+                .disabled(!hasHiddenContent)
         } label: {
-            Image(systemName: showForeground ? "macwindow.on.rectangle" : "macwindow")
-                .foregroundStyle(showForeground ? Color.accentColor : .secondary)
+            Label("Lanes", systemImage: "rectangle.split.3x1")
         }
-        .help(showForeground
-              ? "Hide the foreground app lane"
-              : "Show the foreground app lane (per-app activity from your samples)")
+        .fixedSize()
+        .help("Choose which lanes to show")
     }
 
-    @ViewBuilder
-    private var showHiddenToggle: some View {
-        Button {
-            showHidden.toggle()
-        } label: {
-            Image(systemName: showHidden ? "eye" : "eye.slash")
-                .foregroundStyle(showHidden ? Color.accentColor : .secondary)
-        }
-        .help(showHidden
-              ? "Hide hidden apps, hosts and ignored meetings"
-              : "Show hidden apps, hosts and ignored meetings")
-        .disabled(!hasHiddenContent)
+    private func laneBinding(_ track: TimelineBlock.Track) -> Binding<Bool> {
+        Binding(get: { !hiddenLanes.contains(track) },
+                set: { on in
+                    var set = hiddenLanes
+                    if on { set.remove(track) } else { set.insert(track) }
+                    hiddenLanesRaw = set.map(\.rawValue).sorted().joined(separator: ",")
+                })
     }
 
     @ViewBuilder
@@ -458,8 +617,8 @@ struct TimelineView: View {
             )
             legendRow(
                 blockSwatch(fill: .gray, border: .secondary.opacity(0.7), dash: true, opacity: 0.6),
-                "Ignored meeting",
-                "Dashed grey and faded — excluded from the report. Shown only with the eye toggle on."
+                "Ignored",
+                "Dashed grey and faded — work in an ignored repo, or an ignored meeting or call (shown with the Lanes menu's reveal on). Excluded from the report."
             )
             legendRow(idleSwatch, "Idle", "Thin bar along the bottom — no input during this stretch.")
             legendRow(nowSwatch, "Now", "Red line marks the current time (today only).")
@@ -631,6 +790,7 @@ struct TimelineView: View {
     private func trackTint(_ track: TimelineBlock.Track) -> Color {
         switch track {
         case .calendar:   return .blue
+        case .calls:      return .orange
         case .foreground: return .green
         case .claudeCode: return .pink
         }
@@ -639,6 +799,7 @@ struct TimelineView: View {
     private func trackIcon(_ track: TimelineBlock.Track) -> String {
         switch track {
         case .calendar:   return "calendar"
+        case .calls:      return "mic.fill"
         case .foreground: return "macwindow"
         case .claudeCode: return "sparkles"
         }
@@ -647,6 +808,7 @@ struct TimelineView: View {
     private func blocks(for track: TimelineBlock.Track) -> [TimelineBlock] {
         switch track {
         case .calendar:   return bundle.calendar
+        case .calls:      return bundle.calls
         case .foreground: return bundle.foreground
         case .claudeCode: return bundle.claudeCode
         }
@@ -854,11 +1016,14 @@ struct TimelineView: View {
                               style: borderStrokeStyle(for: block))
         )
         .shadow(color: tint.opacity(0.18), radius: 1.5, x: 0, y: 0.5)
-        .opacity(isIgnoredMeetingBlock(block) ? 0.6 : 1.0)
+        .opacity(block.isIgnored ? 0.6 : 1.0)
         .contentShape(Rectangle())
-        .onTapGesture { agendaBlock = nil; selectedBlock = block }
+        .onTapGesture { closeAgendaPopover(); selectedBlock = block }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(tooltip(for: block))
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { closeAgendaPopover(); selectedBlock = block }
         .help(tooltip(for: block))
-        .offset(x: x, y: yPos)
         .popover(isPresented: bindingForPopover(block)) {
             ReattributePopover(block: block,
                                customers: customers,
@@ -873,6 +1038,9 @@ struct TimelineView: View {
                                    stageUndo(event)
                                })
         }
+        // `.position` moves the layout frame (unlike `.offset`), so the popover
+        // above anchors to the block instead of the row's origin.
+        .position(x: x + w / 2, y: yPos + height / 2)
     }
 
     @ViewBuilder
@@ -930,7 +1098,9 @@ struct TimelineView: View {
                 glyph("macwindow")
             }
         case .calendar:
-            glyph(isIgnoredMeetingBlock(block) ? "eye.slash" : "calendar")
+            glyph(block.isIgnored ? "eye.slash" : "calendar")
+        case .calls:
+            glyph(block.isIgnored ? "eye.slash" : "mic.fill")
         case .claudeCode:
             glyph("sparkles")
         }
@@ -970,10 +1140,16 @@ struct TimelineView: View {
         f.dateFormat = "HH:mm"
         let range = "\(f.string(from: block.startedAt))–\(f.string(from: block.endedAt))"
         let attr: String
-        if isIgnoredMeetingBlock(block) {
-            attr = block.eventAttribution == .ignored(source: .series)
-                ? "Ignored (series) — click to restore"
-                : "Ignored — click to restore"
+        if block.isIgnored {
+            switch block.track {
+            case .calendar:
+                attr = block.eventAttribution == .ignored(source: .series)
+                    ? "Ignored (series) — click to restore" : "Ignored — click to restore"
+            case .calls:
+                attr = "Ignored call — restore in Review's Ignored filter"
+            default:
+                attr = "Ignored repo — restore in Review's Ignored filter"
+            }
         } else if let c = block.attribution.customer {
             let base = block.attribution.project.map { "\(c.name) · \($0.name)" } ?? c.name
             if block.track == .claudeCode {
@@ -999,20 +1175,20 @@ struct TimelineView: View {
     }
 
     /// Calendar block whose event/series is currently ignored. Only emitted
-    /// when the eye toggle is on (see `TimelineBuilder.build`).
+    /// when the reveal toggle is on (see `TimelineBuilder.build`).
     private func isIgnoredMeetingBlock(_ block: TimelineBlock) -> Bool {
-        block.eventAttribution?.isIgnored == true
+        block.track == .calendar && block.isIgnored
     }
 
     private func borderColor(for block: TimelineBlock, tint: Color) -> Color {
-        if isIgnoredMeetingBlock(block) { return Color.secondary.opacity(0.7) }
+        if block.isIgnored { return Color.secondary.opacity(0.7) }
         if block.hasManualOverride { return Color.white.opacity(0.85) }
         if isUnmatchedClaudeBlock(block) { return Color.orange.opacity(0.7) }
         return tint.opacity(0.55)
     }
 
     private func borderStrokeStyle(for block: TimelineBlock) -> StrokeStyle {
-        if isIgnoredMeetingBlock(block) {
+        if block.isIgnored {
             return StrokeStyle(lineWidth: 1.0, dash: [3, 3])
         }
         if block.hasManualOverride {
@@ -1040,7 +1216,7 @@ struct TimelineView: View {
     }
 
     private func color(for block: TimelineBlock) -> Color {
-        if isIgnoredMeetingBlock(block) { return .gray }
+        if block.isIgnored { return .gray }
         if let project = block.attribution.project, let c = Color(hex: project.displayColor) { return c }
         if let customer = block.attribution.customer, let c = Color(hex: customer.displayColor) { return c }
         return block.attribution.customer != nil ? .blue : trackTint(block.track).opacity(0.85)
@@ -1059,33 +1235,44 @@ struct TimelineView: View {
             projects = try state.database.allProjects()
             let hidden = try state.database.allHiddenSignals()
             hasIgnoredMeetings = events.contains { matcher.attribute(event: $0).isIgnored }
-            hasHiddenSignals = !hidden.isEmpty
-            let samples: [ActivitySample]
-            if showHidden || hidden.isEmpty {
-                samples = allSamples
-            } else {
-                let hiddenApps = Set(hidden.filter { $0.kind == .appBundleID }.map { $0.value })
-                let hiddenHosts = Set(hidden.filter { $0.kind == .urlHost }.map { $0.value })
-                samples = allSamples.filter { sample in
-                    if let bid = sample.appBundleID, hiddenApps.contains(bid) { return false }
-                    if let host = sample.chromeHost, hiddenHosts.contains(host) { return false }
-                    return true
-                }
-            }
+                || micSessions.contains { $0.isIgnored }
+            // Ignored repos are always drawn (dimmed), so only hidden apps and
+            // hosts make the reveal toggle change anything.
+            hasHiddenSignals = hidden.contains { $0.kind == .appBundleID || $0.kind == .urlHost }
+            let samples = showHidden ? allSamples : TimelineBuilder.visibleSamples(allSamples, hidden: hidden)
+            let idleThreshold = TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60)
             bundle = TimelineBuilder.build(
                 day: dayInterval,
                 samples: samples,
                 events: events,
                 sessions: sessions,
                 claudeDeltas: claudeDeltas,
+                micSessions: micSessions,
                 matcher: matcher,
                 sampleIntervalSeconds: AppSettings.sampleIntervalSeconds,
-                claudeIdleThresholdSeconds: TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60),
-                includeIgnoredEvents: showHidden,
-                includeIgnoredRepos: showHidden
+                claudeIdleThresholdSeconds: idleThreshold,
+                includeIgnoredEvents: showHidden
             )
+            // Day stats from the report's own engine over just this day, so
+            // "attributed" here is the report's day column, and "open" is
+            // Review's backlog for the day.
+            let report = WeeklyReport.compute(
+                week: dayInterval, samples: allSamples, events: events, sessions: sessions,
+                claudeDeltas: claudeDeltas, micSessions: micSessions,
+                idleThresholdSeconds: idleThreshold, matcher: matcher,
+                sampleIntervalSeconds: AppSettings.sampleIntervalSeconds, rounding: AppSettings.reportRounding)
+            dayActiveSeconds = report.activeHours * 3600
+            dayAttributedSeconds = report.grandTotal * 3600
+            let open = try ReviewQueue.build(
+                database: state.database, interval: dayInterval,
+                sampleIntervalSeconds: AppSettings.sampleIntervalSeconds,
+                idleThresholdSeconds: idleThreshold, minMinutes: AppSettings.reviewMinMinutes)
+            dayOpenCount = open.count
+            dayOpenSeconds = open.reduce(0) { $0 + $1.totalSeconds }
+            dayMeetingSeconds = bundle.calendar.filter { !$0.isIgnored }.reduce(0) { $0 + $1.durationSeconds }
             recomputeDerived()
             loadError = nil
+            focusPendingBlock()
         } catch {
             loadError = error.localizedDescription
         }
@@ -1211,10 +1398,12 @@ private struct ReattributePopover: View {
     /// Fires after a successful ignore so the Timeline can stage an undo
     /// toast. Restore actions don't fire this — restore *is* the undo.
     let onIgnored: (MeetingIgnoreEvent) -> Void
+    /// Further coding sessions a "Just this" pin must reach (an agenda group).
+    var extraSessionIDs: [String] = []
 
     @State private var selectedCustomerID: String = ""
     @State private var selectedProjectID: String = ""
-    @State private var scope: AttributionScope = .justThis
+    @State private var scope: AttributionScope = .always
     @State private var error: String?
     @State private var confirmingSeriesIgnore: Bool = false
 
@@ -1269,7 +1458,7 @@ private struct ReattributePopover: View {
             if showsScope {
                 AttributionScopePicker(
                     scope: $scope,
-                    options: [.justThis, .today, .thisWeek, .always],
+                    options: AttributionScope.allCases,
                     hint: scope == .justThis
                         ? "Attributes just this block."
                         : "Creates a \(scope == .always ? "permanent" : scope.label.lowercased()) rule for \(block.ruleSignal?.pattern ?? "this signal").")
@@ -1344,14 +1533,14 @@ private struct ReattributePopover: View {
                 systemImage: "checkmark.seal.fill",
                 tint: .green,
                 primary: "Attributed via your \(repoName) rule.",
-                secondary: "Already counted as \(displayName(customer: customer, project: block.attribution.project)) in the weekly report. Only pick a customer here if this specific session should go somewhere different."
+                secondary: "Already counted as \(displayName(customer: customer, project: block.attribution.project)) in the weekly report. To move only this session, pick a customer below and choose Just this."
             )
         } else {
             attributionBanner(
                 systemImage: "exclamationmark.triangle.fill",
                 tint: .orange,
                 primary: "Not matched by any rule.",
-                secondary: "Either assign \(repoName) in Review (covers every session in this repo) or pick a customer below to attribute just this session."
+                secondary: "Pick a customer below — Always teaches a rule for \(repoName); Just this attributes only this session."
             )
         }
     }
@@ -1489,6 +1678,15 @@ private struct ReattributePopover: View {
                 .keyboardShortcut(.defaultAction)
                 .help("Override the series ignore for just this occurrence.")
             } else {
+                // On a recurring meeting the series is the default action and
+                // takes Return; the per-occurrence save is the exception.
+                Button("Save for this meeting") {
+                    applyEvent(
+                        customerID: selectedCustomerID.isEmpty ? nil : selectedCustomerID,
+                        projectID: selectedProjectID.isEmpty ? nil : selectedProjectID
+                    )
+                }
+                .keyboardShortcut(hasSeries ? nil : .defaultAction)
                 if hasSeries {
                     Button("Apply to series") {
                         applySeries(
@@ -1497,15 +1695,9 @@ private struct ReattributePopover: View {
                         )
                     }
                     .disabled(selectedCustomerID.isEmpty)
+                    .keyboardShortcut(.defaultAction)
                     .help("Save this attribution for every occurrence of the series.")
                 }
-                Button("Save for this meeting") {
-                    applyEvent(
-                        customerID: selectedCustomerID.isEmpty ? nil : selectedCustomerID,
-                        projectID: selectedProjectID.isEmpty ? nil : selectedProjectID
-                    )
-                }
-                .keyboardShortcut(.defaultAction)
             }
         }
     }
@@ -1561,9 +1753,11 @@ private struct ReattributePopover: View {
             case .calendarEvent(let id):
                 try state.database.setCalendarEventAttribution(eventID: id, customerID: customerID, projectID: projectID)
             case .claudeSession(let id):
-                try state.database.setClaudeSessionAttribution(sessionID: id, customerID: customerID, projectID: projectID)
+                try state.database.setClaudeSessionAttribution(sessionIDs: [id] + extraSessionIDs, customerID: customerID, projectID: projectID)
             case .foregroundSamples(let ids):
                 try state.database.setSampleAttribution(sampleIDs: ids, customerID: customerID, projectID: projectID)
+            case .micSession(let id):
+                try state.database.setMicSessionAttribution(id: id, customerID: customerID, projectID: projectID)
             }
             onSaved()
         } catch let e {

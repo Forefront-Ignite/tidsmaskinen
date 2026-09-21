@@ -88,6 +88,10 @@ enum AppTheme: String, CaseIterable, Identifiable {
 extension SettingsKey {
     static let appearance = "appearance"
     static let reviewMinMinutes = "reviewMinMinutes"
+    /// Days without a calendar sync before the tray and Setup pane warn (default 2).
+    static let calendarStaleDays = "calendarStaleDays"
+    /// `ReportRounding` raw value for the weekly report (default nearest).
+    static let reportRounding = "reportRounding"
 }
 
 extension AppSettings {
@@ -103,6 +107,15 @@ extension AppSettings {
         if defaults.object(forKey: SettingsKey.reviewMinMinutes) == nil { return 5 }
         return max(0, defaults.integer(forKey: SettingsKey.reviewMinMinutes))
     }
+
+    static var calendarStaleDays: Int {
+        if defaults.object(forKey: SettingsKey.calendarStaleDays) == nil { return 2 }
+        return max(1, defaults.integer(forKey: SettingsKey.calendarStaleDays))
+    }
+
+    static var reportRounding: ReportRounding {
+        defaults.string(forKey: SettingsKey.reportRounding).flatMap(ReportRounding.init(rawValue:)) ?? .nearest
+    }
 }
 
 // MARK: - Attribution scope
@@ -110,9 +123,10 @@ extension AppSettings {
 /// Shared "how long does this attribution apply" choice, used by Review,
 /// Discover, Calls and My day. `justThis` is a precise per-occurrence override
 /// (no rule); `today`/`thisWeek` create a time-bounded rule; `always` a
-/// permanent rule.
+/// permanent rule. Cases run broad → specific so `allCases` renders with the
+/// durable choice leftmost; every picker defaults to `.always`.
 enum AttributionScope: String, CaseIterable, Identifiable {
-    case justThis, today, thisWeek, always
+    case always, thisWeek, today, justThis
     var id: String { rawValue }
 
     var label: String {
@@ -246,7 +260,11 @@ struct AppMark: View {
     /// Monochrome template image of the mark for the menu-bar tray. A SwiftUI
     /// `Canvas` doesn't render as a `MenuBarExtra` label, so we draw an NSImage
     /// and mark it `isTemplate` so macOS tints it for the menu bar appearance.
-    static let trayImage: NSImage = {
+    static let trayImage: NSImage = makeTrayImage(alert: false)
+    /// The same mark with a dot at the top right — a broken capture source.
+    static let trayImageAlert: NSImage = makeTrayImage(alert: true)
+
+    private static func makeTrayImage(alert: Bool) -> NSImage {
         let s: CGFloat = 18
         let img = NSImage(size: NSSize(width: s, height: s))
         img.lockFocus()
@@ -275,10 +293,14 @@ struct AppMark: View {
         let hub = s * 0.075
         NSColor.black.setFill()
         NSBezierPath(ovalIn: CGRect(x: center.x - hub, y: center.y - hub, width: hub * 2, height: hub * 2)).fill()
+        if alert {
+            let d = s * 0.30
+            NSBezierPath(ovalIn: CGRect(x: s - d, y: s - d, width: d, height: d)).fill()
+        }
         img.unlockFocus()
         img.isTemplate = true
         return img
-    }()
+    }
 
     /// The colorful identity squircle used for the app icon / brand chip.
     static func badge(size: CGFloat = 34) -> some View {

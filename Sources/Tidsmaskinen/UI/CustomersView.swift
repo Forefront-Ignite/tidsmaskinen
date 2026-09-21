@@ -8,9 +8,28 @@ struct CustomersView: View {
     @State private var selectedCustomerID: String?
     @State private var newCustomerName: String = ""
     @State private var newProjectName: String = ""
-    @State private var showingAddRule = false
+    @State private var ruleSheet: RuleEdit?
+    @State private var allRules: [Rule] = []
+    @State private var groupPendingPermanent: RuleStack?
     @State private var loadError: String?
     @State private var customerPendingDeletion: Customer?
+
+    /// What the rule sheet edits: a new rule or an existing one.
+    struct RuleEdit: Identifiable {
+        let rule: Rule?
+        var id: String { rule?.id ?? "new" }
+    }
+
+    /// Every rule for one (kind, pattern) of the selected customer. Several
+    /// week-bounded rules on the same pattern are one stack, drawn as one row.
+    struct RuleStack: Identifiable {
+        let kind: Rule.Kind
+        let pattern: String
+        let rules: [Rule]          // newest first
+        var id: String { "\(kind.rawValue):\(pattern)" }
+        var permanent: Rule? { rules.first { !$0.isTemporary } }
+        var bounded: [Rule] { rules.filter(\.isTemporary) }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -93,22 +112,13 @@ struct CustomersView: View {
     private var customerSidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             List(selection: $selectedCustomerID) {
-                ForEach(customers) { customer in
-                    CustomerSidebarRow(customer: customer) {
-                        customerPendingDeletion = customer
-                    }
-                    .tag(customer.id)
-                    .contextMenu {
-                        if customer.isExternal {
-                            Text("Synced from Command Center")
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Button("Delete", role: .destructive) {
-                                customerPendingDeletion = customer
-                            }
-                        }
-                    }
+                let external = customers.filter(\.isExternal), local = customers.filter { !$0.isExternal }
+                if !external.isEmpty {
+                    Section { ForEach(external) { customer in sidebarRow(customer) } }
+                        header: { sectionHeader("From Command Center", count: external.count) }
                 }
+                Section { ForEach(local) { customer in sidebarRow(customer) } }
+                    header: { sectionHeader("Local", count: local.count) }
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
@@ -127,6 +137,21 @@ struct CustomersView: View {
     }
 
     @ViewBuilder
+    private func sidebarRow(_ customer: Customer) -> some View {
+        CustomerSidebarRow(customer: customer) {
+            customerPendingDeletion = customer
+        }
+        .tag(customer.id)
+        .contextMenu {
+            if customer.isExternal {
+                Text("Synced from Command Center").foregroundStyle(.secondary)
+            } else {
+                Button("Delete", role: .destructive) { customerPendingDeletion = customer }
+            }
+        }
+    }
+
+    @ViewBuilder
     private var customerDetail: some View {
         if let customerID = selectedCustomerID,
            let customer = customers.first(where: { $0.id == customerID }) {
@@ -139,14 +164,13 @@ struct CustomersView: View {
                         SourceChip(isCommandCenter: customer.isExternal)
                         Spacer()
                         if customer.isExternal {
-                            Label("Read-only · managed in Command Center", systemImage: "info.circle")
+                            Label("Name, colour and projects are managed in Command Center", systemImage: "info.circle")
                                 .font(.caption).foregroundStyle(.secondary)
-                        } else {
-                            Button {
-                                showingAddRule = true
-                            } label: {
-                                Label("Add rule", systemImage: "plus")
-                            }
+                        }
+                        Button {
+                            ruleSheet = RuleEdit(rule: nil)
+                        } label: {
+                            Label("Add rule", systemImage: "plus")
                         }
                     }
 
@@ -155,14 +179,30 @@ struct CustomersView: View {
                 }
                 .padding(26)
             }
-            .sheet(isPresented: $showingAddRule) {
+            .sheet(item: $ruleSheet) { edit in
                 AddRuleSheet(
                     customerID: customer.id,
-                    availableProjects: customerProjects
+                    availableProjects: customerProjects,
+                    existing: edit.rule,
+                    database: state.database
                 ) { rule in
-                    try state.database.upsert(rule)
+                    // Same (kind, pattern, window) replaces rather than duplicates.
+                    try state.database.upsertReplacingWindow(rule)
                     reload()
                 }
+            }
+            .confirmationDialog(
+                "Make “\(groupPendingPermanent?.pattern ?? "")” permanent?",
+                isPresented: Binding(get: { groupPendingPermanent != nil }, set: { if !$0 { groupPendingPermanent = nil } }),
+                titleVisibility: .visible
+            ) {
+                Button("Replace \(groupPendingPermanent?.bounded.count ?? 0) week-bounded rules") {
+                    if let g = groupPendingPermanent { makePermanent(g, customer: customer) }
+                    groupPendingPermanent = nil
+                }
+                Button("Cancel", role: .cancel) { groupPendingPermanent = nil }
+            } message: {
+                Text(makePermanentPreview(groupPendingPermanent))
             }
         } else {
             ContentUnavailableView(
@@ -235,12 +275,47 @@ struct CustomersView: View {
         .init(title: "Apps", icon: "app", kinds: [.appBundleID]),
         .init(title: "Window titles", icon: "macwindow", kinds: [.windowTitle]),
         .init(title: "Slack channels", icon: "number", kinds: [.slackChannel]),
+        .init(title: "Call participants", icon: "person.crop.circle", kinds: [.participant]),
     ]
+
+    /// This customer's rules grouped by (kind, pattern), newest first.
+    private var ruleStacks: [RuleStack] {
+        let grouped = Dictionary(grouping: rules) { "\($0.kind.rawValue):\($0.pattern)" }
+        return grouped.values.map { rs in
+            let sorted = rs.sorted { $0.createdAt > $1.createdAt }
+            return RuleStack(kind: sorted[0].kind, pattern: sorted[0].pattern, rules: sorted)
+        }
+        .sorted { $0.pattern < $1.pattern }
+    }
+
+    /// (kind, pattern) keys of this customer that another customer also claims.
+    /// The most specific rule wins at match time, so these decide hours silently.
+    private var conflictingKeys: Set<String> {
+        let mine = Set(rules.map { "\($0.kind.rawValue):\($0.pattern)" })
+        let selected = selectedCustomerID
+        return Set(allRules.filter { $0.customerID != selected }
+            .map { "\($0.kind.rawValue):\($0.pattern)" }
+            .filter { mine.contains($0) })
+    }
+
+    private var conflictingPatterns: [String] {
+        conflictingKeys.map { String($0.split(separator: ":", maxSplits: 1)[1]) }.sorted()
+    }
 
     @ViewBuilder
     private func rulesSection(for customer: Customer) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             sectionHeader("Learned rules", count: rules.count)
+
+            if !conflictingPatterns.isEmpty {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Text("\(conflictingPatterns.count) pattern\(conflictingPatterns.count == 1 ? " is" : "s are") also claimed by another customer: \(conflictingPatterns.joined(separator: ", ")). The most specific rule wins, so these decide hours silently — narrow one side to a path or a week.")
+                        .font(.caption).fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.10), in: .rect(cornerRadius: 10))
+            }
 
             if rules.isEmpty {
                 Text("No rules yet. Confirm a repo, URL or app in Review — or click “Add rule” — and it’ll be remembered here.")
@@ -251,16 +326,16 @@ struct CustomersView: View {
                     .glassCard(radius: 14)
             } else {
                 ForEach(Self.ruleGroups, id: \.title) { group in
-                    let rs = rules.filter { group.kinds.contains($0.kind) }
-                    if !rs.isEmpty {
+                    let stacks = ruleStacks.filter { group.kinds.contains($0.kind) }
+                    if !stacks.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
                             Label(group.title, systemImage: group.icon)
                                 .font(.system(size: 12.5, weight: .semibold))
                                 .foregroundStyle(.secondary)
                             VStack(spacing: 0) {
-                                ForEach(Array(rs.enumerated()), id: \.element.id) { idx, rule in
+                                ForEach(Array(stacks.enumerated()), id: \.element.id) { idx, stack in
                                     if idx > 0 { Divider().opacity(0.4) }
-                                    ruleRow(rule, customer: customer)
+                                    stackRow(stack, customer: customer)
                                 }
                             }
                             .glassCard(radius: 14)
@@ -271,41 +346,100 @@ struct CustomersView: View {
         }
     }
 
+    /// One pattern: its permanent rule and/or its stack of week-bounded rules,
+    /// described in words (what matches, when, what wins) instead of a
+    /// priority number.
     @ViewBuilder
-    private func ruleRow(_ rule: Rule, customer: Customer) -> some View {
+    private func stackRow(_ stack: RuleStack, customer: Customer) -> some View {
+        let lead = stack.rules[0]
+        let conflict = conflictingKeys.contains(stack.id)
         HStack(spacing: 12) {
-            Text(rule.pattern)
-                .font(.system(.callout, design: .monospaced))
-                .lineLimit(1).truncationMode(.middle)
-            if let scope = ruleScopeLabel(rule) {
-                Text(scope)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal, 6).padding(.vertical, 1)
-                    .background(Color.orange.opacity(0.14), in: Capsule())
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(stack.pattern)
+                        .font(.system(.callout, design: .monospaced))
+                        .lineLimit(1).truncationMode(.middle)
+                    if conflict {
+                        Image(systemName: "exclamationmark.triangle.fill").font(.caption2).foregroundStyle(.orange)
+                            .help("Another customer also claims this pattern")
+                    }
+                }
+                Text(stackDescription(stack))
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
             Spacer(minLength: 0)
             Image(systemName: "arrow.right").font(.caption).foregroundStyle(.tertiary)
-            Text(projectName(for: rule.projectID) ?? customer.name)
+            Text(projectName(for: lead.projectID) ?? customer.name)
                 .font(.system(size: 13))
-                .foregroundStyle(rule.projectID == nil ? .secondary : .primary)
+                .foregroundStyle(lead.projectID == nil ? .secondary : .primary)
                 .lineLimit(1)
-            Button(role: .destructive) {
-                delete(rule)
-            } label: {
-                Image(systemName: "trash")
+            if stack.permanent == nil, !stack.bounded.isEmpty {
+                Button("Make permanent") { groupPendingPermanent = stack }
+                    .controlSize(.small)
             }
-            .buttonStyle(.borderless)
+            Menu {
+                if stack.rules.count == 1 {
+                    Button("Edit…") { ruleSheet = RuleEdit(rule: lead) }
+                }
+                Button(stack.rules.count == 1 ? "Delete" : "Delete all \(stack.rules.count)", role: .destructive) {
+                    for r in stack.rules { delete(r) }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton).fixedSize()
+            .accessibilityLabel("Rule actions")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 11)
+    }
+
+    /// "always · most specific wins" / "week 33, week 35 only" / "always · overridden in week 23".
+    private func stackDescription(_ stack: RuleStack) -> String {
+        var parts: [String] = []
+        if stack.permanent != nil { parts.append("always") }
+        let bounded = stack.bounded
+        if !bounded.isEmpty {
+            let weeks = Set(bounded.compactMap { r -> String? in
+                guard let from = r.validFrom else { return nil }
+                if ruleScopeLabel(r) == "today" { return DateFormatting.weekdayDayShortMonth.string(from: from) }
+                return "week \(Calendar.weekStartingMonday().component(.weekOfYear, from: from))"
+            }).sorted()
+            // A bounded rule beside a permanent one is an override for its window.
+            parts.append(stack.permanent == nil ? weeks.joined(separator: ", ") + " only"
+                                                : "overridden in " + weeks.joined(separator: ", "))
+            if let soonest = bounded.compactMap(\.validTo).min(), soonest > Date() {
+                parts.append("expires " + DateFormatting.weekdayShort.string(from: soonest))
+            }
+        }
+        if stack.kind.supportsGlob, stack.pattern.contains("*") { parts.append("wildcard") }
+        parts.append(stack.kind == .urlPath ? "a path beats its host" : "most specific wins")
+        return parts.joined(separator: " · ")
+    }
+
+    private func makePermanentPreview(_ stack: RuleStack?) -> String {
+        guard let stack else { return "" }
+        let target = projectName(for: stack.rules[0].projectID) ?? "the customer"
+        return "Removes the \(stack.bounded.count) week-bounded rules for \(stack.pattern) (\(stackDescription(stack))) and writes one permanent rule → \(target). Past weeks re-attribute to it as well."
+    }
+
+    private func makePermanent(_ stack: RuleStack, customer: Customer) {
+        let lead = stack.rules[0]
+        do {
+            try state.database.replaceRules(deleting: stack.bounded.map(\.id), with: Rule(
+                id: UUID().uuidString, customerID: customer.id, projectID: lead.projectID,
+                kind: stack.kind, pattern: stack.pattern, priority: 100, createdAt: Date()))
+            reload()
+        } catch {
+            loadError = error.localizedDescription
+        }
     }
 
     private func sectionHeader(_ title: String, count: Int) -> some View {
         HStack(spacing: 6) {
             Text(title.uppercased())
                 .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.secondary)
             Text("\(count)")
                 .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(.secondary)
@@ -332,6 +466,7 @@ struct CustomersView: View {
             if let selectedCustomerID, !customers.contains(where: { $0.id == selectedCustomerID }) {
                 self.selectedCustomerID = nil
             }
+            allRules = try state.database.allRules()
             if let id = selectedCustomerID {
                 rules = try state.database.rules(forCustomer: id)
                 customerProjects = try state.database.projects(forCustomer: id)
@@ -420,7 +555,6 @@ private struct CustomerSidebarRow: View {
                 .fill(Color(hex: customer.displayColor) ?? .blue)
                 .frame(width: 10, height: 10)
             Text(customer.name)
-            SourceChip(isCommandCenter: customer.isExternal)
             Spacer(minLength: 0)
             if !customer.isExternal, hover {
                 Button(role: .destructive, action: onRequestDelete) {
@@ -436,22 +570,28 @@ private struct CustomerSidebarRow: View {
     }
 }
 
+/// New rule, or an existing one edited in place (same id, same window).
+/// Rules carry no visible priority: every rule is written at 100 and the
+/// matcher's specificity order decides, which the row text explains.
 private struct AddRuleSheet: View {
     let customerID: String
     let availableProjects: [Project]
+    var existing: Rule? = nil
+    let database: AppDatabase
     let onSave: (Rule) throws -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var state: AppState
     @State private var kind: Rule.Kind = .gitRepoSlug
     @State private var pattern: String = ""
-    @State private var priority: Int = 100
     @State private var projectID: String = ""
     @State private var saveError: String?
+    /// What the pattern matches in the last 90 days, refreshed as you type.
+    @State private var matchSummary: String?
+    private static let matchWindowDays = 90
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("New rule")
+            Text(existing == nil ? "New rule" : "Edit rule")
                 .font(.title2.bold())
 
             Picker("Kind", selection: $kind) {
@@ -468,34 +608,22 @@ private struct AddRuleSheet: View {
             Text(helpText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let matchSummary {
+                Label(matchSummary, systemImage: "scope")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("ruleMatchSummary")
+            }
 
             if !availableProjects.isEmpty {
-                HStack {
-                    Text("Project").font(.subheadline.bold())
-                    SearchableEntityPicker(
-                        items: availableProjects.map {
-                            .init(id: $0.id, label: $0.name, isExternal: $0.isExternal)
-                        },
-                        selectedID: $projectID,
-                        placeholder: "(none — customer level)",
-                        allowsClear: true,
-                        clearLabel: "(none — customer level)",
-                        canSync: AppSettings.commandCenterEnabled && state.commandCenterHasToken,
-                        isSyncing: state.commandCenterIsSyncing,
-                        lastSyncedAt: state.commandCenterLastSyncAt,
-                        onSync: { Task { await state.refreshCommandCenter() } }
-                    )
+                Picker("Project", selection: $projectID) {
+                    Text("(none — customer level)").tag("")
+                    ForEach(availableProjects) { p in Text(p.name).tag(p.id) }
                 }
             }
 
             if let saveError {
                 Text(saveError).font(.caption).foregroundStyle(.red)
-            }
-
-            Stepper(value: $priority, in: 0...1000, step: 10) {
-                LabeledContent("Priority") {
-                    Text("\(priority)").monospacedDigit()
-                }
             }
 
             Spacer()
@@ -507,13 +635,15 @@ private struct AddRuleSheet: View {
                     let trimmed = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !trimmed.isEmpty else { return }
                     let r = Rule(
-                        id: UUID().uuidString,
+                        id: existing?.id ?? UUID().uuidString,
                         customerID: customerID,
                         projectID: projectID.isEmpty ? nil : projectID,
                         kind: kind,
                         pattern: trimmed,
-                        priority: priority,
-                        createdAt: Date()
+                        priority: existing?.priority ?? 100,
+                        createdAt: existing?.createdAt ?? Date(),
+                        validFrom: existing?.validFrom,
+                        validTo: existing?.validTo
                     )
                     do {
                         try onSave(r)
@@ -528,6 +658,42 @@ private struct AddRuleSheet: View {
         }
         .padding(20)
         .frame(width: 480)
+        .onAppear {
+            if let existing {
+                kind = existing.kind
+                pattern = existing.pattern
+                projectID = existing.projectID ?? ""
+            }
+        }
+        .task(id: "\(kind.rawValue):\(pattern)") { await refreshMatchSummary() }
+    }
+
+    /// Debounced so a keystroke burst runs one query; the read happens off
+    /// the main thread because it groups every sample of the window.
+    private func refreshMatchSummary() async {
+        let trimmed = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { matchSummary = nil; return }
+        try? await Task.sleep(for: .milliseconds(300))
+        guard !Task.isCancelled else { return }
+        let db = database, kind = kind
+        let since = Calendar.current.date(byAdding: .day, value: -Self.matchWindowDays, to: Date()) ?? Date()
+        let interval = AppSettings.sampleIntervalSeconds
+        let result = try? await Task.detached(priority: .userInitiated) {
+            try db.ruleMatchCount(kind: kind, pattern: trimmed, since: since, sampleIntervalSeconds: interval)
+        }.value
+        guard !Task.isCancelled else { return }
+        matchSummary = result.map(Self.describe) ?? "Couldn't count matches"
+    }
+
+    private static func describe(_ r: AppDatabase.RuleMatchCount) -> String {
+        if r.isEmpty { return "No matches in the last \(matchWindowDays) days" }
+        var parts: [String] = []
+        if r.sampleSeconds > 0 {
+            let h = r.sampleSeconds / 3600
+            parts.append(h < 1 ? "\(Int((r.sampleSeconds / 60).rounded())) min of activity" : String(format: "%.1f h of activity", h))
+        }
+        if r.calls > 0 { parts.append("\(r.calls) call\(r.calls == 1 ? "" : "s")") }
+        return "Matches " + parts.joined(separator: " · ") + " in the last \(matchWindowDays) days"
     }
 
     private var helpText: String {
@@ -546,6 +712,8 @@ private struct AddRuleSheet: View {
             return "App bundle identifier of the frontmost app. Wildcards supported."
         case .slackChannel:
             return "Slack channel name (no #), e.g. `nfc-internal`. Attributes both foreground time in that channel and huddles started there. Wildcards supported, e.g. `nfc-*`."
+        case .participant:
+            return "The other person in a 1:1 Teams, Zoom or Slack call, as the Calls tab shows them. Wildcards supported, e.g. `Anna *`."
         }
     }
 }

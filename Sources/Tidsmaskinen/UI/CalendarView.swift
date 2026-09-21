@@ -42,7 +42,7 @@ struct CalendarView: View {
                 ContentUnavailableView {
                     Label("Not signed in to Microsoft", systemImage: "person.crop.circle.badge.exclamationmark")
                 } description: {
-                    Text("Open Settings and click \"Sign in to Microsoft\" to start syncing your Outlook calendar.")
+                    Text("Sign in under Settings › Setup or Settings › Calendar.")
                 }
             } else if let err = state.calendarSync.lastError {
                 Text(err)

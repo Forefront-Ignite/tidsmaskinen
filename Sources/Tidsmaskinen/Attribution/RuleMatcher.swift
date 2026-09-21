@@ -123,6 +123,12 @@ struct RuleMatcher {
            let r = match(kind: .urlPath, against: normalized, at: at) {
             return result(for: r)
         }
+        // Browsing a repo on GitHub/GitLab/Bitbucket is that repo: the repo
+        // rule that covers the clone covers github.com/owner/repo too.
+        if let url = sample.chromeURL, let slug = Self.gitSlug(fromForgeURL: url),
+           let r = match(kind: .gitRepoSlug, against: slug, at: at) {
+            return result(for: r)
+        }
         if let host = sample.chromeHost,
            let r = match(kind: .urlHost, against: host, at: at) {
             return result(for: r)
@@ -190,6 +196,10 @@ struct RuleMatcher {
         }
         if let channel = s.slackChannel,
            let r = match(kind: .slackChannel, against: channel, at: s.startedAt) {
+            return result(for: r)
+        }
+        if let participant = s.participant,
+           let r = match(kind: .participant, against: participant, at: s.startedAt) {
             return result(for: r)
         }
         return .unattributed
@@ -355,6 +365,22 @@ struct RuleMatcher {
             .prefix(segments)
         if parts.isEmpty { return host }
         return host + "/" + parts.map(String.init).joined(separator: "/")
+    }
+
+    /// Hosts where `/<owner>/<repo>` in a browser URL names the repo a git
+    /// remote would, so a repo rule covers browsing it too.
+    static let forgeHosts: Set<String> = ["github.com", "gitlab.com", "bitbucket.org"]
+
+    /// `owner/repo` from a forge URL such as https://github.com/owner/repo/pull/3;
+    /// nil for any other host or a page above the repo level.
+    static func gitSlug(fromForgeURL url: String) -> String? {
+        guard let u = URLComponents(string: url), let host = u.host?.lowercased(),
+              forgeHosts.contains(host) else { return nil }
+        let parts = u.path.split(separator: "/", omittingEmptySubsequences: true)
+        guard parts.count >= 2 else { return nil }
+        var repo = String(parts[1])
+        if repo.hasSuffix(".git") { repo.removeLast(4) }
+        return "\(parts[0])/\(repo)"
     }
 
     static func gitHost(fromRemote url: String) -> String? {

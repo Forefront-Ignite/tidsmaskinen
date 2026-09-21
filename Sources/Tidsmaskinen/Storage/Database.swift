@@ -34,15 +34,7 @@ struct AppDatabase {
 #endif
 
     static func databaseURL() throws -> URL {
-        let appSupport = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        return appSupport
-            .appendingPathComponent("Tidsmaskinen", isDirectory: true)
-            .appendingPathComponent("db.sqlite")
+        try AppPaths.supportDirectory().appendingPathComponent("db.sqlite")
     }
 
     private func migrate() throws {
@@ -450,6 +442,14 @@ struct AppDatabase {
             }
         }
 
+        migrator.registerMigration("v23_reported_weeks") { db in
+            try db.create(table: "reported_weeks") { t in
+                t.column("weekStart", .datetime).primaryKey()
+                t.column("reportedAt", .datetime).notNull()
+                t.column("totalHours", .double).notNull()
+            }
+        }
+
         try migrator.migrate(dbQueue)
     }
 
@@ -504,9 +504,14 @@ struct AppDatabase {
     }
 
     func setClaudeSessionAttribution(sessionID: String, customerID: String?, projectID: String?) throws {
+        try setClaudeSessionAttribution(sessionIDs: [sessionID], customerID: customerID, projectID: projectID)
+    }
+
+    /// Several sessions at once (an agenda group), in one transaction.
+    func setClaudeSessionAttribution(sessionIDs: [String], customerID: String?, projectID: String?) throws {
         _ = try dbQueue.write { db in
             try ClaudeSession
-                .filter(ClaudeSession.Columns.id == sessionID)
+                .filter(sessionIDs.contains(ClaudeSession.Columns.id))
                 .updateAll(db,
                            ClaudeSession.Columns.customerID.set(to: customerID),
                            ClaudeSession.Columns.projectID.set(to: projectID))
@@ -696,6 +701,22 @@ struct AppDatabase {
 
     // MARK: - Rules
 
+    // MARK: - Reported weeks
+
+    func reportedWeek(start: Date) throws -> ReportedWeek? {
+        try dbQueue.read { db in try ReportedWeek.fetchOne(db, key: ["weekStart": start]) }
+    }
+
+    func markReported(weekStart: Date, totalHours: Double) throws {
+        try dbQueue.write { db in
+            try ReportedWeek(weekStart: weekStart, reportedAt: Date(), totalHours: totalHours).save(db)
+        }
+    }
+
+    func clearReported(weekStart: Date) throws {
+        try dbQueue.write { db in _ = try ReportedWeek.deleteOne(db, key: ["weekStart": weekStart]) }
+    }
+
     func allRules() throws -> [Rule] {
         try dbQueue.read { db in
             try Rule.order(Rule.Columns.priority.desc).fetchAll(db)
@@ -729,6 +750,15 @@ struct AppDatabase {
     /// — e.g. a permanent "always" rule, a "this week" override, and a "today"
     /// override — so creating one scoped rule never destroys the others. The
     /// matcher then picks the most precise applicable rule per timestamp.
+    /// Make-permanent in one transaction: the bounded rules go and the
+    /// permanent one lands together, or neither does.
+    func replaceRules(deleting ids: [String], with rule: Rule) throws {
+        try dbQueue.write { db in
+            _ = try Rule.filter(ids.contains(Rule.Columns.id)).deleteAll(db)
+            try upsertReplacingWindow(rule, in: db)
+        }
+    }
+
     func upsertReplacingWindow(_ rule: Rule) throws {
         try dbQueue.write { db in
             try upsertReplacingWindow(rule, in: db)
@@ -835,6 +865,55 @@ struct AppDatabase {
     func allHiddenSignals() throws -> [HiddenSignal] {
         try dbQueue.read { db in
             try HiddenSignal.order(HiddenSignal.Columns.hiddenAt.desc).fetchAll(db)
+        }
+    }
+
+    /// What a rule pattern matches in the recent past — the preview shown while
+    /// editing a rule. Samples are grouped by their signal column first so the
+    /// glob runs once per distinct value, not once per sample.
+    struct RuleMatchCount: Equatable {
+        var sampleSeconds: Double = 0
+        var calls: Int = 0
+        var isEmpty: Bool { sampleSeconds == 0 && calls == 0 }
+    }
+
+    func ruleMatchCount(kind: Rule.Kind, pattern: String, since: Date,
+                        sampleIntervalSeconds: Int) throws -> RuleMatchCount {
+        try dbQueue.read { db in
+            var out = RuleMatchCount()
+            let secs = Double(sampleIntervalSeconds)
+            let base = ActivitySample.Columns.capturedAt >= since && ActivitySample.Columns.isIdle == false
+            func tally(_ column: Column, where extra: SQLExpression? = nil, value: (String) -> String?) throws {
+                var request = ActivitySample.filter(base && column != nil)
+                if let extra { request = request.filter(extra) }
+                let rows = try request.select(column, count(Column("id")), as: Row.self).group(column).fetchAll(db)
+                for row in rows {
+                    guard let raw: String = row[0], let n: Int = row[1], let v = value(raw),
+                          RuleMatcher.matches(kind: kind, pattern: pattern, value: v) else { continue }
+                    out.sampleSeconds += Double(n) * secs
+                }
+            }
+            switch kind {
+            case .gitRepoSlug:   try tally(Column("gitRemoteURL")) { RuleMatcher.gitSlug(fromRemote: $0) }
+            case .gitRemoteHost: try tally(Column("gitRemoteURL")) { RuleMatcher.gitHost(fromRemote: $0) }
+            case .urlHost:       try tally(Column("chromeHost")) { $0 }
+            case .urlPath:       try tally(Column("chromeURL")) { RuleMatcher.normalizedURL($0) }
+            case .windowTitle:   try tally(Column("windowTitle")) { $0 }
+            case .appBundleID:   try tally(Column("appBundleID")) { $0 }
+            case .slackChannel:
+                try tally(Column("windowTitle"), where: Column("appBundleID").like("%slack%")) {
+                    MicSession.parseSlackChannel(fromTitle: $0)
+                }
+            case .participant:   break
+            }
+            if kind == .slackChannel || kind == .participant {
+                let sessions = try MicSession.filter(MicSession.Columns.startedAt >= since).fetchAll(db)
+                out.calls = sessions.filter { s in
+                    guard let v = kind == .slackChannel ? s.slackChannel : s.participant else { return false }
+                    return RuleMatcher.matches(kind: kind, pattern: pattern, value: v)
+                }.count
+            }
+            return out
         }
     }
 

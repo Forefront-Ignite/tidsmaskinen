@@ -3,33 +3,39 @@ import AppKit
 
 /// Categories for the two-pane Settings layout (macOS System Settings style).
 enum SettingsCategory: String, CaseIterable, Identifiable {
-    case general, tracking, calendar, integrations, ignored
+    case setup, general, tracking, calendar, integrations, ignored, advanced
     var id: String { rawValue }
     var label: String {
         switch self {
+        case .setup:        return "Setup"
         case .general:      return "General"
         case .tracking:     return "Tracking"
         case .calendar:     return "Calendar"
         case .integrations: return "Integrations"
         case .ignored:      return "Ignored"
+        case .advanced:     return "Advanced"
         }
     }
     var detail: String {
         switch self {
+        case .setup:        return "What the report needs"
         case .general:      return "Appearance, startup and updates"
         case .tracking:     return "How activity is sampled"
         case .calendar:     return "Meeting import & Microsoft account"
         case .integrations: return "Command Center & coding agents"
         case .ignored:      return "Repos, hosts and apps you’ve ignored"
+        case .advanced:     return "Diagnostics and raw data"
         }
     }
     var icon: String {
         switch self {
+        case .setup:        return "checklist"
         case .general:      return "slider.horizontal.3"
         case .tracking:     return "calendar.day.timeline.left"
         case .calendar:     return "calendar"
         case .integrations: return "puzzlepiece.extension"
         case .ignored:      return "eye.slash"
+        case .advanced:     return "wrench.and.screwdriver"
         }
     }
 }
@@ -48,6 +54,8 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.commandCenterBaseURL) private var commandCenterBaseURL: String = ""
     @AppStorage(SettingsKey.appearance) private var appearanceRaw: String = AppTheme.system.rawValue
     @AppStorage(SettingsKey.reviewMinMinutes) private var reviewMinMinutes: Int = 5
+    @AppStorage(SettingsKey.calendarStaleDays) private var calendarStaleDays: Int = 2
+    @State private var didPickInitialCategory = false
     @State private var launchAtLogin: Bool = LoginItemManager.isEnabled
     @State private var loginItemError: String?
     @State private var commandCenterTokenInput: String = ""
@@ -71,21 +79,40 @@ struct SettingsView: View {
             categoryRail
                 .frame(minWidth: 220, idealWidth: 240, maxWidth: 280)
             VStack(alignment: .leading, spacing: 0) {
-                paneHeader
-                HStack(spacing: 0) {
-                    Form { paneContent }
-                        .formStyle(.grouped)
-                        .scrollContentBackground(.hidden)
-                        .frame(maxWidth: 640)
-                    Spacer(minLength: 0)
+                if category == .advanced {
+                    paneHeader
+                    DebugHubView(embedded: true)
+                } else {
+                    paneHeader
+                    HStack(spacing: 0) {
+                        Form { paneContent }
+                            .formStyle(.grouped)
+                            .scrollContentBackground(.hidden)
+                            .frame(maxWidth: 640)
+                        Spacer(minLength: 0)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 760, minHeight: 560)
-        .onAppear { refreshCommandCenterCounts(); reloadHidden(); accessibilityTrusted = Probes.isAccessibilityTrusted(promptIfNeeded: false) }
+        .onAppear {
+            refreshCommandCenterCounts(); reloadHidden()
+            accessibilityTrusted = Probes.isAccessibilityTrusted(promptIfNeeded: false)
+            state.health.probe()
+            // An explicit target wins; otherwise land on Setup while anything
+            // is red or orange. It stays in the rail after.
+            if state.settingsTarget != nil {
+                consumeSettingsTarget()
+                didPickInitialCategory = true
+            } else if !didPickInitialCategory {
+                didPickInitialCategory = true
+                if state.health.openStepCount > 0 { category = .setup }
+            }
+        }
+        .onChange(of: state.settingsTarget) { _, _ in consumeSettingsTarget() }
         .onChange(of: state.commandCenterLastSyncAt) { _, _ in refreshCommandCenterCounts() }
-        .onChange(of: category) { _, _ in reloadHidden() }
+        .onChange(of: category) { _, _ in reloadHidden(); if category == .setup { state.health.probe() } }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             accessibilityTrusted = Probes.isAccessibilityTrusted(promptIfNeeded: false)
             launchAtLogin = LoginItemManager.isEnabled
@@ -120,6 +147,14 @@ struct SettingsView: View {
                                     .lineLimit(1)
                             }
                             Spacer(minLength: 4)
+                            if cat == .setup, state.health.openStepCount > 0 {
+                                Text("\(state.health.openStepCount)")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(active ? Color.white : Color.orange)
+                                    .padding(.horizontal, 6).padding(.vertical, 1)
+                                    .background(active ? Color.white.opacity(0.25) : Color.orange.opacity(0.18),
+                                                in: Capsule())
+                            }
                             if cat == .ignored, !hiddenSignals.isEmpty {
                                 Text("\(hiddenSignals.count)")
                                     .font(.system(size: 11, weight: .bold))
@@ -164,11 +199,128 @@ struct SettingsView: View {
     @ViewBuilder
     private var paneContent: some View {
         switch category {
+        case .setup:        setupPane
         case .general:      generalPane
         case .tracking:     trackingPane
         case .calendar:     calendarPane
         case .integrations: integrationsPane
         case .ignored:      ignoredPane
+        case .advanced:     EmptyView()   // rendered outside the Form
+        }
+    }
+
+    private func consumeSettingsTarget() {
+        guard let target = state.settingsTarget else { return }
+        state.settingsTarget = nil
+        category = target
+    }
+
+    // MARK: - Setup
+
+    /// Every dependency of the weekly report, verified just now. Green means
+    /// it worked on the last probe, not that it was granted once.
+    @ViewBuilder
+    private var setupPane: some View {
+        Section {
+            ForEach(CaptureHealth.Check.allCases) { check in
+                setupRow(check)
+            }
+        } header: {
+            Text(state.health.openStepCount == 0 ? "Everything works" : "\(state.health.openStepCount) of \(CaptureHealth.Check.allCases.count) steps left")
+        } footer: {
+            Text("Green means it worked just now, not that it was granted once. Probed every minute, when the app activates, and when this page opens" +
+                 (state.health.lastProbeAt.map { " — last \($0.formatted(date: .omitted, time: .shortened))" } ?? "") + ".")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        Section("Calendar staleness") {
+            Picker("Warn when the calendar has not synced for", selection: $calendarStaleDays) {
+                Text("1 day").tag(1); Text("2 days").tag(2); Text("3 days").tag(3); Text("a week").tag(7)
+            }
+            .onChange(of: calendarStaleDays) { _, _ in state.health.probe() }
+            Text("A lost Accessibility or Chrome permission sends one notification. Calendar staleness only shows here and in the menu bar. This page stays in Settings once every step is green.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func setupRow(_ check: CaptureHealth.Check) -> some View {
+        let st = state.health.status(check)
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: setupGlyph(st.level))
+                .foregroundStyle(setupTint(st.level))
+                .font(.system(size: 15, weight: .semibold))
+                .frame(width: 20)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(check.label) · \(check.purpose)").font(.system(size: 13, weight: .semibold))
+                Text(st.detail).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            setupAction(check, st)
+        }
+        .padding(.vertical, 3)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func setupGlyph(_ level: CaptureHealth.Level) -> String {
+        switch level {
+        case .ok:   return "checkmark.circle.fill"
+        case .off:  return "minus.circle"
+        case .warn: return "exclamationmark.circle.fill"
+        case .fail: return "xmark.circle.fill"
+        }
+    }
+
+    private func setupTint(_ level: CaptureHealth.Level) -> Color {
+        switch level {
+        case .ok:   return TM.positive
+        case .off:  return .secondary
+        case .warn: return .orange
+        case .fail: return .red
+        }
+    }
+
+    /// The one thing that moves each check forward. System Settings links fall
+    /// back to opening Settings plain when the pane scheme fails.
+    @ViewBuilder
+    private func setupAction(_ check: CaptureHealth.Check, _ st: CaptureHealth.Status) -> some View {
+        switch check {
+        case .accessibility where st.level != .ok:
+            Button("Grant…") {
+                _ = Probes.isAccessibilityTrusted(promptIfNeeded: true)
+                CaptureHealth.openSystemSettings(pane: "com.apple.preference.security?Privacy_Accessibility")
+            }
+            .controlSize(.small)
+        case .chrome where st.level == .warn:
+            Button("Request access") {
+                _ = Probes.requestAutomationPermission(forBundle: Probes.chromeBundleID, prompt: true)
+                state.health.probe()
+            }
+            .controlSize(.small)
+        case .chrome where st.level == .fail:
+            Button("Open System Settings") {
+                CaptureHealth.openSystemSettings(pane: "com.apple.preference.security?Privacy_Automation")
+            }
+            .controlSize(.small)
+        case .calendar where st.level == .fail:
+            Button("Sign in") { state.showSignIn = true }.controlSize(.small).buttonStyle(.borderedProminent)
+        case .calendar where st.level == .warn:
+            Button("Sync now") {
+                Task { await state.calendarSync.syncNow(); state.health.probe() }
+            }
+            .controlSize(.small)
+        case .hooks where st.level != .ok:
+            Button("Set up") { category = .integrations }.controlSize(.small)
+        case .menuBar where st.level == .warn:
+            Button("Open System Settings") {
+                CaptureHealth.openSystemSettings(pane: "com.apple.ControlCenter-Settings.extension")
+            }
+            .controlSize(.small)
+        case .customers where st.level != .ok:
+            Button("Add") { state.selectedSection = .customers }.controlSize(.small)
+        default:
+            EmptyView()
         }
     }
 
@@ -265,19 +417,13 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
         }
 
-        Section("Attribution") {
-            Text("Meetings and concurrent work each contribute to their assigned customer. Reported hours can exceed elapsed time.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-
-        Section("Review & Discover") {
+        Section("Review") {
             Stepper(value: $reviewMinMinutes, in: 0...60, step: 1) {
                 LabeledContent("Hide items under") {
                     Text(reviewMinMinutes == 0 ? "off" : "\(reviewMinMinutes) min").monospacedDigit()
                 }
             }
-            Text("Items shorter than this are hidden from Review and Discover (0 shows everything). Default 5 min filters out short bursts.")
+            Text("Items shorter than this are hidden from Review behind a toggle and never counted as open (0 shows everything). Default 5 min filters out short bursts.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

@@ -4,7 +4,6 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
     case weeklyReport
     case timeline
     case review
-    case discover
     case calls
     case customers
     case debug
@@ -22,7 +21,6 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
         case .weeklyReport:   return "Weekly Report"
         case .timeline:       return "My day"
         case .review:         return "Review"
-        case .discover:       return "Discover"
         case .calls:          return "Calls"
         case .customers:      return "Customers"
         case .debug:          return "Debug"
@@ -39,7 +37,6 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
         case .weeklyReport:   return "chart.bar.doc.horizontal.fill"
         case .timeline:       return "calendar.day.timeline.left"
         case .review:         return "sparkles"
-        case .discover:       return "square.grid.2x2.fill"
         case .calls:          return "phone.fill"
         case .customers:      return "person.2.fill"
         case .debug:          return "wrench.and.screwdriver.fill"
@@ -57,7 +54,6 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
         case .weeklyReport: return "report"
         case .timeline:     return "myday"
         case .review:       return "review"
-        case .discover:     return "discover"
         case .calls:        return "call"
         case .customers:    return "people"
         case .settings:     return "sliders"
@@ -71,15 +67,15 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
         var title: String {
             switch self {
             case .reports: return "Reports"
-            case .sources: return "Sources"
+            case .sources: return "Attribution"
             case .system:  return "System"
             }
         }
         var items: [SidebarItem] {
             switch self {
             case .reports: return [.weeklyReport, .timeline]
-            case .sources: return [.review, .discover, .calls, .customers]
-            case .system:  return [.debug, .settings]
+            case .sources: return [.review, .calls, .customers]
+            case .system:  return [.settings]   // Debug lives under Settings › Advanced
             }
         }
     }
@@ -177,7 +173,6 @@ struct MainWindowView: View {
         case .weeklyReport:   WeeklyReportView()
         case .timeline:       TimelineView()
         case .review:         ReviewView()
-        case .discover:       DiscoverView()
         case .calls:          TeamsCallsView()
         case .customers:      CustomersView()
         case .debug:          DebugHubView()
@@ -207,12 +202,16 @@ struct DebugHubView: View {
         }
     }
     @State private var tab: Tab = .calendar
+    /// Inside Settings › Advanced the pane header already names the screen.
+    var embedded: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Debug").font(.system(size: 24, weight: .bold))
-                Spacer()
+                if !embedded {
+                    Text("Debug").font(.system(size: 24, weight: .bold))
+                    Spacer()
+                }
                 Picker("", selection: $tab) {
                     ForEach(Tab.allCases) { t in
                         Label(t.item.title, systemImage: t.item.systemImage).tag(t)
@@ -221,8 +220,9 @@ struct DebugHubView: View {
                 .pickerStyle(.segmented)
                 .labelStyle(.titleAndIcon)
                 .fixedSize()
+                if embedded { Spacer() }
             }
-            .padding(.horizontal, 28).padding(.vertical, 14)
+            .padding(.horizontal, embedded ? 24 : 28).padding(.vertical, embedded ? 4 : 14)
             Divider()
             Group {
                 switch tab {
