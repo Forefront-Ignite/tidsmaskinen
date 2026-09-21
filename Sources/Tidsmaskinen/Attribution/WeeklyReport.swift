@@ -598,8 +598,8 @@ struct WeeklyReport {
         if let kind = rule?.kind {
             switch kind {
             case .gitRepoSlug, .gitRemoteHost:
-                if let remote = sample.gitRemoteURL,
-                   let slug = RuleMatcher.gitSlug(fromRemote: remote) {
+                if let slug = sample.gitRemoteURL.flatMap(RuleMatcher.gitSlug(fromRemote:))
+                    ?? sample.chromeURL.flatMap(RuleMatcher.gitSlug(fromForgeURL:)) {
                     return ContributorInfo(
                         id: "git:\(slug)",
                         label: slug,

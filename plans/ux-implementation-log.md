@@ -298,3 +298,13 @@ sheet with "Matches 39.6 h of activity in the last 90 days"). Its minor note —
 eye icon was already covered by a tooltip and accessibility label the capture can't show. The
 judge's proxy rejects more than ~2 MB of PNG, so captures are downscaled to 1200 px; `devdrive`
 gained `"<needle>#2"` to reach the second match (a sheet's text field behind the sidebar's).
+
+**Follow-up from the first look at the signed-off build (2026-09-21):** github.com showed 27 min
+open with repos that already had rules. They were *git repo* rules, which only cover editor time
+with a remote — browsing the same repo on GitHub fell through to the host. The matcher now derives
+`owner/repo` from github.com / gitlab.com / bitbucket.org URLs and tries the repo rules before the
+host rule (`RuleMatcher.gitSlug(fromForgeURL:)`; the report's contributor label follows). The
+evidence card adds "+ 15 min in 9 shorter stretches" so it sums to the header, and a host group's
+total is now the host's open time rather than the sum of the paths above the threshold (the
+backlog and the report counted only the latter). Note the installed app's review threshold is
+10 min, so hosts rarely split into per-path rows there; the dev copy ran on the 5-min default.

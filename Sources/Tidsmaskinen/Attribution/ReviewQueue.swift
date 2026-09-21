@@ -45,6 +45,9 @@ struct ReviewRow: Identifiable {
     /// The longest stretches of this signal in the period (open ones for an open
     /// row), longest first — the evidence the detail pane shows. Signals only.
     var evidence: [ReviewEvidence] = []
+    /// How many stretches `evidence` was picked from, so the pane can say what
+    /// the shorter ones add up to.
+    var stretchCount: Int = 0
 
     var id: String { unit.id }
     var totalSeconds: Double { unit.totalSeconds }
@@ -146,6 +149,7 @@ enum ReviewQueue {
                     stretches.append(s)
                 }
             }
+            func stretchCount(openOnly: Bool) -> Int { stretches.filter { !openOnly || $0.open }.count }
             /// The three longest stretches — only the open ones for an open row.
             func evidence(openOnly: Bool) -> [ReviewEvidence] {
                 stretches.filter { !openOnly || $0.open }
@@ -230,7 +234,7 @@ enum ReviewQueue {
             return ReviewRow(unit: .signal(.init(kind: kind, value: value, totalSeconds: seconds)),
                              status: st, perDay: st == .open ? acc.openPerDay : acc.perDay,
                              belowThreshold: st == .open && seconds < minSec,
-                             evidence: acc.evidence(openOnly: st == .open))
+                             evidence: acc.evidence(openOnly: st == .open), stretchCount: acc.stretchCount(openOnly: st == .open))
         }
         for (slug, acc) in repos { rows.append(signalRow(.gitRepoSlug, slug, acc)) }
         for (bundle, acc) in apps { rows.append(signalRow(.appBundleID, bundle, acc, ambient: true)) }
@@ -248,7 +252,7 @@ enum ReviewQueue {
             let aggregate = AppDatabase.SignalAggregate(kind: .urlHost, value: host, totalSeconds: acc.open)
             rows.append(ReviewRow(unit: openPaths.isEmpty ? .signal(aggregate) : .hostGroup(host: aggregate, paths: openPaths),
                                   status: .open, perDay: acc.openPerDay, belowThreshold: acc.open < minSec,
-                                  evidence: acc.evidence(openOnly: true)))
+                                  evidence: acc.evidence(openOnly: true), stretchCount: acc.stretchCount(openOnly: true)))
         }
 
         // Meetings, stretched over the mic time each one owns (as the report and

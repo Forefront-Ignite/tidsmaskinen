@@ -88,5 +88,25 @@ final class ReviewRowsTests: XCTestCase {
         XCTAssertEqual(repo.evidence.map(\.detail), ["main.swift", "tests.swift"])
         XCTAssertEqual(repo.evidence.first?.start, at(15, 10))
         XCTAssertEqual(repo.evidence.first?.end, at(15, 10).addingTimeInterval(20 * 15))
+        XCTAssertEqual(repo.stretchCount, 2)
+    }
+
+    /// Browsing a repo on a forge is that repo: the slug rule covers
+    /// github.com/owner/repo pages, and the report names the repo for them.
+    func testForgeURLMatchesRepoRule() {
+        let rule = Rule(id: "r", customerID: "A", projectID: nil, kind: .gitRepoSlug, pattern: "acme/*",
+                        priority: 100, createdAt: Date())
+        let m = RuleMatcher.make(customers: [Customer(id: "A", name: "A", color: nil, createdAt: Date())], projects: [], rules: [rule])
+        func browse(_ url: String) -> ActivitySample {
+            ActivitySample(id: nil, capturedAt: at(15, 10), appBundleID: "com.google.Chrome", appName: nil, windowTitle: nil,
+                           chromeURL: url, chromeHost: URLComponents(string: url)?.host, gitRepoPath: nil, gitRemoteURL: nil,
+                           isIdle: false, customerID: nil, projectID: nil)
+        }
+        XCTAssertEqual(m.attribute(browse("https://github.com/Acme/Repo/pull/3")).customer?.id, "A")
+        XCTAssertEqual(m.attribute(browse("https://gitlab.com/acme/repo.git")).customer?.id, "A")
+        XCTAssertNil(m.attribute(browse("https://github.com/orgs/acme")).customer)
+        XCTAssertNil(m.attribute(browse("https://acme.com/acme/repo")).customer)
+        XCTAssertNil(m.attribute(browse("https://github.com/acme")).customer)
+        XCTAssertEqual(RuleMatcher.gitSlug(fromForgeURL: "https://github.com/Acme/Repo.git/issues"), "Acme/Repo")
     }
 }

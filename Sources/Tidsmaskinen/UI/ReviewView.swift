@@ -648,7 +648,7 @@ struct ReviewView: View {
 
             statusBanner(row)
             detailPanel(for: unit)
-            if !row.evidence.isEmpty { evidenceCard(row.evidence) }
+            if !row.evidence.isEmpty { evidenceCard(row) }
 
             if row.status == .ignored {
                 HStack(spacing: 6) {
@@ -881,10 +881,19 @@ struct ReviewView: View {
         "\(Self.stretchStart.string(from: e.start))–\(Self.stretchEnd.string(from: e.end))"
     }
 
-    private func evidenceCard(_ evidence: [ReviewEvidence]) -> some View {
+    /// "+ 15 min in 9 shorter stretches" — what the three shown leave out, so
+    /// the card adds up to the header.
+    private func stretchRemainder(_ row: ReviewRow) -> String? {
+        let more = row.stretchCount - row.evidence.count
+        let rest = row.perDay.reduce(0, +) - row.evidence.reduce(0) { $0 + $1.seconds }
+        guard more > 0, rest >= 30 else { return nil }
+        return "+ \(formatHours(rest)) in \(more) shorter stretch\(more == 1 ? "" : "es")"
+    }
+
+    private func evidenceCard(_ row: ReviewRow) -> some View {
         detailCard {
             Text("LONGEST STRETCHES").font(.system(size: 10, weight: .bold)).foregroundStyle(.tertiary)
-            ForEach(evidence) { e in
+            ForEach(row.evidence) { e in
                 Button {
                     state.timelineTargetDay = e.start
                     state.selectedSection = .timeline
@@ -905,6 +914,9 @@ struct ReviewView: View {
                 .buttonStyle(.plain)
                 .help("Open this day in My day")
                 .accessibilityLabel("Open \(stretchLabel(e)) in My day")
+            }
+            if let rest = stretchRemainder(row) {
+                Text(rest).font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }
     }
@@ -1495,7 +1507,7 @@ enum ReviewUnit: Identifiable {
     var totalSeconds: Double {
         switch self {
         case .signal(let s):        return s.totalSeconds
-        case .hostGroup(_, let ps): return ps.reduce(0) { $0 + $1.totalSeconds }
+        case .hostGroup(let h, _):  return h.totalSeconds   // the host's open time, not just the paths above the threshold
         case .series(let s):        return s.totalSeconds
         case .event(let e):         return max(0, e.endAt.timeIntervalSince(e.startAt))
         case .call(_, let secs):    return secs
