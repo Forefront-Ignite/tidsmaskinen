@@ -27,6 +27,7 @@ struct ReviewView: View {
     @State private var customerFilterID: String = ""
     @State private var query: String = ""
     @FocusState private var searchFocused: Bool
+    @FocusState private var listFocused: Bool
     @State private var showShort = false
     @State private var selectedID: String?
     @State private var skipped: Set<String> = []
@@ -503,6 +504,11 @@ struct ReviewView: View {
                     }
                 }
             }
+            .focused($listFocused)
+            // A fresh window makes the search field first responder (rows are
+            // still loading, so there is no list yet), and every single-key
+            // shortcut would then type into it. Take focus once the list exists.
+            .onAppear { if query.isEmpty { listFocused = true } }
             .scrollContentBackground(.hidden)
             .listStyle(.plain)
             .padding(.leading, 8).padding(.trailing, 4)
