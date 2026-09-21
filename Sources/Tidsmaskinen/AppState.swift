@@ -21,6 +21,10 @@ final class AppState: ObservableObject {
     @Published private(set) var isRestoringSignIn: Bool = true
     /// Set by the tray to open Settings on a specific pane; SettingsView consumes it.
     @Published var settingsTarget: SettingsCategory?
+    /// Set by the report's day headers to open Review on one day; ReviewView consumes it.
+    @Published var reviewTargetDay: Date?
+    /// Set by a report cell to open My day on that day; TimelineView consumes it.
+    @Published var timelineTargetDay: Date?
 
     // Command Center sync state — driven by `commandCenter.runSync()`.
     @Published var commandCenterLastSyncAt: Date? = AppSettings.commandCenterLastSyncAt

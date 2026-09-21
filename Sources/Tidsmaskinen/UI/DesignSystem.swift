@@ -90,6 +90,8 @@ extension SettingsKey {
     static let reviewMinMinutes = "reviewMinMinutes"
     /// Days without a calendar sync before the tray and Setup pane warn (default 2).
     static let calendarStaleDays = "calendarStaleDays"
+    /// `ReportRounding` raw value for the weekly report (default nearest).
+    static let reportRounding = "reportRounding"
 }
 
 extension AppSettings {
@@ -109,6 +111,10 @@ extension AppSettings {
     static var calendarStaleDays: Int {
         if defaults.object(forKey: SettingsKey.calendarStaleDays) == nil { return 2 }
         return max(1, defaults.integer(forKey: SettingsKey.calendarStaleDays))
+    }
+
+    static var reportRounding: ReportRounding {
+        defaults.string(forKey: SettingsKey.reportRounding).flatMap(ReportRounding.init(rawValue:)) ?? .nearest
     }
 }
 

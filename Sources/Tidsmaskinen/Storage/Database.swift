@@ -442,6 +442,14 @@ struct AppDatabase {
             }
         }
 
+        migrator.registerMigration("v23_reported_weeks") { db in
+            try db.create(table: "reported_weeks") { t in
+                t.column("weekStart", .datetime).primaryKey()
+                t.column("reportedAt", .datetime).notNull()
+                t.column("totalHours", .double).notNull()
+            }
+        }
+
         try migrator.migrate(dbQueue)
     }
 
@@ -687,6 +695,22 @@ struct AppDatabase {
     }
 
     // MARK: - Rules
+
+    // MARK: - Reported weeks
+
+    func reportedWeek(start: Date) throws -> ReportedWeek? {
+        try dbQueue.read { db in try ReportedWeek.fetchOne(db, key: ["weekStart": start]) }
+    }
+
+    func markReported(weekStart: Date, totalHours: Double) throws {
+        try dbQueue.write { db in
+            try ReportedWeek(weekStart: weekStart, reportedAt: Date(), totalHours: totalHours).save(db)
+        }
+    }
+
+    func clearReported(weekStart: Date) throws {
+        try dbQueue.write { db in _ = try ReportedWeek.deleteOne(db, key: ["weekStart": weekStart]) }
+    }
 
     func allRules() throws -> [Rule] {
         try dbQueue.read { db in

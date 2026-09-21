@@ -1,11 +1,36 @@
 import Foundation
 
+/// How each report cell is rounded to a quarter hour. Every mode keeps the
+/// day's true total: the rounding residue lands on that day's largest bucket.
+enum ReportRounding: String, CaseIterable, Identifiable {
+    case nearest, up, down
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .nearest: return "Nearest ¼ h"
+        case .up:      return "Round up"
+        case .down:    return "Round down"
+        }
+    }
+
+    func round(_ hours: Double) -> Double {
+        switch self {
+        case .nearest: return (hours * 4).rounded() / 4
+        case .up:      return (hours * 4 - 1e-9).rounded(.up) / 4
+        case .down:    return (hours * 4 + 1e-9).rounded(.down) / 4
+        }
+    }
+}
+
 struct WeeklyReport {
     struct Row: Identifiable, Equatable {
         let id: String          // customerID or "__unattributed__"
         let label: String       // customer name or "Unattributed"
         let color: String?
-        let perDayHours: [Double]   // 7 entries, Mon..Sun
+        let perDayHours: [Double]   // 7 entries, Mon..Sun, rounded
+        /// The same cells before rounding, for hover.
+        var rawPerDayHours: [Double] = []
         var totalHours: Double { perDayHours.reduce(0, +) }
     }
 
@@ -35,7 +60,8 @@ struct WeeklyReport {
                         micSessions: [MicSession] = [],
                         idleThresholdSeconds: TimeInterval = 300,
                         matcher: RuleMatcher,
-                        sampleIntervalSeconds: Int) -> WeeklyReport {
+                        sampleIntervalSeconds: Int,
+                        rounding: ReportRounding = .nearest) -> WeeklyReport {
         var engine = DedupEngine(week: week)
         let records = collectRecords(
             week: week,
@@ -58,6 +84,7 @@ struct WeeklyReport {
         var unattributedSeconds = Array(repeating: 0.0, count: 7)
         var breakdowns: [String: Breakdown] = [:]
 
+        var raw: [(id: String, label: String, color: String?, hours: [Double])] = []
         for (bucketID, bySource) in engine.perBucketPerSource {
             var seconds = Array(repeating: 0.0, count: 7)
             for (_, arr) in bySource {
@@ -68,20 +95,34 @@ struct WeeklyReport {
                 continue
             }
             let (label, color) = labelAndColor(forBucketID: bucketID, matcher: matcher)
-            // Round each cell to nearest 0.25h at construction time so the
-            // displayed grid and TSV stay self-consistent — row total is the
-            // sum of its cells, column total is the sum of its cells, grand
-            // total is the sum of everything. Avoids the classic "0.10h × 7
-            // shows blank but the row total reads 0.75".
-            let roundedDay = seconds.map { roundedQuarter($0 / 3600.0) }
-            rows.append(Row(
-                id: bucketID,
-                label: label,
-                color: color,
-                perDayHours: roundedDay
-            ))
-            for d in 0..<7 { dayTotals[d] += roundedDay[d] }
+            raw.append((bucketID, label, color, seconds.map { $0 / 3600.0 }))
             breakdowns[bucketID] = makeBreakdown(rowID: bucketID, engine: engine)
+        }
+        // Round each cell at construction time so the grid and the TSV stay
+        // self-consistent (row total = its cells, column total = its cells),
+        // then keep every day's true total: a positive residue lands on that
+        // day's largest bucket, a negative one comes off the largest buckets
+        // that still have time, so seven 0.10 h slivers can't add a phantom
+        // 0.75 and three rounded-up slivers can't overstate the day.
+        raw.sort { $0.id < $1.id }   // deterministic tie-breaking
+        var rounded = raw.map { $0.hours.map { rounding.round($0) } }
+        for d in 0..<7 {
+            let trueTotal = rounding.round(raw.reduce(0) { $0 + $1.hours[d] })
+            var diff = trueTotal - rounded.reduce(0) { $0 + $1[d] }
+            while diff <= -0.125 {
+                guard let i = raw.indices.filter({ rounded[$0][d] > 0 })
+                        .max(by: { raw[$0].hours[d] < raw[$1].hours[d] }) else { break }
+                let step = min(rounded[i][d], (-diff * 4).rounded() / 4)
+                rounded[i][d] -= step
+                diff += step
+            }
+            if diff >= 0.125, let i = raw.indices.max(by: { raw[$0].hours[d] < raw[$1].hours[d] }) {
+                rounded[i][d] += diff
+            }
+        }
+        for (i, r) in raw.enumerated() {
+            rows.append(Row(id: r.id, label: r.label, color: r.color, perDayHours: rounded[i], rawPerDayHours: r.hours))
+            for d in 0..<7 { dayTotals[d] += rounded[i][d] }
         }
 
         rows.sort { lhs, rhs in
@@ -93,7 +134,7 @@ struct WeeklyReport {
             week: week,
             rows: rows,
             dayTotals: dayTotals,
-            unattributedPerDay: unattributedSeconds.map { roundedQuarter($0 / 3600.0) },
+            unattributedPerDay: unattributedSeconds.map { rounding.round($0 / 3600.0) },
             breakdownsByRowID: breakdowns,
             activeHours: engine.attributedActiveSeconds / 3600.0
         )
@@ -144,9 +185,9 @@ struct WeeklyReport {
 
     func tsv(weekDays: [Date]) -> String {
         let formatter = DateFormatter()
-        formatter.dateFormat = "EEE d/M"
+        formatter.dateFormat = "EEE d/M/yyyy"
         var lines: [String] = []
-        let header = ["Customer"] + weekDays.map { formatter.string(from: $0) } + ["Total"]
+        let header = ["Customer · Project"] + weekDays.map { formatter.string(from: $0) } + ["Total"]
         lines.append(header.joined(separator: "\t"))
         for row in rows {
             let cells = [Self.tsvSanitize(row.label)]

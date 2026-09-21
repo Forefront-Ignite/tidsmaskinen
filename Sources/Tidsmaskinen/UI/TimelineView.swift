@@ -116,7 +116,9 @@ struct TimelineView: View {
             }
         }
         .overlay(alignment: .bottom) { undoToast }
+        .onChange(of: state.timelineTargetDay) { _, _ in consumeTimelineTarget() }
         .onAppear {
+            consumeTimelineTarget()
             reload()
             let t = Timer(timeInterval: 8, repeats: true) { _ in
                 Task { @MainActor in reload() }
@@ -147,6 +149,13 @@ struct TimelineView: View {
         .onChange(of: state.sampleCount) { _, _ in reload() }
         .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload() }
         .onChange(of: state.commandCenterLastSyncAt) { _, _ in reload() }
+    }
+
+    /// A report cell asked for a specific day.
+    private func consumeTimelineTarget() {
+        guard let target = state.timelineTargetDay else { return }
+        state.timelineTargetDay = nil
+        day = Calendar.current.startOfDay(for: target)
     }
 
     // MARK: - Day stats

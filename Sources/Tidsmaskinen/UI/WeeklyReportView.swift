@@ -16,9 +16,6 @@ struct WeeklyReportView: View {
     @State private var reloadTask: Task<Void, Never>?
     @State private var customers: [Customer] = []
     @State private var projects: [Project] = []
-    /// Derived per-customer rollups, recomputed only when the report reloads
-    /// (not on every body evaluation).
-    @State private var summaries: [CustomerSummary] = []
     /// Derived per-(customer, project) per-day grid rows, recomputed only when
     /// the report reloads (the source for the "Hours by project & day" table).
     @State private var gridGroups: [GridGroup] = []
@@ -28,6 +25,13 @@ struct WeeklyReportView: View {
     /// time, which is tracked but not reviewable).
     @State private var backlogCount: Int = 0
     @State private var backlogHours: Double = 0
+    /// Review's open backlog per day of the week (count, hours) — the day
+    /// headers link into Review scoped to that day.
+    @State private var openCountPerDay: [Int] = Array(repeating: 0, count: 7)
+    @State private var openHoursPerDay: [Double] = Array(repeating: 0, count: 7)
+    @State private var reported: ReportedWeek?
+    @State private var hasExpandedInitialCustomer = false
+    @AppStorage(SettingsKey.reportRounding) private var roundingRaw: String = ReportRounding.nearest.rawValue
 
     private let calendar = Calendar.weekStartingMonday()
 
@@ -49,10 +53,9 @@ struct WeeklyReportView: View {
                         // A failed refresh keeps the last good report on screen
                         // but must say so — the numbers may be stale.
                         if loadError != nil { loadErrorBanner }
+                        calendarBanner
                         heroRow(report)
                         projectGridPanel(report)
-                        dayBarsPanel(report)
-                        customerList(report)
                     }
                     .padding(28)
                 }
@@ -69,6 +72,7 @@ struct WeeklyReportView: View {
         .onAppear { reload(immediate: true) }
         .onDisappear { reloadTask?.cancel() }
         .onChange(of: weekStart) { _, _ in reload(immediate: true) }
+        .onChange(of: roundingRaw) { _, _ in reload(immediate: true) }
         .onChange(of: state.sampleCount) { _, _ in reload(immediate: false) }
         .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload(immediate: true) }
         .onChange(of: state.commandCenterLastSyncAt) { _, _ in reload(immediate: true) }
@@ -101,31 +105,41 @@ struct WeeklyReportView: View {
 
     @ViewBuilder
     private var header: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Weekly report")
+                Text("Week \(weekNumber)")
                     .font(.system(size: 24, weight: .bold))
-                Text(weekTitle)
+                Text(weekSubtitle)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Picker("Round", selection: $roundingRaw) {
+                ForEach(ReportRounding.allCases) { Text($0.label).tag($0.rawValue) }
+            }
+            .fixedSize()
+            .help("How each cell rounds to a quarter hour. Day totals always keep their true sum.")
             if report != nil {
+                reportedButton
                 Button {
                     if let report { copyTSV(report) }
                 } label: {
-                    Label(copied ? "Copied!" : "Copy as TSV", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    Label(copied ? "Copied!" : "Copy for Forefront", systemImage: copied ? "checkmark" : "doc.on.doc")
                 }
                 .buttonStyle(.bordered)
+                .keyboardShortcut("c", modifiers: [.command, .shift])
+                .help("Copy the grid as TSV (⇧⌘C)")
             }
             DateNavigator(
-                title: weekStart == calendar.currentWeekInterval().start ? "This week" : weekTitle,
+                title: isCurrentWeek ? "This week" : weekTitle,
                 nowLabel: "This week",
-                prevHelp: "Previous week",
-                nextHelp: "Next week",
+                prevHelp: "Previous week (⌘←)",
+                nextHelp: "Next week (⌘→)",
                 titleMinWidth: 150,
                 nextDisabled: weekStart >= calendar.currentWeekInterval().start,
-                nowDisabled: weekStart == calendar.currentWeekInterval().start,
+                nowDisabled: isCurrentWeek,
+                prevShortcut: KeyboardShortcut(.leftArrow, modifiers: .command),
+                nextShortcut: KeyboardShortcut(.rightArrow, modifiers: .command),
                 onPrev: { weekStart = calendar.date(byAdding: .day, value: -7, to: weekStart) ?? weekStart },
                 onNext: { weekStart = calendar.date(byAdding: .day, value: 7, to: weekStart) ?? weekStart },
                 onNow: { weekStart = calendar.currentWeekInterval().start }
@@ -135,9 +149,62 @@ struct WeeklyReportView: View {
         .padding(.vertical, 14)
     }
 
+    private var isCurrentWeek: Bool { weekStart == calendar.currentWeekInterval().start }
+    private var weekNumber: Int { calendar.component(.weekOfYear, from: weekStart) }
+    private var rounding: ReportRounding { ReportRounding(rawValue: roundingRaw) ?? .nearest }
+
     private var weekTitle: String {
         let endDate = calendar.date(byAdding: .day, value: 6, to: weekStart) ?? weekStart
         return "\(DateFormatting.dayMonth.string(from: weekStart)) – \(DateFormatting.dayMonth.string(from: endDate)) \(DateFormatting.year.string(from: weekStart))"
+    }
+
+    /// "Mon 14 Sep – Sun 20 Sep 2026 · through today" for the running week.
+    private var weekSubtitle: String {
+        let endDate = calendar.date(byAdding: .day, value: 6, to: weekStart) ?? weekStart
+        let range = "\(DateFormatting.weekdayDayShortMonth.string(from: weekStart)) – \(DateFormatting.weekdayDayShortMonth.string(from: endDate)) \(DateFormatting.year.string(from: weekStart))"
+        return isCurrentWeek ? range + " · through today" : range
+    }
+
+    /// Remember the week's total so a later sync that changes it is flagged
+    /// instead of silently rewriting a figure already filed.
+    @ViewBuilder
+    private var reportedButton: some View {
+        if let reported {
+            Button {
+                run { try state.database.clearReported(weekStart: weekStart) }
+            } label: {
+                Label("Reported", systemImage: "checkmark.seal.fill")
+            }
+            .buttonStyle(.bordered).tint(TM.positive)
+            .help("Reported \(hLabel(reported.totalHours)) on \(reported.reportedAt.formatted(date: .abbreviated, time: .shortened)). Click to unmark.")
+        } else {
+            Button("Mark reported") {
+                if let report { run { try state.database.markReported(weekStart: weekStart, totalHours: report.grandTotal) } }
+            }
+            .buttonStyle(.bordered)
+            .help("Remember this week's total, so a later sync that changes it is flagged here.")
+        }
+    }
+
+    /// A stale or signed-out calendar silently drops meetings from the grid.
+    @ViewBuilder
+    private var calendarBanner: some View {
+        let st = state.health.status(.calendar)
+        if st.level == .warn || st.level == .fail {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                Text("Calendar: \(st.detail). Meetings may be missing from this week.")
+                    .font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                if st.level == .fail {
+                    Button("Sign in") { state.showSignIn = true }.controlSize(.small)
+                } else {
+                    Button("Sync now") { Task { await state.calendarSync.syncNow(); state.health.probe() } }.controlSize(.small)
+                }
+            }
+            .padding(12)
+            .background(Color.orange.opacity(0.10), in: .rect(cornerRadius: 12))
+        }
     }
 
     // MARK: - Hero
@@ -145,78 +212,63 @@ struct WeeklyReportView: View {
     @ViewBuilder
     private func heroRow(_ report: WeeklyReport) -> some View {
         let grand = report.grandTotal
-        let delta = grand - lastWeekTotal
+        // The same open figure the grid sums, so the two never disagree.
+        let open = openHoursPerDay.reduce(0, +)
+        let tracked = grand + open
+        let share = tracked > 0 ? Int((grand / tracked * 100).rounded()) : 100
 
         HStack(alignment: .top, spacing: 18) {
-            // Tracked this week
             VStack(alignment: .leading, spacing: 8) {
-                Text("TRACKED THIS WEEK")
+                Text(isCurrentWeek ? "TRACKED THIS WEEK" : "TRACKED")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                 HStack(alignment: .firstTextBaseline, spacing: 2) {
-                    Text(oneDecimal(grand))
+                    Text(gridNum(tracked))
                         .font(.system(size: 44, weight: .heavy, design: .rounded))
                     Text("h").font(.system(size: 22, weight: .bold)).foregroundStyle(.tertiary)
                 }
-                Label {
-                    Text("\(delta >= 0 ? "+" : "")\(oneDecimal(delta))h vs last week")
-                } icon: {
-                    Image(systemName: delta >= 0 ? "arrow.up.right" : "arrow.down.right")
-                }
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(delta >= 0 ? TM.positive : Color.secondary)
-
-                Divider().padding(.vertical, 2)
-
-                HStack(spacing: 5) {
-                    Image(systemName: "arrow.turn.down.right")
-                        .font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
-                    Text("\(oneDecimal(report.activeHours))h actual")
-                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
-                }
-                .help("Distinct working time: your parallel work laid on a single timeline — each minute counted once, so it never double-counts time you reported to two customers at once.")
+                Text("\(oneDecimal(report.activeHours)) h at the keyboard · \(oneDecimal(max(0, grand - report.activeHours))) h in parallel")
+                    .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.secondary)
+                    .help("Keyboard time counts every minute once. Parallel time is meetings and work reported to two customers in the same minute, so the tracked total can exceed the clock.")
+                Text("Same point last week: \(oneDecimal(lastWeekTotal)) h")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let reported { reportedStatus(reported, current: grand) }
             }
             .padding(22)
-            .frame(width: 240, alignment: .leading)
+            .frame(width: 270, alignment: .leading)
             .glassCard()
 
-            // Review backlog — only flags genuinely actionable items (the same
-            // pool the Review screen shows). Ambient app/sub-threshold time is
-            // tracked but not a review to-do, so it never appears here.
-            VStack(alignment: .leading, spacing: 0) {
-                Text("ATTRIBUTION")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-
-                if backlogCount > 0 {
-                    Text("\(Text("\(backlogCount)").foregroundStyle(TM.accent).bold()) \(backlogCount == 1 ? "thing" : "things") worth reviewing · \(hLabel(backlogHours))")
-                        .font(.system(size: 17, weight: .semibold))
-                        .padding(.top, 6)
-
-                    Spacer(minLength: 14)
-
-                    HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Attributed").font(.system(size: 15, weight: .semibold))
+                    Spacer()
+                    Text("\(gridNum(grand)) h · \(share)%").font(.system(size: 15, weight: .bold)).monospacedDigit()
+                }
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.secondary.opacity(0.18))
+                        Capsule().fill(TM.accent).frame(width: geo.size.width * (tracked > 0 ? grand / tracked : 1))
+                    }
+                }
+                .frame(height: 8)
+                HStack(spacing: 12) {
+                    if backlogCount > 0 {
+                        Text("\(gridNum(open)) h open · \(backlogCount) item\(backlogCount == 1 ? "" : "s")")
+                            .font(.system(size: 13, weight: .semibold))
                         Button {
                             openReviewForThisWeek()
                         } label: {
-                            Label("Review unattributed", systemImage: "sparkles")
+                            Label("Review week \(weekNumber)", systemImage: "sparkles")
                         }
-                        .buttonStyle(.borderedProminent)
-                        Text("Attribute open time so it lands in the report")
-                            .font(.caption).foregroundStyle(.secondary)
+                        .buttonStyle(.borderedProminent).controlSize(.small)
+                    } else {
+                        Label("All reviewed — nothing left to attribute", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(TM.positive).font(.system(size: 13, weight: .semibold))
                     }
-                } else {
-                    Text("Everything captured has a home")
-                        .font(.system(size: 17, weight: .semibold))
-                        .padding(.top, 6)
-
-                    Spacer(minLength: 14)
-
-                    Label("All reviewed", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(TM.positive).font(.system(size: 13, weight: .semibold))
-                    Text("Nothing left to attribute. Your report is ready.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
                 }
+                Text("\(rounding.label); day totals keep their true sum. Hover a cell for its raw value.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             .padding(22)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -224,106 +276,66 @@ struct WeeklyReportView: View {
         }
     }
 
-    // MARK: - Day bars
-
-    @ViewBuilder
-    private func dayBarsPanel(_ report: WeeklyReport) -> some View {
-        let summaries = self.summaries
-        // Attributed time only, matching the hero's "tracked this week" total.
-        // Ambient, non-attributable app time isn't charted here; open backlog is
-        // surfaced as its own row in the customer list instead.
-        let grandPerDay = report.dayTotals
-        let maxDay = max(grandPerDay.max() ?? 1, 0.0001)
-
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Hours by day").font(.system(size: 15, weight: .bold))
-                Spacer()
-                Text("stacked by customer").font(.caption).foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 22).padding(.top, 18).padding(.bottom, 8)
-
-            HStack(alignment: .bottom, spacing: 14) {
-                ForEach(Array(days.enumerated()), id: \.offset) { i, day in
-                    let tot = grandPerDay[i]
-                    VStack(spacing: 8) {
-                        GeometryReader { geo in
-                            VStack(spacing: 0) {
-                                Spacer(minLength: 0)
-                                VStack(spacing: 0) {
-                                    if tot > 0 {
-                                        ForEach(summaries) { c in
-                                            if c.perDay[i] > 0 {
-                                                Rectangle().fill(c.color)
-                                                    .frame(height: geo.size.height * (tot / maxDay) * (c.perDay[i] / tot))
-                                            }
-                                        }
-                                    }
-                                }
-                                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                            }
-                        }
-                        .frame(maxWidth: 46)
-                        Text(DateFormatting.weekdayShort.string(from: day))
-                            .font(.caption).foregroundStyle(.secondary)
-                        Text(tot > 0 ? oneDecimal(tot) : "–")
-                            .font(.system(size: 11)).foregroundStyle(.tertiary).monospacedDigit()
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-            }
-            .frame(height: 210)
-            .padding(.horizontal, 22).padding(.bottom, 16)
-        }
-        .glassCard()
+    private func reportedStatus(_ r: ReportedWeek, current: Double) -> some View {
+        let changed = abs(current - r.totalHours) >= 0.01
+        let when = r.reportedAt.formatted(date: .abbreviated, time: .shortened)
+        return Label(changed ? "Reported \(hLabel(r.totalHours)) on \(when) — now \(hLabel(current))"
+                             : "Reported \(hLabel(r.totalHours)) on \(when)",
+                     systemImage: changed ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
+            .font(.caption).foregroundStyle(changed ? Color.orange : TM.positive)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
-    // MARK: - Hours by project & day grid
+    // MARK: - Hours by customer, project & day
 
-    /// Spreadsheet-style table: one row per project (grouped under its customer),
-    /// one column per weekday, cells = that project's hours that day, with a
-    /// per-customer subtotal, a per-project row total, and a column-total footer.
-    /// This is the on-screen twin of the TSV the "Copy as TSV" button produces —
-    /// it's the only place you can read "project X, Tuesday = 2.0h" directly.
+    /// The one table: collapsible customer rows with their projects, one
+    /// column per weekday (with that day's open backlog linking into Review),
+    /// then Attributed, Unattributed → Review and Tracked. Its on-screen twin
+    /// is the TSV that "Copy for Forefront" produces.
     @ViewBuilder
     private func projectGridPanel(_ report: WeeklyReport) -> some View {
         let groups = self.gridGroups
-        let dayWidth: CGFloat = 46
+        let dayWidth: CGFloat = 56
         let totalWidth: CGFloat = 60
+        // The grid's own open figure is the sum of its day cells, so rows and
+        // columns agree (the hero's figure comes from the week-wide backlog).
+        let open = openHoursPerDay.reduce(0, +)
 
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Hours by project & day").font(.system(size: 15, weight: .bold))
-                Spacer()
-                Text("each cell is that project's hours that day")
-                    .font(.caption).foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 22).padding(.top, 18).padding(.bottom, 12)
-
-            if groups.isEmpty {
-                Text("No attributed time this week yet.")
+            if groups.isEmpty && backlogCount == 0 {
+                Text("Nothing tracked this week yet.")
                     .font(.system(size: 13)).foregroundStyle(.secondary)
-                    .padding(.horizontal, 22).padding(.bottom, 18)
+                    .padding(22)
             } else {
                 Grid(alignment: .trailing, horizontalSpacing: 10, verticalSpacing: 0) {
-                    // Column headers: weekday over day-of-month.
                     GridRow {
-                        Text("PROJECT")
-                            .font(.system(size: 11, weight: .semibold)).foregroundStyle(.tertiary)
+                        Text("CUSTOMER · PROJECT")
+                            .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .gridColumnAlignment(.leading)
-                        ForEach(Array(days.enumerated()), id: \.offset) { _, day in
-                            VStack(spacing: 1) {
+                        ForEach(Array(days.enumerated()), id: \.offset) { i, day in
+                            VStack(spacing: 2) {
                                 Text(DateFormatting.weekdayShort.string(from: day))
                                     .font(.system(size: 11, weight: .semibold))
                                 Text(dayNumber(day))
-                                    .font(.system(size: 9)).foregroundStyle(.tertiary)
+                                    .font(.system(size: 9)).foregroundStyle(.secondary)
+                                if openHoursPerDay[i] > 0 {
+                                    Button {
+                                        state.reviewTargetDay = day
+                                        state.selectedSection = .review
+                                    } label: {
+                                        Text("\(gridNum(openHoursPerDay[i])) open")
+                                            .font(.system(size: 9, weight: .semibold)).foregroundStyle(TM.accent)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("\(openCountPerDay[i]) open item\(openCountPerDay[i] == 1 ? "" : "s") — open Review on this day")
+                                }
                             }
                             .frame(width: dayWidth)
                             .gridColumnAlignment(.center)
                         }
                         Text("TOTAL")
-                            .font(.system(size: 11, weight: .semibold)).foregroundStyle(.tertiary)
+                            .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
                             .frame(width: totalWidth, alignment: .trailing)
                             .gridColumnAlignment(.trailing)
                     }
@@ -332,251 +344,156 @@ struct WeeklyReportView: View {
                     Divider().gridCellUnsizedAxes(.horizontal)
 
                     ForEach(groups) { g in
-                        // Customer subtotal header — name + color, weekly total.
+                        let isOpen = expandedCustomerID == g.id
                         GridRow {
-                            HStack(spacing: 9) {
-                                ColorDot(color: g.color, size: 11, square: true)
-                                Text(g.name).font(.system(size: 13.5, weight: .semibold))
-                                Spacer(minLength: 0)
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.15)) { expandedCustomerID = isOpen ? nil : g.id }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+                                        .rotationEffect(.degrees(isOpen ? 90 : 0))
+                                    ColorDot(color: g.color, size: 11, square: true)
+                                    Text(g.name).font(.system(size: 13.5, weight: .semibold))
+                                    Text("\(g.projects.count) project\(g.projects.count == 1 ? "" : "s")")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                    Spacer(minLength: 0)
+                                }
+                                .contentShape(Rectangle())
                             }
-                            .gridCellColumns(8)
+                            .buttonStyle(.plain)
+                            .gridColumnAlignment(.leading)
+                            .accessibilityLabel("\(g.name), \(gridNum(g.total)) hours, \(isOpen ? "expanded" : "collapsed")")
+                            ForEach(Array(g.perDay.enumerated()), id: \.offset) { i, h in
+                                dayCell(h, raw: nil, day: days[i], width: dayWidth, weight: .semibold)
+                            }
                             Text(gridNum(g.total))
                                 .font(.system(size: 13, weight: .bold)).monospacedDigit()
                                 .frame(width: totalWidth, alignment: .trailing)
                         }
-                        .padding(.top, 13).padding(.bottom, 4)
+                        .padding(.top, 10).padding(.bottom, 3)
+                        .help(contributorsHelp(for: g, in: report))
 
-                        ForEach(g.projects) { p in
-                            GridRow {
-                                Text(p.name)
-                                    .font(.system(size: 12.5)).foregroundStyle(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.leading, 20)
-                                ForEach(Array(p.perDay.enumerated()), id: \.offset) { _, h in
-                                    cellText(h).frame(width: dayWidth, alignment: .trailing)
+                        if isOpen {
+                            ForEach(g.projects) { p in
+                                GridRow {
+                                    Text(p.name)
+                                        .font(.system(size: 12.5)).foregroundStyle(.secondary)
+                                        .lineLimit(1).truncationMode(.tail)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.leading, 26)
+                                    ForEach(Array(p.perDay.enumerated()), id: \.offset) { i, h in
+                                        dayCell(h, raw: p.rawPerDay.indices.contains(i) ? p.rawPerDay[i] : nil,
+                                                day: days[i], width: dayWidth, weight: .regular)
+                                    }
+                                    Text(gridNum(p.total))
+                                        .font(.system(size: 12.5, weight: .semibold)).monospacedDigit()
+                                        .frame(width: totalWidth, alignment: .trailing)
                                 }
-                                Text(gridNum(p.total))
-                                    .font(.system(size: 12.5, weight: .semibold)).monospacedDigit()
-                                    .frame(width: totalWidth, alignment: .trailing)
+                                .padding(.vertical, 3)
                             }
-                            .padding(.vertical, 3)
                         }
                     }
 
                     Divider().gridCellUnsizedAxes(.horizontal).padding(.top, 9)
 
-                    // Column totals — these match the hero's "tracked this week".
-                    GridRow {
-                        Text("Total").font(.system(size: 13, weight: .bold))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        ForEach(Array(report.dayTotals.enumerated()), id: \.offset) { _, h in
-                            Text(h > 0 ? gridNum(h) : "·")
-                                .font(.system(size: 12.5, weight: .bold))
-                                .foregroundStyle(h > 0 ? Color.primary : Color(.quaternaryLabelColor))
-                                .monospacedDigit()
-                                .frame(width: dayWidth, alignment: .trailing)
+                    summaryRow("Attributed", report.dayTotals, total: report.grandTotal, weight: .bold, width: dayWidth, totalWidth: totalWidth)
+
+                    if backlogCount > 0 {
+                        GridRow {
+                            Button { openReviewForThisWeek() } label: {
+                                HStack(spacing: 6) {
+                                    Text("Unattributed").font(.system(size: 13, weight: .semibold)).foregroundStyle(TM.accent)
+                                    Image(systemName: "arrow.right").font(.system(size: 10, weight: .bold)).foregroundStyle(TM.accent)
+                                    Text("Review").font(.system(size: 13, weight: .semibold)).foregroundStyle(TM.accent)
+                                    Spacer(minLength: 0)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .gridColumnAlignment(.leading)
+                            ForEach(Array(openHoursPerDay.enumerated()), id: \.offset) { i, h in
+                                Text(h > 0 ? gridNum(h) : "·")
+                                    .font(.system(size: 12.5, weight: .semibold)).monospacedDigit()
+                                    .foregroundStyle(h > 0 ? TM.accent : Color(.quaternaryLabelColor))
+                                    .frame(width: dayWidth, alignment: .trailing)
+                            }
+                            Text(gridNum(open))
+                                .font(.system(size: 12.5, weight: .semibold)).monospacedDigit().foregroundStyle(TM.accent)
+                                .frame(width: totalWidth, alignment: .trailing)
                         }
-                        Text(gridNum(report.grandTotal))
-                            .font(.system(size: 13, weight: .heavy)).monospacedDigit()
-                            .frame(width: totalWidth, alignment: .trailing)
+                        .padding(.top, 8)
                     }
-                    .padding(.top, 11)
+
+                    summaryRow("Tracked", zip(report.dayTotals, openHoursPerDay).map(+), total: report.grandTotal + open,
+                               weight: .heavy, width: dayWidth, totalWidth: totalWidth)
                 }
-                .padding(.horizontal, 22).padding(.bottom, 18)
+                .padding(.horizontal, 22).padding(.top, 18).padding(.bottom, 10)
+
+                Text("Click a cell to open that day in My day. Hover a customer for what contributed. Hover a cell for its raw value.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .padding(.horizontal, 22).padding(.bottom, 16)
             }
         }
         .glassCard()
+    }
+
+    @ViewBuilder
+    private func summaryRow(_ label: String, _ perDay: [Double], total: Double, weight: Font.Weight,
+                            width: CGFloat, totalWidth: CGFloat) -> some View {
+        GridRow {
+            Text(label).font(.system(size: 13, weight: weight))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(Array(perDay.enumerated()), id: \.offset) { _, h in
+                Text(h > 0 ? gridNum(h) : "·")
+                    .font(.system(size: 12.5, weight: weight))
+                    .foregroundStyle(h > 0 ? Color.primary : Color(.quaternaryLabelColor))
+                    .monospacedDigit()
+                    .frame(width: width, alignment: .trailing)
+            }
+            Text(gridNum(total))
+                .font(.system(size: 13, weight: weight)).monospacedDigit()
+                .frame(width: totalWidth, alignment: .trailing)
+        }
+        .padding(.top, 8)
+    }
+
+    /// A cell: click opens that day in My day; hover shows the raw value.
+    private func dayCell(_ h: Double, raw: Double?, day: Date, width: CGFloat, weight: Font.Weight) -> some View {
+        Button {
+            state.timelineTargetDay = day
+            state.selectedSection = .timeline
+        } label: {
+            Group {
+                if h > 0 {
+                    Text(gridNum(h)).font(.system(size: 12.5, weight: weight)).monospacedDigit()
+                } else {
+                    Text("·").font(.system(size: 12.5)).foregroundStyle(Color(.quaternaryLabelColor))
+                }
+            }
+            .frame(width: width, alignment: .trailing)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(raw.map { String(format: "%.2f h before rounding — click to open this day in My day", $0) }
+              ?? "Open this day in My day")
     }
 
     private func dayNumber(_ day: Date) -> String {
         String(calendar.component(.day, from: day))
     }
 
-    /// A single grid cell: the hours, right-aligned and monospaced, or a faint
-    /// dot when the project had no time that day (reads cleaner than a blank).
-    @ViewBuilder
-    private func cellText(_ h: Double) -> some View {
-        if h > 0 {
-            Text(gridNum(h)).font(.system(size: 12.5)).monospacedDigit()
-        } else {
-            Text("·").font(.system(size: 12.5)).foregroundStyle(Color(.quaternaryLabelColor))
-        }
-    }
-
-    // MARK: - Customer list
-
-    @ViewBuilder
-    private func customerList(_ report: WeeklyReport) -> some View {
-        let summaries = self.summaries
-        // Share is computed against attributed time only, so the customer rows
-        // sum to ~100%. Open backlog is shown below as its own actionable row
-        // (the same pool Review surfaces) rather than diluting every share with
-        // ambient, non-attributable app time.
-        let grand = report.grandTotal
-
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 0) {
-                Text("CUSTOMER").frame(maxWidth: .infinity, alignment: .leading)
-                Text("THIS WEEK").frame(width: 120, alignment: .leading)
-                Text("HOURS").frame(width: 66, alignment: .trailing)
-                Text("SHARE").frame(width: 60, alignment: .trailing)
-                Spacer().frame(width: 24)
-            }
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(.tertiary)
-            .padding(.horizontal, 8)
-
-            ForEach(summaries) { c in
-                customerRow(c, grand: grand)
-            }
-
-            if backlogCount > 0 {
-                backlogRow()
+    /// What made up a customer's week: the top contributors across its rows.
+    private func contributorsHelp(for g: GridGroup, in report: WeeklyReport) -> String {
+        var seconds: [String: Double] = [:]
+        for p in g.projects {
+            for c in report.breakdownsByRowID[p.id]?.topContributors ?? [] {
+                seconds[c.label, default: 0] += c.seconds
             }
         }
-    }
-
-    @ViewBuilder
-    private func customerRow(_ c: CustomerSummary, grand: Double) -> some View {
-        let isOpen = expandedCustomerID == c.id
-        let share = grand > 0 ? Int((c.total / grand * 100).rounded()) : 0
-        let maxDay = max(c.perDay.max() ?? 1, 0.0001)
-
-        VStack(spacing: 0) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    expandedCustomerID = isOpen ? nil : c.id
-                }
-            } label: {
-                HStack(spacing: 15) {
-                    ColorDot(color: c.color, size: 13, square: true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(c.name).font(.system(size: 14.5, weight: .semibold))
-                        Text("\(c.projects.count) \(c.projects.count == 1 ? "project" : "projects")")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    // sparkline
-                    HStack(alignment: .bottom, spacing: 3) {
-                        ForEach(0..<7, id: \.self) { i in
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(c.color.opacity(c.perDay[i] > 0 ? 0.92 : 0.18))
-                                .frame(width: 7, height: max(3, 30 * (c.perDay[i] / maxDay)))
-                        }
-                    }
-                    .frame(height: 30)
-                    Text(hLabel(c.total)).font(.system(size: 15, weight: .bold)).monospacedDigit()
-                        .frame(width: 66, alignment: .trailing)
-                    Text("\(share)%").font(.caption).foregroundStyle(.tertiary).monospacedDigit()
-                        .frame(width: 60, alignment: .trailing)
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(isOpen ? 90 : 0))
-                        .frame(width: 24)
-                }
-                .padding(.horizontal, 18).padding(.vertical, 14)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if isOpen {
-                VStack(spacing: 0) {
-                    ForEach(Array(c.projects.enumerated()), id: \.offset) { _, p in
-                        HStack(spacing: 12) {
-                            Text(p.name).font(.system(size: 13)).foregroundStyle(.secondary)
-                            GeometryReader { geo in
-                                Capsule().fill(c.color)
-                                    .frame(width: c.total > 0 ? geo.size.width * (p.hours / c.total) : 0, height: 6)
-                                    .frame(maxHeight: .infinity, alignment: .center)
-                            }
-                            .frame(height: 6)
-                            Text(hLabel(p.hours)).font(.system(size: 13, weight: .semibold)).monospacedDigit()
-                                .frame(width: 54, alignment: .trailing)
-                        }
-                        .padding(.leading, 46).padding(.trailing, 18).padding(.vertical, 9)
-                        Divider().opacity(0.4)
-                    }
-                }
-            }
-        }
-        .glassCard(radius: 16)
-    }
-
-    /// Open backlog for the week — the *same* actionable pool the Review screen
-    /// and the hero surface (via `ReviewQueue`), not the dedup engine's raw
-    /// leftover. Keeping the two in lockstep means this row vanishes exactly
-    /// when the hero says "all reviewed", instead of contradicting it with
-    /// ambient, non-attributable app time.
-    @ViewBuilder
-    private func backlogRow() -> some View {
-        Button {
-            openReviewForThisWeek()
-        } label: {
-            HStack(spacing: 15) {
-                RoundedRectangle(cornerRadius: 4).fill(hatch).frame(width: 13, height: 13)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Uncategorized").font(.system(size: 14.5, weight: .semibold))
-                    Text("\(backlogCount) \(backlogCount == 1 ? "item" : "items") worth reviewing — attribute so it lands in the report")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Text(hLabel(backlogHours)).font(.system(size: 15, weight: .bold)).monospacedDigit()
-                    .frame(width: 66, alignment: .trailing)
-                Label("Review", systemImage: "sparkles")
-                    .font(.caption.weight(.semibold)).foregroundStyle(TM.accent)
-                    .frame(width: 84, alignment: .trailing)
-            }
-            .padding(.horizontal, 18).padding(.vertical, 14)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-            .foregroundStyle(.tertiary))
-    }
-
-    // MARK: - Derived per-customer summaries
-
-    struct CustomerSummary: Identifiable {
-        let id: String          // customerID
-        let name: String
-        let color: Color
-        var perDay: [Double]
-        var projects: [(name: String, hours: Double)]
-        var total: Double { perDay.reduce(0, +) }
-    }
-
-    private func computeCustomerSummaries(_ report: WeeklyReport) -> [CustomerSummary] {
-        let customersByID = Dictionary(uniqueKeysWithValues: customers.map { ($0.id, $0) })
-        let projectsByID = Dictionary(uniqueKeysWithValues: projects.map { ($0.id, $0) })
-        var byCustomer: [String: CustomerSummary] = [:]
-        var order: [String] = []
-
-        for row in report.rows {
-            let parts = row.id.split(separator: "/", maxSplits: 1).map(String.init)
-            let cid = parts[0]
-            let projectID = parts.count > 1 ? parts[1] : nil
-            if byCustomer[cid] == nil {
-                let cust = customersByID[cid]
-                byCustomer[cid] = CustomerSummary(
-                    id: cid,
-                    name: cust?.name ?? row.label.components(separatedBy: " · ").first ?? cid,
-                    color: Color(hex: cust?.displayColor ?? row.color) ?? .blue,
-                    perDay: Array(repeating: 0, count: 7),
-                    projects: []
-                )
-                order.append(cid)
-            }
-            for d in 0..<7 { byCustomer[cid]!.perDay[d] += row.perDayHours[d] }
-            let projName = projectID.flatMap { projectsByID[$0]?.name } ?? "No project"
-            byCustomer[cid]!.projects.append((projName, row.totalHours))
-        }
-
-        for cid in order {
-            byCustomer[cid]!.projects.sort { $0.hours > $1.hours }
-        }
-        return order.map { byCustomer[$0]! }.sorted { $0.total > $1.total }
+        let top = seconds.sorted { $0.value > $1.value }.prefix(6)
+            .map { "\($0.key) \(hLabel($0.value / 3600))" }
+        return top.isEmpty ? g.name : "\(g.name): " + top.joined(separator: " · ")
     }
 
     // MARK: - Derived per-(customer, project) grid
@@ -584,7 +501,8 @@ struct WeeklyReportView: View {
     struct GridProject: Identifiable {
         let id: String          // the report row id (customerID or customerID/projectID)
         let name: String
-        let perDay: [Double]    // 7 entries, Mon..Sun
+        let perDay: [Double]    // 7 entries, Mon..Sun, rounded
+        let rawPerDay: [Double] // the same before rounding, for hover
         var total: Double { perDay.reduce(0, +) }
     }
 
@@ -622,8 +540,12 @@ struct WeeklyReportView: View {
                 order.append(cid)
             }
             for d in 0..<7 { perDay[cid]![d] += row.perDayHours[d] }
-            let projName = projectID.flatMap { projectsByID[$0]?.name } ?? "No project"
-            projectsByCustomer[cid]!.append(GridProject(id: row.id, name: projName, perDay: row.perDayHours))
+            // The report labels rows "Customer · Project" from every project it
+            // knows, archived ones included, so a retired project keeps its name.
+            let labelledProject = row.label.components(separatedBy: " · ").dropFirst().joined(separator: " · ")
+            let projName = projectID.flatMap { projectsByID[$0]?.name }
+                ?? (labelledProject.isEmpty ? "No project" : labelledProject)
+            projectsByCustomer[cid]!.append(GridProject(id: row.id, name: projName, perDay: row.perDayHours, rawPerDay: row.rawPerDayHours))
         }
 
         return order.map { cid in
@@ -660,8 +582,6 @@ struct WeeklyReportView: View {
         return String(format: "%.1fh", r)
     }
 
-    private var hatch: Color { Color.secondary.opacity(0.28) }
-
     // MARK: - Reload
 
     /// Schedule a reload. `immediate` reloads run as soon as possible (week
@@ -687,6 +607,11 @@ struct WeeklyReportView: View {
         let sampleInterval = AppSettings.sampleIntervalSeconds
         let idleThresholdMinutes = AppSettings.claudeIdleThresholdMinutes
         let reviewMinMinutes = AppSettings.reviewMinMinutes
+        let rounding = self.rounding
+        let weekDays = self.days
+        // Like-for-like: on the running week compare last week through the
+        // same weekday, not a full week against a partial one.
+        let todayIndex = isCurrentWeek ? min(6, max(0, calendar.dateComponents([.day], from: weekStart, to: Date()).day ?? 6)) : 6
         let debounceNs: UInt64 = immediate ? 0 : 1_500_000_000
 
         reloadTask = Task { @MainActor in
@@ -714,14 +639,15 @@ struct WeeklyReportView: View {
                             micSessions: micSessions,
                             idleThresholdSeconds: TimeInterval(idleThresholdMinutes * 60),
                             matcher: matcher,
-                            sampleIntervalSeconds: sampleInterval
+                            sampleIntervalSeconds: sampleInterval,
+                            rounding: rounding
                         )
                     }
 
                     let report = try computeWeek(weekValue)
                     let prev = try computeWeek(prevWeek)
-                    let customers = try database.allCustomers()
-                    let projects = try database.allProjects()
+                    let customers = try database.allCustomersIncludingArchived()   // retired projects keep their names
+                    let projects = try database.allProjectsIncludingArchived()
                     // Actionable review backlog for this week — same pool the
                     // Review screen surfaces, so the hero stays in lockstep.
                     let backlog = try ReviewQueue.build(
@@ -731,10 +657,25 @@ struct WeeklyReportView: View {
                         idleThresholdSeconds: TimeInterval(idleThresholdMinutes * 60),
                         minMinutes: reviewMinMinutes
                     )
-                    return ReloadPayload(report: report, lastWeekTotal: prev.grandTotal,
+                    var openCount = Array(repeating: 0, count: 7)
+                    var openHours = Array(repeating: 0.0, count: 7)
+                    for (i, day) in weekDays.enumerated() {
+                        let dayInterval = DateInterval(start: day, end: Calendar.weekStartingMonday().date(byAdding: .day, value: 1, to: day) ?? day)
+                        let units = try ReviewQueue.build(
+                            database: database, interval: dayInterval,
+                            sampleIntervalSeconds: sampleInterval,
+                            idleThresholdSeconds: TimeInterval(idleThresholdMinutes * 60),
+                            minMinutes: reviewMinMinutes)
+                        openCount[i] = units.count
+                        openHours[i] = rounding.round(units.reduce(0) { $0 + $1.totalSeconds } / 3600.0)
+                    }
+                    return ReloadPayload(report: report,
+                                         lastWeekTotal: prev.dayTotals.prefix(todayIndex + 1).reduce(0, +),
                                          customers: customers, projects: projects,
                                          backlogCount: backlog.count,
-                                         backlogHours: backlog.reduce(0) { $0 + $1.totalSeconds } / 3600.0)
+                                         backlogHours: backlog.reduce(0) { $0 + $1.totalSeconds } / 3600.0,
+                                         openCountPerDay: openCount, openHoursPerDay: openHours,
+                                         reported: try database.reportedWeek(start: weekValue.start))
                 }.value
                 if Task.isCancelled { return }
                 self.report = computed.report
@@ -743,14 +684,27 @@ struct WeeklyReportView: View {
                 self.projects = computed.projects
                 self.backlogCount = computed.backlogCount
                 self.backlogHours = computed.backlogHours
-                self.summaries = computeCustomerSummaries(computed.report)
+                self.openCountPerDay = computed.openCountPerDay
+                self.openHoursPerDay = computed.openHoursPerDay
+                self.reported = computed.reported
                 self.gridGroups = computeGridGroups(computed.report)
+                // Open the largest customer once; after that a collapse sticks.
+                if let first = gridGroups.first,
+                   !hasExpandedInitialCustomer || expandedCustomerID.map({ id in !gridGroups.contains { $0.id == id } }) == true {
+                    expandedCustomerID = first.id
+                    hasExpandedInitialCustomer = true
+                }
                 self.loadError = nil
             } catch {
                 if Task.isCancelled { return }
                 self.loadError = error.localizedDescription
             }
         }
+    }
+
+    /// Run a small write, then refresh; errors show in the banner.
+    private func run(_ body: () throws -> Void) {
+        do { try body(); reload(immediate: true) } catch { loadError = error.localizedDescription }
     }
 
     private func copyTSV(_ report: WeeklyReport) {
@@ -772,4 +726,7 @@ private struct ReloadPayload {
     let projects: [Project]
     let backlogCount: Int
     let backlogHours: Double
+    let openCountPerDay: [Int]
+    let openHoursPerDay: [Double]
+    let reported: ReportedWeek?
 }

@@ -445,6 +445,17 @@ struct CalendarEvent: Codable, FetchableRecord, MutablePersistableRecord, Identi
 /// recurring series. `customerID` nil + `isIgnored` true means "ignore this
 /// series"; `customerID` set means "attribute every occurrence to this customer
 /// unless the specific occurrence has its own override".
+/// A week the user has filed: what it summed to and when, so a later sync
+/// that changes the number is flagged instead of silently rewriting a figure
+/// already reported.
+struct ReportedWeek: Codable, FetchableRecord, PersistableRecord, Equatable {
+    var weekStart: Date
+    var reportedAt: Date
+    var totalHours: Double
+
+    static let databaseTableName = "reported_weeks"
+}
+
 struct MeetingSeriesAttribution: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
     var id: String { seriesMasterID }
     var seriesMasterID: String

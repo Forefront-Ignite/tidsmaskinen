@@ -38,6 +38,9 @@ Stages (from the review's "Suggested order of work"):
 | D18 | Undo toast for the Calls tab's inline Ignore (Review and My day have one) | Reversible today via the call sheet or Review's Ignored filter | Stage 6 polish |
 | D20 | Menu-bar icon visibility is inferred from the status-bar window being ordered in with a width; macOS 26's "Allow in the Menu Bar" off state was not reproduced, so the check warns rather than fails | Needs a machine with the item disabled to confirm the signal | Stage 6 or when it misfires |
 | D21 | Notification on permission loss is verified in code only — needs a real revocation on the signed build to see the prompt and the banner | Dev copy can't lose a grant it never had | First release build test |
+| D22 | Customers sidebar section headers ("From Command Center · 22") are low-contrast on the wallpaper; the sidebar scrollbar sits on the split divider | Judge nits in stage 6 | Polish pass |
+| D23 | Week strip (a per-week coloured strip per pattern) instead of the text "week 30, week 35, week 37 only" | The stack row already lists the weeks; the strip is a visual refinement | Polish pass |
+| D24 | Live match count while editing a rule ("62 samples in the last 90 days") and the shared-host "Assign paths…" affordance in Customers | Both need new queries (same as D5 / D4) | With D5 / D4 |
 | D19 | Day stats "attributed" can exceed "active" (per-customer sums with quarter-hour rounding vs distinct wall clock, as in the report) — the judge read it as contradictory | Same math as the report by design; a caption could explain it | Stage 6 (report compaction touches the same numbers) |
 
 ## Stage 1 — Defaults and scope (2026-09-21)
@@ -203,3 +206,42 @@ missing from the stripe → tray banner) are applied.
 
 **Deferred from this stage:** D20, D21. The mic check verifies call detection rather than an
 AVFoundation permission because detection reads the CoreAudio process list, which needs none.
+
+## Stage 6 — Report compaction, rounding, Customers rule hygiene (2026-09-21)
+
+**Shipped**
+
+- `ReportRounding` (nearest / up / down quarter hour, setting `reportRounding`) in
+  `WeeklyReport.compute`; every day keeps its true total — a positive residue goes to the day's
+  largest bucket, a negative one comes off the largest buckets that still have time — with
+  deterministic tie-breaking and raw cells kept for hover (`ReportRoundingTests`).
+- `reported_weeks` (migration v23): "Mark reported" remembers the filed total; the hero flags when
+  the current total differs.
+- Report view: "Week N" with "through today" on the running week; rounding picker; Mark reported;
+  "Copy for Forefront" (⇧⌘C; TSV header now "Customer · Project" with the year); ⌘← ⌘→; a
+  stale/signed-out calendar banner from `CaptureHealth`; two hero cards (tracked with the keyboard /
+  parallel split and a like-for-like "same point last week"; attributed share with open hours and
+  "Review week N"); one grid with collapsible customer rows (retired projects keep their names),
+  per-day open chips that open Review on that day, cells that open My day on that day, contributor
+  hover, and Attributed / Unattributed → Review / Tracked rows whose totals are the sums of their
+  cells. The day bars and the customer list with sparklines are gone.
+- Customers: sidebar sections by source instead of a chip per row; rules as stacks per pattern
+  described in words ("always · most specific wins", "week 22 only", "always · overridden in week
+  23", "expires Sun"); Make permanent with a preview of what it replaces; patterns also claimed by
+  another customer flagged (keyed by kind + pattern); Edit in place through the same sheet, which
+  saves via `upsertReplacingWindow`; the priority stepper is gone; `SearchableEntityPicker` deleted.
+
+**Independent review (ig-review):** pass 1 — a day target lost when Review changed week, collapsed
+customers re-expanding every tick, duplicate rules from the sheet, grid totals not matching their
+cells, conflicts keyed by pattern only — fixed. Pass 2 — the day target now applied directly (the
+week change keeps a day inside the new week), negative rounding residue distributed across buckets
+(test extended), deterministic tie-breaking, archived-inclusive lookups — fixed; not re-reviewed
+after these mechanical changes.
+**Independent judge (ig-judge):** 6/10 (blocker: three "No project" rows for retired projects;
+"always · week 23 only" wording; 1-decimal hero vs quarter-hour grid) → 7/10 after fixes (major:
+hero open hours from the week-wide backlog vs the grid's per-day sum — now the same figure; minor:
+bare project count — now "N projects"). Sidebar header contrast → D22.
+
+**Deferred from this stage:** D4, D5, D7 (manual entry — still a data-model decision), D11 (largely
+addressed by the new captions using `.secondary`), D12 (the grid now truncates project names with
+a tail), D15 done, D22, D23, D24.

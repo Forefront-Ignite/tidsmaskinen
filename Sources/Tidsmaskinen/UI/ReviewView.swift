@@ -165,6 +165,21 @@ struct ReviewView: View {
     /// snap to it and clear the request. Returns whether a target was consumed.
     @discardableResult
     private func consumeReviewTarget() -> Bool {
+        if let day = state.reviewTargetDay {
+            // A single day: its week, then the day chip. Each change reloads.
+            state.reviewTargetDay = nil
+            state.reviewTargetWeekStart = nil
+            initialLookupTask?.cancel()
+            let start = calendar.currentWeekInterval(reference: day).start
+            let dayStart = calendar.startOfDay(for: day)
+            // Set the day first so the week change keeps it (it lies inside
+            // the new week); each change reloads, and neither changing does too.
+            let changed = start != weekStart || selectedDay != dayStart
+            selectedDay = dayStart
+            if start != weekStart { weekStart = start }
+            if !changed { reload() }
+            return true
+        }
         guard let target = state.reviewTargetWeekStart else { return false }
         initialLookupTask?.cancel()
         state.reviewTargetWeekStart = nil
@@ -209,11 +224,17 @@ struct ReviewView: View {
         }
         .onDisappear { initialLookupTask?.cancel(); toastTask?.cancel() }
         .onChange(of: state.reviewTargetWeekStart) { _, _ in _ = consumeReviewTarget() }
+        .onChange(of: state.reviewTargetDay) { _, _ in _ = consumeReviewTarget() }
         .onChange(of: weekStart) { _, _ in
             initialLookupTask?.cancel()
-            selectedDay = nil
             skipped = []
-            reload()
+            // A day belongs to its week: keep it when it lies in the new week
+            // (a report day chip), clear it when the user navigated away.
+            if let day = selectedDay, !week.contains(day) {
+                selectedDay = nil          // onChange(selectedDay) reloads
+            } else {
+                reload()
+            }
         }
         .onChange(of: selectedDay) { _, _ in
             initialLookupTask?.cancel()
