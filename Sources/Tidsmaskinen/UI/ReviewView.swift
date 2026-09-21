@@ -217,6 +217,7 @@ struct ReviewView: View {
                     nowLabel: "This week",
                     prevHelp: "Previous week", nextHelp: "Next week",
                     titleMinWidth: 150,
+                    nextDisabled: weekStart >= calendar.currentWeekInterval().start,   // nothing to review in a week that hasn't happened
                     nowDisabled: isCurrentWeek,
                     onPrev: { weekStart = calendar.date(byAdding: .day, value: -7, to: weekStart) ?? weekStart },
                     onNext: { weekStart = calendar.date(byAdding: .day, value: 7, to: weekStart) ?? weekStart },

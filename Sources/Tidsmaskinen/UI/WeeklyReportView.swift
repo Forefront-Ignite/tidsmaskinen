@@ -46,6 +46,9 @@ struct WeeklyReportView: View {
             if let report {
                 ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: 22) {
+                        // A failed refresh keeps the last good report on screen
+                        // but must say so — the numbers may be stale.
+                        if loadError != nil { loadErrorBanner }
                         heroRow(report)
                         projectGridPanel(report)
                         dayBarsPanel(report)
@@ -53,6 +56,10 @@ struct WeeklyReportView: View {
                     }
                     .padding(28)
                 }
+            } else if loadError != nil {
+                Spacer()
+                loadErrorBanner.frame(maxWidth: 520).frame(maxWidth: .infinity)
+                Spacer()
             } else {
                 Spacer()
                 ProgressView().frame(maxWidth: .infinity)
@@ -65,6 +72,29 @@ struct WeeklyReportView: View {
         .onChange(of: state.sampleCount) { _, _ in reload(immediate: false) }
         .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload(immediate: true) }
         .onChange(of: state.commandCenterLastSyncAt) { _, _ in reload(immediate: true) }
+    }
+
+    /// Load failure with a retry; without it a failed load was an endless spinner.
+    private var loadErrorBanner: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Couldn't load the report").font(.system(size: 14, weight: .semibold))
+                Text(loadError ?? "").font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 12)
+            Button("Retry") { reload(immediate: true) }
+        }
+        .padding(14)
+        .glassCard(radius: 14)
+    }
+
+    /// Hands Review the week on screen, so "Review unattributed" lands on the
+    /// week whose number the user is looking at rather than Review's own default.
+    private func openReviewForThisWeek() {
+        state.reviewTargetWeekStart = weekStart
+        state.selectedSection = .review
     }
 
     // MARK: - Header
@@ -94,6 +124,7 @@ struct WeeklyReportView: View {
                 prevHelp: "Previous week",
                 nextHelp: "Next week",
                 titleMinWidth: 150,
+                nextDisabled: weekStart >= calendar.currentWeekInterval().start,
                 nowDisabled: weekStart == calendar.currentWeekInterval().start,
                 onPrev: { weekStart = calendar.date(byAdding: .day, value: -7, to: weekStart) ?? weekStart },
                 onNext: { weekStart = calendar.date(byAdding: .day, value: 7, to: weekStart) ?? weekStart },
@@ -166,7 +197,7 @@ struct WeeklyReportView: View {
 
                     HStack(spacing: 12) {
                         Button {
-                            state.selectedSection = .review
+                            openReviewForThisWeek()
                         } label: {
                             Label("Review unattributed", systemImage: "sparkles")
                         }
@@ -479,7 +510,7 @@ struct WeeklyReportView: View {
     @ViewBuilder
     private func backlogRow() -> some View {
         Button {
-            state.selectedSection = .review
+            openReviewForThisWeek()
         } label: {
             HStack(spacing: 15) {
                 RoundedRectangle(cornerRadius: 4).fill(hatch).frame(width: 13, height: 13)

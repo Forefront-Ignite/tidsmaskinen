@@ -28,6 +28,8 @@ Stages (from the review's "Suggested order of work"):
 | D8 | Review shows a vertical scroll indicator although the card fits | Pre-existing; the card ScrollView goes away with list mode | Stage 3 |
 | D9 | Discover's auto-opened customer picker covers the scope control | Pre-existing; Discover is deleted | Stage 3 (moot once Discover goes) |
 | D10 | Timeline blocks are tap gestures, not buttons: no accessibility action, not keyboard-reachable, not drivable headlessly | Needs `Button`-based blocks; touches the popover anchoring | Stage 4 (Calls lane / agenda rework) |
+| D11 | Tertiary captions ("Attributed on its own — no rule is created", "each cell is that project's hours that day") are low-contrast on the gradient wallpaper | Pre-existing style; judge minor in stage 2 | Stage 6 (report compaction) or a global caption pass |
+| D12 | Project labels wrap mid-word in the report grid ("Scenarioplane ring - Lumorio") although the column has room | Pre-existing; the grid is rebuilt in stage 6 | Stage 6 |
 
 ## Stage 1 — Defaults and scope (2026-09-21)
 
@@ -64,3 +66,23 @@ The recurring-meeting popover could not be captured because timeline blocks are 
 an accessibility action (D10); its series-first default is verified in code only.
 
 **Deferred from this stage:** D1, D2, D3, D4, D8, D9, D10.
+
+## Stage 2 — Silent failures (2026-09-21)
+
+**Shipped**
+
+- Weekly report: a failed load renders "Couldn't load the report" with the error and a Retry
+  instead of an endless spinner; a failed refresh over an already-shown report adds the same
+  banner above the stale numbers.
+- The report's two Review buttons (hero card and "Uncategorized" row) pass the week on screen via
+  `reviewTargetWeekStart`, so Review lands on that week — verified in the dev copy (report at
+  7–13 Sep → Review at 7–13 Sep).
+- Next-week is disabled on the current (or any future) week in the report and in Review.
+
+**Independent review (ig-review):** APPROVE, no findings.
+**Independent judge (ig-judge):** 8/10, no blocking items. Applied its nit (`>=` instead of `==`
+for the next-week guard). Its two minor notes are pre-existing styling → D11, D12.
+The error banner is verified in code only — it needs a database fault to render.
+
+**Deferred from this stage:** D11, D12. Review card v2 (evidence, suggestions, keyboard) is folded
+into stage 3's detail pane.

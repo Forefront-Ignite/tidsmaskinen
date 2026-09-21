@@ -7,6 +7,8 @@
 //   build/devdrive windows <pid>              # CGWindow id, layer, on-screen, name, bounds
 //   build/devdrive dump <pid> [maxDepth]      # pressable elements: role | title | description | value | frame
 //   build/devdrive press <pid> <substring>    # AXPress the first element whose title/description/value matches
+//                                              ("role=AXMenuBarItem" matches by role, "title=Settings…" exactly by title;
+//                                              the app menu's Settings… item opens the main window without any keystroke)
 //   build/devdrive set <pid> <substring> <v>  # set AXValue on the first matching element
 import ApplicationServices
 import CoreGraphics
@@ -37,6 +39,15 @@ func actions(_ e: AXUIElement) -> [String] {
 func walk(_ e: AXUIElement, _ depth: Int, _ maxDepth: Int, _ visit: (AXUIElement, Int) -> Bool) {
     if depth > maxDepth || !visit(e, depth) { return }
     for c in (attr(e, kAXChildrenAttribute) as? [AXUIElement]) ?? [] { walk(c, depth + 1, maxDepth, visit) }
+    // The menu-bar status item lives in the extras bar, not under AXChildren.
+    if depth == 0, let extras = attr(e, "AXExtrasMenuBar") { walk(extras as! AXUIElement, 1, maxDepth, visit) }
+}
+/// Match "role=AXMenuBarItem" against the role, anything else against title/description/value.
+func matches(_ e: AXUIElement, _ needle: String) -> Bool {
+    if needle.hasPrefix("role=") { return str(e, kAXRoleAttribute).lowercased() == needle.dropFirst(5).lowercased() }
+    if needle.hasPrefix("title=") { return str(e, kAXTitleAttribute).lowercased() == needle.dropFirst(6).lowercased() }
+    return [str(e, kAXTitleAttribute), str(e, kAXDescriptionAttribute), str(e, kAXValueAttribute)]
+        .joined(separator: " | ").lowercased().contains(needle)
 }
 
 let args = CommandLine.arguments
@@ -73,9 +84,7 @@ case "press", "set":
     var done = false
     walk(app, 0, 40) { e, _ in
         if done { return false }
-        let hay = [str(e, kAXTitleAttribute), str(e, kAXDescriptionAttribute), str(e, kAXValueAttribute)]
-            .joined(separator: " | ").lowercased()
-        guard hay.contains(needle) else { return true }
+        guard matches(e, needle) else { return true }
         if args[1] == "press", actions(e).contains(kAXPressAction) {
             let r = AXUIElementPerformAction(e, kAXPressAction as CFString)
             print("press \(str(e, kAXRoleAttribute)) '\(str(e, kAXDescriptionAttribute))' → \(r.rawValue)")
