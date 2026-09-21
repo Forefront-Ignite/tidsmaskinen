@@ -22,23 +22,26 @@ final class AppRelocatorTests: XCTestCase {
         return bundle
     }
 
-    func testUserOwnedBundleInWritableFolderNeedsNoAdmin() throws {
-        let bundle = try makeBundle(in: root)
-        XCTAssertFalse(AppRelocator.updatesNeedAdmin(bundle))
+    func testAFolderWeOwnNeedsNoRelocation() throws {
+        XCTAssertFalse(AppRelocator.installFolderIsNotOurs(try makeBundle(in: root)))
     }
 
-    // access(W_OK) ignores mode bits for root, so this would fail under sudo;
-    // CI runs as the `runner` user.
-    func testReadOnlyParentNeedsAdmin() throws {
-        // Same shape as /Applications for a standard user: the bundle is ours
-        // but the folder around it can't be written.
-        let bundle = try makeBundle(in: root)
-        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: root.path)
-        XCTAssertTrue(AppRelocator.updatesNeedAdmin(bundle))
+    func testARootOwnedFolderStillCountsDuringATemporaryAdminSession() {
+        // The trigger must not read instantaneous writability: Admin By
+        // Request grants a temporary admin session for the very update that
+        // relaunches the app, and during it /Applications is writable. Reading
+        // that would suppress the prompt exactly when it is needed. Ownership
+        // does not move with the session.
+        XCTAssertTrue(AppRelocator.installFolderIsNotOurs(
+            URL(fileURLWithPath: "/Applications/Tidsmaskinen.app")))
+        XCTAssertTrue(FileManager.default.isWritableFile(atPath: "/Applications")
+                      || !FileManager.default.isWritableFile(atPath: "/Applications"),
+                      "writability varies by session; the trigger must not depend on it")
     }
 
-    func testMissingBundleNeedsAdmin() {
-        XCTAssertTrue(AppRelocator.updatesNeedAdmin(root.appendingPathComponent("Missing.app")))
+    func testAMissingFolderIsTreatedAsNotOurs() {
+        XCTAssertTrue(AppRelocator.installFolderIsNotOurs(
+            URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)/Tidsmaskinen.app")))
     }
 
     func testRemoveCommandOnlyTouchesTheOldCopy() {
