@@ -140,8 +140,12 @@ enum AppRelocator {
         }
 
         // The login item is tied to the bundle's inode and path. Drop it now
-        // and re-register from the new location after relaunch.
+        // and re-register from the new location after relaunch. The repair
+        // marker is written *first*: being killed mid-copy would otherwise
+        // leave the next launch with no record that the login item had been
+        // disabled, and it would stay off without anything saying so.
         let hadLoginItem = LoginItemManager.isEnabled
+        AppSettings.defaults.set(hadLoginItem, forKey: SettingsKey.relocationRestoreLoginItem)
         if hadLoginItem { try? LoginItemManager.setEnabled(false) }
 
         // Copy first, unprivileged. Writing into the user's own home needs no
@@ -151,15 +155,10 @@ enum AppRelocator {
             try placeCopy(of: bundleURL, at: target)
         } catch {
             if hadLoginItem { try? LoginItemManager.setEnabled(true) }
+            AppSettings.defaults.removeObject(forKey: SettingsKey.relocationRestoreLoginItem)
             showFailure("Couldn't copy Tidsmaskinen", error.localizedDescription)
             return releaseUpdater()
         }
-
-        // Record the repair *before* elevating. If the process dies between a
-        // successful delete and writing this, the next launch would otherwise
-        // never repoint the login item or the coding-agent hooks. It is a
-        // no-op when nothing ends up changing.
-        AppSettings.defaults.set(hadLoginItem, forKey: SettingsKey.relocationRestoreLoginItem)
 
         // All root has left to do is drop the old copy, and only because
         // removing an entry from /Applications needs write access there.

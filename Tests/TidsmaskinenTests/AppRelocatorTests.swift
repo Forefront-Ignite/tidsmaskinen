@@ -81,17 +81,27 @@ final class AppRelocatorTests: XCTestCase {
             URL(fileURLWithPath: "/Users/me/Downloads/locked/Tidsmaskinen.app")))
         XCTAssertFalse(AppRelocator.isInSystemApplications(
             URL(fileURLWithPath: "/Applications")), "the folder itself is not an install")
-        // A bundle reached through a symlink still resolves to its real home,
-        // and run() hands root that resolved path, never the link.
-        let link = FileManager.default.temporaryDirectory
-            .appendingPathComponent("applink-\(UUID().uuidString)")
-        try? FileManager.default.createSymbolicLink(
-            at: link, withDestinationURL: URL(fileURLWithPath: "/Applications"))
-        defer { try? FileManager.default.removeItem(at: link) }
+    }
+
+    func testASymlinkedRouteResolvesToTheRealBundleBeforeElevating() throws {
+        // run() hands root the resolved path, never the link the user could
+        // re-point afterwards. Built entirely under a temp directory: keying
+        // this off /Applications only passes on machines where the app happens
+        // to be installed, since resolvingSymlinksInPath() leaves a path that
+        // doesn't exist untouched.
+        let real = root.appendingPathComponent("real", isDirectory: true)
+        let bundle = real.appendingPathComponent("Tidsmaskinen.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+        let link = root.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+
         let viaLink = link.appendingPathComponent("Tidsmaskinen.app")
-        XCTAssertTrue(AppRelocator.isInSystemApplications(viaLink))
-        XCTAssertEqual(viaLink.resolvingSymlinksInPath().path, "/Applications/Tidsmaskinen.app",
+        XCTAssertNotEqual(viaLink.path, bundle.path, "the literal route goes through the link")
+        XCTAssertEqual(viaLink.resolvingSymlinksInPath().path,
+                       bundle.resolvingSymlinksInPath().path,
                        "the resolved path is what gets elevated, so it must be the real one")
+        XCTAssertFalse(AppRelocator.isInSystemApplications(viaLink),
+                       "and a link outside /Applications still earns no elevation")
     }
 
     func testVersionComparisonIsNumericNotLexical() {
