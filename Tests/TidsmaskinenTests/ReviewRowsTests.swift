@@ -108,6 +108,19 @@ final class ReviewRowsTests: XCTestCase {
         XCTAssertEqual(host.totalSeconds, 720)   // the host's open time, not the sum of the listed paths
     }
 
+    /// Hiding an app in Review hides only its app-only time in My day; its
+    /// site and repo samples stay, as they do in Review and the report.
+    func testHiddenAppKeepsSiteAndRepoSamplesVisibleInMyDay() {
+        let hidden = [HiddenSignal(id: "h1", kind: .appBundleID, value: "com.google.Chrome", hiddenAt: Date()),
+                      HiddenSignal(id: "h2", kind: .urlHost, value: "hidden.com", hiddenAt: Date())]
+        let appOnly = sample(at(15, 10))
+        let site = sample(at(15, 11), host: "github.com")
+        let hiddenSite = sample(at(15, 12), host: "hidden.com")
+        let repo = sample(at(15, 13), remote: "git@github.com:acme/repo.git", app: "com.google.Chrome")
+        let visible = TimelineBuilder.visibleSamples([appOnly, site, hiddenSite, repo], hidden: hidden)
+        XCTAssertEqual(visible.map(\.capturedAt), [site.capturedAt, repo.capturedAt])
+    }
+
     /// Browsing a repo on a forge is that repo: the slug rule covers
     /// github.com/owner/repo pages, and the report names the repo for them.
     func testForgeURLMatchesRepoRule() {

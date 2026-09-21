@@ -1231,18 +1231,7 @@ struct TimelineView: View {
             // Ignored repos are always drawn (dimmed), so only hidden apps and
             // hosts make the reveal toggle change anything.
             hasHiddenSignals = hidden.contains { $0.kind == .appBundleID || $0.kind == .urlHost }
-            let samples: [ActivitySample]
-            if showHidden || hidden.isEmpty {
-                samples = allSamples
-            } else {
-                let hiddenApps = Set(hidden.filter { $0.kind == .appBundleID }.map { $0.value })
-                let hiddenHosts = Set(hidden.filter { $0.kind == .urlHost }.map { $0.value })
-                samples = allSamples.filter { sample in
-                    if let bid = sample.appBundleID, hiddenApps.contains(bid) { return false }
-                    if let host = sample.chromeHost, hiddenHosts.contains(host) { return false }
-                    return true
-                }
-            }
+            let samples = showHidden ? allSamples : TimelineBuilder.visibleSamples(allSamples, hidden: hidden)
             let idleThreshold = TimeInterval(AppSettings.claudeIdleThresholdMinutes * 60)
             bundle = TimelineBuilder.build(
                 day: dayInterval,

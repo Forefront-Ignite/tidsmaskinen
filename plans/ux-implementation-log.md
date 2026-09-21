@@ -315,3 +315,9 @@ host, not its paths), so a single GitHub repo page can get its own rule. Suggest
 customers of the most recently created rules"; now they are earlier answers for the pattern, then
 where the host's paths already go, then the customers with the most attributed time in the period,
 each tagged with its reason.
+Found while verifying the stretch focus: My day dropped *every* sample of a hidden app, sites and
+repos included, so with Chrome, VS Code, Slack and Teams hidden as apps the foreground lane held six
+blocks for a whole day and the github.com stretch could not be found (the popover landed on the
+meeting that overlapped it). `TimelineBuilder.visibleSamples` now applies a hide the way Review
+reads it — an app hide covers only app-only time, a host hide covers that site, repo time is never
+hidden — so My day, Review and the report agree on what a hide means.

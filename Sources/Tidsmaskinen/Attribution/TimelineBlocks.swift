@@ -69,6 +69,23 @@ enum TimelineBuilder {
         let claudeCode: [TimelineBlock]
     }
 
+    /// The samples My day draws once hidden signals are applied — the same
+    /// reading Review gives a hide: an app hide covers only app-only time (no
+    /// repo, no site), a host hide covers that site. Repo time is never hidden
+    /// here; ignored repos are drawn dimmed instead. Hiding Chrome as an app
+    /// used to empty the whole foreground lane, sites included.
+    static func visibleSamples(_ samples: [ActivitySample], hidden: [HiddenSignal]) -> [ActivitySample] {
+        guard !hidden.isEmpty else { return samples }
+        let hiddenApps = Set(hidden.filter { $0.kind == .appBundleID }.map { $0.value })
+        let hiddenHosts = Set(hidden.filter { $0.kind == .urlHost }.map { $0.value })
+        return samples.filter { sample in
+            if sample.gitRemoteURL != nil { return true }
+            if let host = sample.chromeHost { return !hiddenHosts.contains(host) }
+            if let bid = sample.appBundleID { return !hiddenApps.contains(bid) }
+            return true
+        }
+    }
+
     /// Build all four tracks for a given day. When `includeIgnoredEvents` is
     /// false (the default), ignored calendar events and calls are dropped;
     /// when true, they're emitted flagged `isIgnored` so the Timeline can
