@@ -189,7 +189,8 @@ struct WeeklyReport {
         var lines: [String] = []
         let header = ["Customer · Project"] + weekDays.map { formatter.string(from: $0) } + ["Total"]
         lines.append(header.joined(separator: "\t"))
-        for row in rows {
+        // A row that rounds to 0 h all week has nothing to report.
+        for row in rows where row.totalHours > 0 {
             let cells = [Self.tsvSanitize(row.label)]
                 + row.perDayHours.map { Self.formatHours($0) }
                 + [Self.formatHours(row.totalHours)]

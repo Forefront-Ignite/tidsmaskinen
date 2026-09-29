@@ -31,6 +31,11 @@ struct WeeklyReportView: View {
     @State private var openHoursPerDay: [Double] = Array(repeating: 0, count: 7)
     @State private var reported: ReportedWeek?
     @State private var hasExpandedInitialCustomer = false
+    /// The grid row the user marked (click, ↑/↓), so it stays visible while
+    /// they type its numbers into Forefront in another window.
+    @State private var markedLineID: String?
+    @FocusState private var gridFocused: Bool
+    @State private var showZeroRows = false
     @AppStorage(SettingsKey.reportRounding) private var roundingRaw: String = ReportRounding.nearest.rawValue
 
     private let calendar = Calendar.weekStartingMonday()
@@ -71,7 +76,10 @@ struct WeeklyReportView: View {
         }
         .onAppear { reload(immediate: true) }
         .onDisappear { reloadTask?.cancel() }
-        .onChange(of: weekStart) { _, _ in reload(immediate: true) }
+        .onChange(of: weekStart) { _, _ in
+            markedLineID = nil
+            reload(immediate: true)
+        }
         .onChange(of: roundingRaw) { _, _ in reload(immediate: true) }
         .onChange(of: state.sampleCount) { _, _ in reload(immediate: false) }
         .onChange(of: state.calendarSync.lastSyncedAt) { _, _ in reload(immediate: true) }
@@ -288,195 +296,335 @@ struct WeeklyReportView: View {
 
     // MARK: - Hours by customer, project & day
 
+    private static let nameWidth: CGFloat = 240
+    private static let dayWidth: CGFloat = 56
+    private static let totalWidth: CGFloat = 60
+    private static let columnSpacing: CGFloat = 10
+
+    /// One visible line of the grid, in display order — the order ↑/↓ walk.
+    private enum GridLine: Identifiable {
+        case customer(GridGroup, projectCount: Int)
+        case project(GridGroup, GridProject)
+
+        // Prefixed: a project-less row's id is its customer's id.
+        var id: String {
+            switch self {
+            case .customer(let g, _): "c:" + g.id
+            case .project(_, let p): "p:" + p.id
+            }
+        }
+
+        var isCustomer: Bool {
+            if case .customer = self { return true }
+            return false
+        }
+    }
+
+    /// Rows that round to 0 h all week say nothing, so they're hidden unless
+    /// asked for. `zeroCount` counts them either way, for the footer toggle.
+    private func gridLines(_ groups: [GridGroup]) -> (lines: [GridLine], zeroCount: Int) {
+        var lines: [GridLine] = []
+        var zeroCount = 0
+        for g in groups {
+            if g.total == 0 {
+                zeroCount += 1   // its projects are all 0 too; count it once
+                if !showZeroRows { continue }
+            } else {
+                zeroCount += g.projects.count { $0.total == 0 }
+            }
+            let projects = showZeroRows ? g.projects : g.projects.filter { $0.total > 0 }
+            lines.append(.customer(g, projectCount: projects.count))
+            if expandedCustomerID == g.id { lines += projects.map { .project(g, $0) } }
+        }
+        return (lines, zeroCount)
+    }
+
     /// The one table: collapsible customer rows with their projects, one
     /// column per weekday (with that day's open backlog linking into Review),
-    /// then Attributed, Unattributed → Review and Tracked. Its on-screen twin
-    /// is the TSV that "Copy for Forefront" produces.
+    /// each row's share of the week, then Attributed, Unattributed → Review
+    /// and Tracked. Rows are striped and one can be marked (click, ↑/↓), so the
+    /// eye keeps its row while typing the numbers into Forefront in another
+    /// window. Its on-screen twin is the TSV that "Copy for Forefront" produces.
     @ViewBuilder
     private func projectGridPanel(_ report: WeeklyReport) -> some View {
-        let groups = self.gridGroups
-        let dayWidth: CGFloat = 56
-        let totalWidth: CGFloat = 60
+        let (lines, zeroCount) = gridLines(gridGroups)
         // The grid's own open figure is the sum of its day cells, so rows and
         // columns agree (the hero's figure comes from the week-wide backlog).
         let open = openHoursPerDay.reduce(0, +)
 
         VStack(alignment: .leading, spacing: 0) {
-            if groups.isEmpty && backlogCount == 0 {
+            if gridGroups.isEmpty && backlogCount == 0 {
                 Text("Nothing tracked this week yet.")
                     .font(.system(size: 13)).foregroundStyle(.secondary)
                     .padding(22)
             } else {
-                Grid(alignment: .trailing, horizontalSpacing: 10, verticalSpacing: 0) {
-                    GridRow {
-                        Text("CUSTOMER · PROJECT")
-                            .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .gridColumnAlignment(.leading)
-                        ForEach(Array(days.enumerated()), id: \.offset) { i, day in
-                            VStack(spacing: 2) {
-                                Text(DateFormatting.weekdayShort.string(from: day))
-                                    .font(.system(size: 11, weight: .semibold))
-                                Text(dayNumber(day))
-                                    .font(.system(size: 9)).foregroundStyle(.secondary)
-                                if openHoursPerDay[i] > 0 {
-                                    Button {
-                                        state.reviewTargetDay = day
-                                        state.selectedSection = .review
-                                    } label: {
-                                        Text("\(gridNum(openHoursPerDay[i])) open")
-                                            .font(.system(size: 9, weight: .semibold)).foregroundStyle(TM.accent)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("\(openCountPerDay[i]) open item\(openCountPerDay[i] == 1 ? "" : "s") — open Review on this day")
-                                }
-                            }
-                            .frame(width: dayWidth)
-                            .gridColumnAlignment(.center)
-                        }
-                        Text("TOTAL")
-                            .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-                            .frame(width: totalWidth, alignment: .trailing)
-                            .gridColumnAlignment(.trailing)
-                    }
-                    .padding(.bottom, 8)
+                VStack(spacing: 0) {
+                    gridHeader
+                    Divider().padding(.bottom, 6)
 
-                    Divider().gridCellUnsizedAxes(.horizontal)
-
-                    ForEach(groups) { g in
-                        let isOpen = expandedCustomerID == g.id
-                        GridRow {
-                            Button {
-                                withAnimation(.easeInOut(duration: 0.15)) { expandedCustomerID = isOpen ? nil : g.id }
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "chevron.right")
-                                        .font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
-                                        .rotationEffect(.degrees(isOpen ? 90 : 0))
-                                    ColorDot(color: g.color, size: 11, square: true)
-                                    Text(g.name).font(.system(size: 13.5, weight: .semibold))
-                                    Text("\(g.projects.count) project\(g.projects.count == 1 ? "" : "s")")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                    Spacer(minLength: 0)
-                                }
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .gridColumnAlignment(.leading)
-                            .accessibilityLabel("\(g.name), \(gridNum(g.total)) hours, \(isOpen ? "expanded" : "collapsed")")
-                            ForEach(Array(g.perDay.enumerated()), id: \.offset) { i, h in
-                                dayCell(h, raw: nil, day: days[i], width: dayWidth, weight: .semibold)
-                            }
-                            Text(gridNum(g.total))
-                                .font(.system(size: 13, weight: .bold)).monospacedDigit()
-                                .frame(width: totalWidth, alignment: .trailing)
-                        }
-                        .padding(.top, 10).padding(.bottom, 3)
-                        .help(contributorsHelp(for: g, in: report))
-
-                        if isOpen {
-                            ForEach(g.projects) { p in
-                                GridRow {
-                                    Text(p.name)
-                                        .font(.system(size: 12.5)).foregroundStyle(.secondary)
-                                        .lineLimit(1).truncationMode(.tail)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .padding(.leading, 26)
-                                    ForEach(Array(p.perDay.enumerated()), id: \.offset) { i, h in
-                                        dayCell(h, raw: p.rawPerDay.indices.contains(i) ? p.rawPerDay[i] : nil,
-                                                day: days[i], width: dayWidth, weight: .regular)
-                                    }
-                                    Text(gridNum(p.total))
-                                        .font(.system(size: 12.5, weight: .semibold)).monospacedDigit()
-                                        .frame(width: totalWidth, alignment: .trailing)
-                                }
-                                .padding(.vertical, 3)
-                            }
-                        }
+                    ForEach(Array(lines.enumerated()), id: \.element.id) { i, line in
+                        lineRow(line, striped: i % 2 == 1, grand: report.grandTotal)
+                            .padding(.top, i > 0 && line.isCustomer ? 6 : 0)
                     }
 
-                    Divider().gridCellUnsizedAxes(.horizontal).padding(.top, 9)
+                    Divider().padding(.top, 9)
 
-                    summaryRow("Attributed", report.dayTotals, total: report.grandTotal, weight: .bold, width: dayWidth, totalWidth: totalWidth)
+                    summaryRow("Attributed", report.dayTotals, total: report.grandTotal, weight: .bold)
 
                     if backlogCount > 0 {
-                        GridRow {
+                        HStack(spacing: Self.columnSpacing) {
                             Button { openReviewForThisWeek() } label: {
                                 HStack(spacing: 6) {
-                                    Text("Unattributed").font(.system(size: 13, weight: .semibold)).foregroundStyle(TM.accent)
-                                    Image(systemName: "arrow.right").font(.system(size: 10, weight: .bold)).foregroundStyle(TM.accent)
-                                    Text("Review").font(.system(size: 13, weight: .semibold)).foregroundStyle(TM.accent)
+                                    Text("Unattributed").font(.system(size: 13, weight: .semibold))
+                                    Image(systemName: "arrow.right").font(.system(size: 10, weight: .bold))
+                                    Text("Review").font(.system(size: 13, weight: .semibold))
                                     Spacer(minLength: 0)
                                 }
+                                .foregroundStyle(TM.accent)
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
-                            .gridColumnAlignment(.leading)
-                            ForEach(Array(openHoursPerDay.enumerated()), id: \.offset) { i, h in
+                            .frame(width: Self.nameWidth, alignment: .leading)
+                            ForEach(Array(openHoursPerDay.enumerated()), id: \.offset) { _, h in
                                 Text(h > 0 ? gridNum(h) : "·")
                                     .font(.system(size: 12.5, weight: .semibold)).monospacedDigit()
                                     .foregroundStyle(h > 0 ? TM.accent : Color(.quaternaryLabelColor))
-                                    .frame(width: dayWidth, alignment: .trailing)
+                                    .frame(width: Self.dayWidth, alignment: .trailing)
                             }
                             Text(gridNum(open))
                                 .font(.system(size: 12.5, weight: .semibold)).monospacedDigit().foregroundStyle(TM.accent)
-                                .frame(width: totalWidth, alignment: .trailing)
+                                .frame(width: Self.totalWidth, alignment: .trailing)
+                            shareSpacer
                         }
+                        .padding(.horizontal, 10)
                         .padding(.top, 8)
                     }
 
                     summaryRow("Tracked", zip(report.dayTotals, openHoursPerDay).map(+), total: report.grandTotal + open,
-                               weight: .heavy, width: dayWidth, totalWidth: totalWidth)
+                               weight: .heavy)
                 }
-                .padding(.horizontal, 22).padding(.top, 18).padding(.bottom, 10)
+                .padding(.horizontal, 12).padding(.top, 18).padding(.bottom, 10)
+                .focusable()
+                .focused($gridFocused)
+                .focusEffectDisabled()
+                .onKeyPress(.downArrow) { moveMark(1, in: lines) }
+                .onKeyPress(.upArrow) { moveMark(-1, in: lines) }
+                .onKeyPress(.escape) {
+                    guard markedLineID != nil else { return .ignored }
+                    markedLineID = nil
+                    return .handled
+                }
 
-                Text("Click a cell to open that day in My day. Hover a customer for what contributed. Hover a cell for its raw value.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .padding(.horizontal, 22).padding(.bottom, 16)
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text("Click a row to mark it; ↑ ↓ move the mark. Double-click a cell to open that day in My day. Hover a customer for what contributed.")
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    if zeroCount > 0 {
+                        Button(showZeroRows ? "Hide rows at 0 h"
+                                            : "\(zeroCount) row\(zeroCount == 1 ? "" : "s") at 0 h hidden · Show") {
+                            showZeroRows.toggle()
+                        }
+                        .buttonStyle(.link)
+                    }
+                }
+                .font(.caption).foregroundStyle(.secondary)
+                .padding(.horizontal, 22).padding(.bottom, 16)
             }
         }
         .glassCard()
     }
 
+    private var gridHeader: some View {
+        HStack(alignment: .top, spacing: Self.columnSpacing) {
+            Text("CUSTOMER · PROJECT")
+                .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                .frame(width: Self.nameWidth, alignment: .leading)
+            ForEach(Array(days.enumerated()), id: \.offset) { i, day in
+                VStack(spacing: 2) {
+                    Text(DateFormatting.weekdayShort.string(from: day))
+                        .font(.system(size: 11, weight: .semibold))
+                    Text(dayNumber(day))
+                        .font(.system(size: 9)).foregroundStyle(.secondary)
+                    if openHoursPerDay[i] > 0 {
+                        Button {
+                            state.reviewTargetDay = day
+                            state.selectedSection = .review
+                        } label: {
+                            Text("\(gridNum(openHoursPerDay[i])) open")
+                                .font(.system(size: 9, weight: .semibold)).foregroundStyle(TM.accent)
+                        }
+                        .buttonStyle(.plain)
+                        .help("\(openCountPerDay[i]) open item\(openCountPerDay[i] == 1 ? "" : "s") — open Review on this day")
+                    }
+                }
+                .frame(width: Self.dayWidth)
+            }
+            Text("TOTAL")
+                .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                .frame(width: Self.totalWidth, alignment: .trailing)
+            Text("SHARE OF WEEK")
+                .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                .padding(.leading, 14)
+                .frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 10)
+        .padding(.bottom, 8)
+    }
+
     @ViewBuilder
-    private func summaryRow(_ label: String, _ perDay: [Double], total: Double, weight: Font.Weight,
-                            width: CGFloat, totalWidth: CGFloat) -> some View {
-        GridRow {
+    private func lineRow(_ line: GridLine, striped: Bool, grand: Double) -> some View {
+        let marked = markedLineID == line.id
+        let (group, perDay, raw, total, isCustomer): (GridGroup, [Double], [Double]?, Double, Bool) = switch line {
+        case .customer(let g, _): (g, g.perDay, nil, g.total, true)
+        case .project(let g, let p): (g, p.perDay, p.rawPerDay, p.total, false)
+        }
+
+        HStack(spacing: Self.columnSpacing) {
+            lineName(line)
+                .frame(width: Self.nameWidth, alignment: .leading)
+            ForEach(0..<7, id: \.self) { i in
+                dayCell(perDay[i], raw: raw.flatMap { $0.indices.contains(i) ? $0[i] : nil },
+                        day: days[i], weight: isCustomer ? .semibold : .regular)
+            }
+            Text(gridNum(total))
+                .font(.system(size: isCustomer ? 13 : 12.5, weight: isCustomer ? .bold : .semibold)).monospacedDigit()
+                .frame(width: Self.totalWidth, alignment: .trailing)
+            shareBar(grand > 0 ? total / grand : 0,
+                     color: isCustomer ? group.color : group.color.opacity(0.55),
+                     height: isCustomer ? 6 : 4)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, isCustomer ? 8 : 5)
+        .background(marked ? TM.accent.opacity(0.32) : striped ? Color.primary.opacity(0.045) : .clear,
+                    in: .rect(cornerRadius: 6))
+        .contentShape(Rectangle())
+        // Simultaneous, so the chevron and a cell's double-click still work.
+        .simultaneousGesture(TapGesture().onEnded { mark(line) })
+        .help(lineHelp(line))
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(marked ? .isSelected : [])
+        .accessibilityAction(named: "Mark row") { mark(line) }
+    }
+
+    @ViewBuilder
+    private func lineName(_ line: GridLine) -> some View {
+        switch line {
+        case .customer(let g, let projectCount):
+            let isOpen = expandedCustomerID == g.id
+            HStack(spacing: 8) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { expandedCustomerID = isOpen ? nil : g.id }
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isOpen ? 90 : 0))
+                        .frame(width: 16, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(g.name), \(gridNum(g.total)) hours, \(isOpen ? "expanded" : "collapsed")")
+                ColorDot(color: g.color, size: 11, square: true)
+                Text(g.name).font(.system(size: 13.5, weight: .semibold)).lineLimit(1)
+                Text("\(projectCount) project\(projectCount == 1 ? "" : "s")")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        case .project(_, let p):
+            Text(p.name)
+                .font(.system(size: 12.5)).foregroundStyle(markedLineID == line.id ? .primary : .secondary)
+                .lineLimit(1).truncationMode(.tail)
+                .padding(.leading, 24)
+        }
+    }
+
+    private func lineHelp(_ line: GridLine) -> String {
+        switch line {
+        case .customer(let g, _): report.map { contributorsHelp(for: g, in: $0) } ?? g.name
+        case .project(let g, let p): "\(g.name) · \(p.name)"
+        }
+    }
+
+    private func mark(_ line: GridLine) {
+        markedLineID = line.id
+        gridFocused = true
+    }
+
+    private func moveMark(_ step: Int, in lines: [GridLine]) -> KeyPress.Result {
+        guard !lines.isEmpty else { return .ignored }
+        let ids = lines.map(\.id)
+        if let current = markedLineID, let i = ids.firstIndex(of: current) {
+            markedLineID = ids[min(max(i + step, 0), ids.count - 1)]
+        } else {
+            markedLineID = step > 0 ? ids.first : ids.last
+        }
+        return .handled
+    }
+
+    /// The row's slice of the week's attributed hours, as a bar and a percentage.
+    private func shareBar(_ fraction: Double, color: Color, height: CGFloat) -> some View {
+        let pct = fraction * 100
+        return HStack(spacing: 10) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.secondary.opacity(0.15))
+                    Capsule().fill(color).frame(width: geo.size.width * min(1, max(0, fraction)))
+                }
+            }
+            .frame(height: height)
+            Text(pct > 0 && pct < 0.5 ? "<1%" : "\(Int(pct.rounded()))%")
+                .font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit()
+                .frame(width: 36, alignment: .trailing)
+        }
+        .padding(.leading, 14)
+        .frame(minWidth: 120, maxWidth: .infinity)
+    }
+
+    /// Keeps summary rows aligned with the share column they leave empty.
+    private var shareSpacer: some View {
+        Color.clear.frame(minWidth: 120, maxWidth: .infinity, maxHeight: 1)
+    }
+
+    @ViewBuilder
+    private func summaryRow(_ label: String, _ perDay: [Double], total: Double, weight: Font.Weight) -> some View {
+        HStack(spacing: Self.columnSpacing) {
             Text(label).font(.system(size: 13, weight: weight))
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(width: Self.nameWidth, alignment: .leading)
             ForEach(Array(perDay.enumerated()), id: \.offset) { _, h in
                 Text(h > 0 ? gridNum(h) : "·")
                     .font(.system(size: 12.5, weight: weight))
                     .foregroundStyle(h > 0 ? Color.primary : Color(.quaternaryLabelColor))
                     .monospacedDigit()
-                    .frame(width: width, alignment: .trailing)
+                    .frame(width: Self.dayWidth, alignment: .trailing)
             }
             Text(gridNum(total))
                 .font(.system(size: 13, weight: weight)).monospacedDigit()
-                .frame(width: totalWidth, alignment: .trailing)
+                .frame(width: Self.totalWidth, alignment: .trailing)
+            shareSpacer
         }
+        .padding(.horizontal, 10)
         .padding(.top, 8)
     }
 
-    /// A cell: click opens that day in My day; hover shows the raw value.
-    private func dayCell(_ h: Double, raw: Double?, day: Date, width: CGFloat, weight: Font.Weight) -> some View {
-        Button {
-            state.timelineTargetDay = day
-            state.selectedSection = .timeline
-        } label: {
-            Group {
-                if h > 0 {
-                    Text(gridNum(h)).font(.system(size: 12.5, weight: weight)).monospacedDigit()
-                } else {
-                    Text("·").font(.system(size: 12.5)).foregroundStyle(Color(.quaternaryLabelColor))
-                }
+    /// A cell: a click marks its row (the row's gesture), a double-click or the
+    /// context menu opens that day in My day; hover shows the raw value.
+    private func dayCell(_ h: Double, raw: Double?, day: Date, weight: Font.Weight) -> some View {
+        Group {
+            if h > 0 {
+                Text(gridNum(h)).font(.system(size: 12.5, weight: weight)).monospacedDigit()
+            } else {
+                Text("·").font(.system(size: 12.5)).foregroundStyle(Color(.quaternaryLabelColor))
             }
-            .frame(width: width, alignment: .trailing)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .help(raw.map { String(format: "%.2f h before rounding — click to open this day in My day", $0) }
-              ?? "Open this day in My day")
+        .frame(width: Self.dayWidth, alignment: .trailing)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { openInMyDay(day) }
+        .contextMenu { Button("Open in My day") { openInMyDay(day) } }
+        .help(raw.map { String(format: "%.2f h before rounding — double-click to open this day in My day", $0) }
+              ?? "Double-click to open this day in My day")
+    }
+
+    private func openInMyDay(_ day: Date) {
+        state.timelineTargetDay = day
+        state.selectedSection = .timeline
     }
 
     private func dayNumber(_ day: Date) -> String {
