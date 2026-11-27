@@ -38,6 +38,10 @@ final class FocusTimelineTests: XCTestCase {
         }
     }
 
+    private func samplesHours(_ r: WeeklyReport, _ id: String) -> Double {
+        (r.breakdownsByRowID[id]?.perDay(.samples) ?? []).reduce(0, +)
+    }
+
     private func hours(_ r: WeeklyReport, _ id: String) -> Double {
         r.rows.first { $0.id == id }?.rawPerDayHours.reduce(0, +) ?? 0
     }
@@ -75,6 +79,33 @@ final class FocusTimelineTests: XCTestCase {
                                         overlapChoices: [MeetingOverlapChoice("a", "b", winner: nil)],
                                         matcher: matcher, sampleIntervalSeconds: 15)
         XCTAssertEqual(hours(both, "A") + hours(both, "B"), 2.0, accuracy: 0.001)
+    }
+
+    func testADoubleBookingForOneCustomerStillBillsBoth() {
+        let a = event("a", at(10), at(11), customer: "A")
+        let b = event("b", at(10), at(11), customer: "A")
+        let r = WeeklyReport.compute(week: week, samples: [], events: [a, b], matcher: matcher, sampleIntervalSeconds: 15)
+        XCTAssertEqual(hours(r, "A"), 2.0, accuracy: 0.001)
+        XCTAssertEqual(r.activeHours, 1.0, accuracy: 0.001)
+    }
+
+    func testContradictoryChoicesNeverHandTheSlotToSamples() {
+        let a = event("a", at(10), at(11), customer: "A")
+        let b = event("b", at(10), at(11), customer: "B")
+        let c = event("c", at(10), at(11), customer: "C")
+        let cycle = [MeetingOverlapChoice("a", "b", winner: "a"), MeetingOverlapChoice("b", "c", winner: "b"),
+                     MeetingOverlapChoice("a", "c", winner: "c")]
+        let work = samples(from: at(10), minutes: 60, customer: "B")
+        let r = WeeklyReport.compute(week: week, samples: work, events: [a, b, c], overlapChoices: cycle,
+                                     matcher: matcher, sampleIntervalSeconds: 15)
+        XCTAssertEqual(samplesHours(r, "B"), 0, accuracy: 0.001)
+    }
+
+    func testAOneDayPeriodEndsAtMidnight() {
+        let late = event("late", at(23), at(23).addingTimeInterval(7200), customer: "A")
+        let day = cal.dateInterval(of: .day, for: at(12))!
+        let r = WeeklyReport.compute(week: day, samples: [], events: [late], matcher: matcher, sampleIntervalSeconds: 15)
+        XCTAssertEqual(r.grandTotal, 1.0, accuracy: 0.001)
     }
 
     func testDeclinedAllDayAndIgnoredMeetingsBillNothingAndBlockNothing() {

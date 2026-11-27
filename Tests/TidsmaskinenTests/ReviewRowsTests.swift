@@ -62,6 +62,25 @@ final class ReviewRowsTests: XCTestCase {
         XCTAssertEqual(backlog.map(\.id), ["sig:gitRepoSlug:acme/repo"])
     }
 
+    /// A tentative booking that an accepted one covers bills nothing, so
+    /// Review doesn't ask for it; the accepted one is still listed.
+    func testMeetingThatLostItsSlotIsNotAsked() throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        func meeting(_ id: String, rsvp: String) -> CalendarEvent {
+            CalendarEvent(id: id, iCalUID: nil, subject: id, bodyPreview: nil,
+                          startAt: at(15, 10), endAt: at(15, 11), isAllDay: false,
+                          organizerEmail: nil, organizerName: nil, rsvpStatus: rsvp,
+                          isOnlineMeeting: false, onlineMeetingProvider: nil, attendeeDomainsCSV: nil,
+                          location: nil, verifiedAttended: false, customerID: nil, projectID: nil,
+                          eventType: "singleInstance", seriesMasterID: nil, isIgnored: false,
+                          createdAt: Date(), updatedAt: Date())
+        }
+        try db.upsertEvents([meeting("accepted", rsvp: "accepted"), meeting("maybe", rsvp: "tentativelyAccepted")])
+        let open = try ReviewQueue.build(database: db, interval: week, sampleIntervalSeconds: 15,
+                                         idleThresholdSeconds: 300, minMinutes: 5)
+        XCTAssertEqual(open.map(\.id), ["event:accepted"])
+    }
+
     /// Evidence: consecutive samples on a signal form a stretch, a gap over two
     /// minutes starts a new one, an open row lists only its open stretches, and
     /// each stretch names the title seen most.

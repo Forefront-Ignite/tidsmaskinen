@@ -205,7 +205,7 @@ enum ReviewQueue {
         let billed = MeetingBilling.billed(events: events, matcher: m, choices: overlapChoices)
         let spans = FocusSpans.spans(samples: try database.samples(in: interval),
                                      sampleInterval: TimeInterval(sampleIntervalSeconds),
-                                     blocked: billed.flatMap(\.intervals))
+                                     blocked: MeetingBilling.blocked(events: events, matcher: m))
         for (sample, pieces) in spans {
             let seconds = pieces.reduce(0.0) { $0 + ($1.intersectionIfPositive(with: interval)?.duration ?? 0) }
             guard seconds > 0 else { continue }
@@ -293,6 +293,16 @@ enum ReviewQueue {
         // never bill, so they are not listed.
         let meetings = events.filter { $0.rsvpStatus != "declined" && !$0.isAllDay }
         func eventDays(_ e: CalendarEvent) -> [Double] { spread(e.startAt, e.endAt) }
+        // What each meeting bills in the period after overlaps: a tentative
+        // booking that lost its whole slot has nothing to assign.
+        var billedByID: [String: [DateInterval]] = [:]
+        for b in billed { billedByID[b.event.id] = b.intervals.compactMap { $0.intersectionIfPositive(with: interval) } }
+        func billedSeconds(_ e: CalendarEvent) -> Double { billedByID[e.id]?.reduce(0) { $0 + $1.duration } ?? 0 }
+        func billedDays(_ e: CalendarEvent) -> [Double] {
+            var d = Array(repeating: 0.0, count: dayCount)
+            for iv in billedByID[e.id] ?? [] { let x = spread(iv.start, iv.end); for i in 0..<dayCount { d[i] += x[i] } }
+            return d
+        }
         for (seriesID, occurrences) in Dictionary(grouping: meetings.filter { $0.seriesMasterID != nil }, by: { $0.seriesMasterID! }) {
             let sorted = occurrences.sorted { $0.startAt < $1.startAt }
             var retained: [CalendarEvent] = []   // the occurrences the series row stands for
@@ -301,8 +311,10 @@ enum ReviewQueue {
             var open = 0.0, total = 0.0
             var shares: [Share: Double] = [:]
             for e in sorted {
-                let secs = e.seconds(within: interval)
                 let attribution = m.attribute(event: e)
+                // Ignored time is shown whole so it can be restored; anything
+                // else counts what it bills.
+                let secs = attribution.isIgnored ? e.seconds(within: interval) : billedSeconds(e)
                 // An occurrence ignored on its own is its own row and not part
                 // of the series' time; a series ignore covers every occurrence.
                 if case .ignored(.event) = attribution {
@@ -314,7 +326,7 @@ enum ReviewQueue {
                 }
                 retained.append(e)
                 total += secs
-                let days = eventDays(e)
+                let days = attribution.isIgnored ? eventDays(e) : billedDays(e)
                 for i in 0..<dayCount { perDay[i] += days[i] }
                 switch attribution {
                 case .unattributed: open += secs; for i in 0..<dayCount { openPerDay[i] += days[i] }
@@ -339,10 +351,12 @@ enum ReviewQueue {
                                   belowThreshold: st == .open && seconds < minSec))
         }
         for var event in meetings where event.seriesMasterID == nil {
-            let perDay = eventDays(event)
-            let secs = event.seconds(within: interval)
+            let attribution = m.attribute(event: event)
+            let perDay = attribution.isIgnored ? eventDays(event) : billedDays(event)
+            let secs = attribution.isIgnored ? event.seconds(within: interval) : billedSeconds(event)
+            if !attribution.isIgnored, secs <= 0 { continue }   // lost its whole slot to another booking
             let st: ReviewRow.Status
-            switch m.attribute(event: event) {
+            switch attribution {
             case .unattributed: st = .open
             case .ignored: st = .ignored
             case .attributed(let c, let p, _): st = .attributed(customerID: c.id, projectID: p?.id, scope: "This meeting")

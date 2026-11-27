@@ -114,15 +114,18 @@ final class AgentFocusTests: XCTestCase {
         let during = try db.insert(sample("2026-11-27 09:05:00", ClaudeFocusLog.bundleID))
         let idle = try db.insert(sample("2026-11-27 09:06:00", ClaudeFocusLog.bundleID, idle: true))
         let chat = try db.insert(sample("2026-11-27 09:15:00", ClaudeFocusLog.bundleID))
+        // Past what the stored history is known to cover: left for later.
+        let unread = try db.insert(sample("2026-11-27 09:07:00", ClaudeFocusLog.bundleID))
 
         AgentFocusRecorder.backfillSamples(database: db, desktopSessions: ClaudeDesktopSessions(root: root),
-                                           codexThreads: CodexThreads(directory: root))
+                                           until: date("2026-11-27 09:06:30"))
         let byID = try db.dbQueue.read { try ActivitySample.fetchAll($0) }
             .reduce(into: [Int64: String?]()) { $0[$1.id!] = $1.agentSessionID }
         XCTAssertEqual(byID[before.id!], .some(nil))
         XCTAssertEqual(byID[during.id!], .some("cli-a"))
         XCTAssertEqual(byID[idle.id!], .some(nil))
         XCTAssertEqual(byID[chat.id!], .some(nil))
+        XCTAssertEqual(byID[unread.id!], .some(nil))
         // The focused session gets a row so its repo and a pin can attribute it.
         let row = try XCTUnwrap(try db.session(id: "cli-a"))
         XCTAssertEqual(row.cwd, "/nowhere")

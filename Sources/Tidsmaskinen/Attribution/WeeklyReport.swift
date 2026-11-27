@@ -381,7 +381,7 @@ struct WeeklyReport {
 
         let spans = FocusSpans.spans(samples: samples,
                                      sampleInterval: TimeInterval(sampleIntervalSeconds),
-                                     blocked: billed.flatMap(\.intervals))
+                                     blocked: MeetingBilling.blocked(events: events, matcher: matcher))
         for (sample, pieces) in spans {
             if matcher.isRepoIgnored(sample: sample) { continue }
             let result = matcher.attribute(sample)
@@ -457,7 +457,9 @@ struct WeeklyReport {
                 }
             }
             self.daySecondOffsets = offsets
-            self.weekSeconds = offsets[7]
+            // A shorter period (My day passes one day) ends where it ends:
+            // a meeting running past midnight doesn't add tomorrow to today.
+            self.weekSeconds = min(offsets[7], max(0, Int(week.duration)))
             self.week = week
         }
 
@@ -494,6 +496,19 @@ struct WeeklyReport {
                     var arr = bySource[record.source] ?? Array(repeating: 0.0, count: 7)
                     var addedTotal = 0
                     var i = s
+                    // Meetings were settled by MeetingBilling: a double booking
+                    // bills both meetings, even for the same customer, until the
+                    // user picks one. Samples are already clipped around them.
+                    if record.source == .events {
+                        while i < e {
+                            let d = dayIndex(forSecond: i)
+                            let limit = min(e, daySecondOffsets[d + 1])
+                            if isAttributed { for k in i..<limit { attributedUnion[k] = true } }
+                            arr[d] += Double(limit - i)
+                            addedTotal += limit - i
+                            i = limit
+                        }
+                    }
                     while i < e {
                         if claimed[i] { i += 1; continue }
                         // Claim a contiguous free run, bounded by the day end so

@@ -1424,7 +1424,9 @@ struct ReviewView: View {
             try state.database.setMicSessionIgnored(id: session.id, isIgnored: false)
             if let rule = writtenRules[unit.id] { try state.database.deleteRule(id: rule.id) }
         case .agentSession(let session, _):
-            try state.database.setClaudeSessionAttribution(sessionID: session.id, customerID: nil, projectID: nil)
+            // The row's session is how it stood before this decision: put its pin back.
+            try state.database.setClaudeSessionAttribution(sessionID: session.id, customerID: session.customerID,
+                                                           projectID: session.projectID)
         case .doubleBooking(let booking):
             try state.database.setMeetingOverlapChoice(
                 MeetingOverlapChoice(booking.first.id, booking.second.id, winner: nil), clear: true)

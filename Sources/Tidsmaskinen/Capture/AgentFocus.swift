@@ -238,6 +238,7 @@ final class CodexThreads: @unchecked Sendable {
         var id: String
         var cwd: String?
         var gitOriginURL: String?
+        var createdAt: Date? = nil
         var storedSessionID: String { CodingAgentProvider.codex.storedSessionID(id) }
     }
 
@@ -288,7 +289,12 @@ final class CodexThreads: @unchecked Sendable {
         }) ?? []
         let ids = Set(rows.map { $0["id"] as String })
         guard ids.count == 1, let row = rows.first else { return nil }
-        return Thread(id: row["id"], cwd: row["cwd"], gitOriginURL: row["git_origin_url"])
+        // Optional column: a Codex version without it still resolves titles.
+        let createdMs = try? db.read { db in
+            try Int64.fetchOne(db, sql: "SELECT created_at_ms FROM threads WHERE id = ?", arguments: [row["id"] as String])
+        }
+        let created = (createdMs ?? nil).map { Date(timeIntervalSince1970: Double($0) / 1000) }
+        return Thread(id: row["id"], cwd: row["cwd"], gitOriginURL: row["git_origin_url"], createdAt: created)
     }
 }
 
@@ -332,19 +338,34 @@ final class AgentFocusRecorder {
     private func rescan(backfill: Bool) {
         guard !isScanning else { return }
         isScanning = true
-        let dir = logDirectory, db = database, desk = desktopSessions, codex = codexThreads
+        let dir = logDirectory, db = database, desk = desktopSessions
         Task.detached(priority: .utility) {
+            let readAt = Date()
             let scan = Self.readAll(directory: dir)
-            Self.store(scan.events, database: db, desktopSessions: desk)
-            if backfill { Self.backfillSamples(database: db, desktopSessions: desk, codexThreads: codex) }
+            let stored = (try? Self.store(scan.events, database: db, desktopSessions: desk)) != nil
+            // History is complete up to when the files were read, no further.
+            if stored, backfill { Self.backfillSamples(database: db, desktopSessions: desk, until: readAt) }
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.counter = scan.counter
-                self.tailInode = scan.tailInode
-                self.tailOffset = scan.tailOffset
-                self.lastReadAt = scan.tailInode == nil ? nil : Date()
+                if stored {
+                    self.counter = scan.counter
+                    self.tailInode = scan.tailInode
+                    self.tailOffset = scan.tailOffset
+                    self.lastReadAt = scan.tailInode == nil ? nil : readAt
+                } else {
+                    self.tailInode = nil   // next poll scans again
+                    self.lastReadAt = nil
+                }
                 self.latest = (try? self.database.latestClaudeFocusEvent()) ?? self.latest
                 self.isScanning = false
+                // Samples taken while the scan ran got no session: catch up,
+                // then give them the one the stored history now shows.
+                self.poll()
+                if let until = self.lastReadAt {
+                    Task.detached(priority: .utility) {
+                        Self.backfillSamples(database: db, desktopSessions: desk, until: until)
+                    }
+                }
             }
         }
     }
@@ -402,9 +423,13 @@ final class AgentFocusRecorder {
             // Whole lines only: a partial last line is read again next time.
             guard let end = data.lastIndex(of: 0x0A) else { lastReadAt = Date(); return }
             let complete = Data(data[data.startIndex...end])
+            var next = counter
+            let events = ClaudeFocusLog.events(from: ClaudeFocusLog.lines(in: complete), counter: &next)
+            // Only move past these lines once they are stored: the log rotates
+            // away, so lines skipped on a failed write would be lost for good.
+            try Self.store(events, database: database, desktopSessions: desktopSessions)
+            counter = next
             tailOffset += UInt64(complete.count)
-            let events = ClaudeFocusLog.events(from: ClaudeFocusLog.lines(in: complete), counter: &counter)
-            Self.store(events, database: database, desktopSessions: desktopSessions)
             if let last = events.last { latest = last }
             lastReadAt = Date()
         } catch {
@@ -413,7 +438,7 @@ final class AgentFocusRecorder {
     }
 
     nonisolated private static func store(_ events: [ClaudeFocusEvent], database: AppDatabase,
-                                          desktopSessions: ClaudeDesktopSessions) {
+                                          desktopSessions: ClaudeDesktopSessions) throws {
         guard !events.isEmpty else { return }
         var cli: [String: String?] = [:]
         let resolved = events.map { e -> ClaudeFocusEvent in
@@ -423,7 +448,7 @@ final class AgentFocusRecorder {
             r.cliSessionID = cli[local] ?? nil
             return r
         }
-        try? database.insertClaudeFocusEvents(resolved)
+        try database.insertClaudeFocusEvents(resolved)
     }
 
     /// The agent session in front for a sample being captured now.
@@ -431,7 +456,10 @@ final class AgentFocusRecorder {
         switch bundleID {
         case ClaudeFocusLog.bundleID:
             poll()
-            guard let e = latest, e.kind == .focus, let local = e.localSessionID else { return nil }
+            // Behind or unreadable: the stored history may miss a switch, so
+            // this sample keeps no session (a backfill fills it in later).
+            guard !isScanning, lastReadAt != nil,
+                  let e = latest, e.kind == .focus, let local = e.localSessionID else { return nil }
             // A line from before Claude's current launch says nothing about now.
             if let launched = claudeLaunchedAt, e.occurredAt < launched.addingTimeInterval(-1) { return nil }
             guard let info = desktopSessions.info(localID: local),
@@ -458,12 +486,12 @@ final class AgentFocusRecorder {
 
     nonisolated static func ensureSessionRow(codex thread: CodexThreads.Thread, database: AppDatabase) {
         ensureSessionRow(id: thread.storedSessionID, provider: .codex, cwd: thread.cwd,
-                         remote: thread.gitOriginURL, startedAt: nil, database: database)
+                         remote: thread.gitOriginURL, startedAt: thread.createdAt, database: database)
     }
 
     nonisolated private static func ensureSessionRow(id: String, provider: CodingAgentProvider, cwd: String?,
                                                      remote: String?, startedAt: Date?, database: AppDatabase) {
-        guard (try? database.session(id: id)) == nil else { return }
+        guard (try? database.session(id: id)) == nil else { return }   // cheap pre-check; the insert decides
         let root = cwd.flatMap { Probes.findGitRoot(near: $0) }
         let start = startedAt ?? Date()
         let row = ClaudeSession(
@@ -473,45 +501,36 @@ final class AgentFocusRecorder {
             startedAt: start, endedAt: start, lastActivityAt: nil, activeSeconds: 0,
             promptCount: 0, customerID: nil, projectID: nil,
             createdAt: Date(), updatedAt: Date(), provider: provider)
-        try? database.upsertSession(row)
+        // Never over a row a hook created meanwhile. A placeholder has no
+        // `lastActivityAt`; the hook ingester treats it as not yet started.
+        try? database.insertSessionIfAbsent(row)
     }
 
-    /// Gives every stored Claude and Codex sample without a session the one
-    /// history shows. Samples outside the history keep none.
+    /// Gives stored Claude samples without a session the one history shows,
+    /// up to `until` (how far the stored history is known to be complete).
+    /// Codex samples are resolved only when captured: a thread renamed since
+    /// could hand an old title to someone else's work.
     nonisolated static func backfillSamples(database: AppDatabase, desktopSessions: ClaudeDesktopSessions,
-                                            codexThreads: CodexThreads) {
+                                            until: Date) {
+        guard let events = try? database.allClaudeFocusEvents(), !events.isEmpty,
+              let first = events.first?.occurredAt,
+              let samples = try? database.samplesWithoutAgentSession(bundleID: ClaudeFocusLog.bundleID, since: first)
+        else { return }
+        let timeline = ClaudeFocusTimeline(events: events)
+        var cliByLocal: [String: String?] = [:]
+        for e in events { if let l = e.localSessionID, let c = e.cliSessionID { cliByLocal[l] = c } }
+        var ensured = Set<String>()
         var updates: [(Int64, String)] = []
-        if let events = try? database.allClaudeFocusEvents(), !events.isEmpty {
-            let timeline = ClaudeFocusTimeline(events: events)
-            var cliByLocal: [String: String?] = [:]
-            for e in events { if let l = e.localSessionID, let c = e.cliSessionID { cliByLocal[l] = c } }
-            var ensured = Set<String>()
-            if let first = timeline.first,
-               let samples = try? database.samplesWithoutAgentSession(bundleID: ClaudeFocusLog.bundleID, since: first) {
-                for s in samples {
-                    guard let id = s.id, case .session(let local) = timeline.focus(at: s.capturedAt) else { continue }
-                    if cliByLocal[local] == nil {
-                        cliByLocal[local] = .some(desktopSessions.info(localID: local)?.cliSessionID)
-                    }
-                    guard let cli = cliByLocal[local] ?? nil else { continue }
-                    if ensured.insert(cli).inserted, let info = desktopSessions.info(localID: local) {
-                        ensureSessionRow(claude: info, cliSessionID: cli, database: database)
-                    }
-                    updates.append((id, cli))
-                }
+        for s in samples where s.capturedAt <= until {
+            guard let id = s.id, case .session(let local) = timeline.focus(at: s.capturedAt) else { continue }
+            if cliByLocal[local] == nil {
+                cliByLocal[local] = .some(desktopSessions.info(localID: local)?.cliSessionID)
             }
-        }
-        if let samples = try? database.samplesWithoutAgentSession(bundleID: CodexThreads.bundleID, since: nil) {
-            var byTitle: [String: String?] = [:]
-            for s in samples {
-                guard let id = s.id, let title = s.windowTitle else { continue }
-                if byTitle[title] == nil {
-                    let thread = codexThreads.thread(title: title)
-                    if let thread { ensureSessionRow(codex: thread, database: database) }
-                    byTitle[title] = .some(thread?.storedSessionID)
-                }
-                if let sid = byTitle[title] ?? nil { updates.append((id, sid)) }
+            guard let cli = cliByLocal[local] ?? nil else { continue }
+            if ensured.insert(cli).inserted, let info = desktopSessions.info(localID: local) {
+                ensureSessionRow(claude: info, cliSessionID: cli, database: database)
             }
+            updates.append((id, cli))
         }
         try? database.setAgentSessions(updates)
     }

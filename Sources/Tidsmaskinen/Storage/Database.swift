@@ -1119,6 +1119,14 @@ struct AppDatabase {
         }
     }
 
+    /// Inserts `session` unless a row with its id exists; never replaces one.
+    func insertSessionIfAbsent(_ session: ClaudeSession) throws {
+        try dbQueue.write { db in
+            var s = session
+            try s.insert(db, onConflict: .ignore)
+        }
+    }
+
     func allSessions() throws -> [ClaudeSession] {
         try dbQueue.read { db in try ClaudeSession.fetchAll(db) }
     }

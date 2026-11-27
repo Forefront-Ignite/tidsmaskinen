@@ -157,6 +157,30 @@ final class HookIngesterTests: XCTestCase {
         XCTAssertEqual(s.activeSeconds, 300, accuracy: 0.001)
     }
 
+    /// The focus recorder can create a session's row before its hooks are
+    /// read. That placeholder's invented start and end must not reject them.
+    func testPlaceholderRowDoesNotSwallowEarlierHookEvents() throws {
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        let placeholderAt = t0.addingTimeInterval(3600)
+        try db.insertSessionIfAbsent(ClaudeSession(
+            id: "sess-1", cwd: nil, transcriptPath: nil, gitRepoPath: nil, gitRemoteURL: nil,
+            startedAt: placeholderAt, endedAt: placeholderAt, lastActivityAt: nil, activeSeconds: 0,
+            promptCount: 0, customerID: nil, projectID: nil, createdAt: placeholderAt, updatedAt: placeholderAt))
+        ingester.handleLine(line("SessionStart", t0))
+        ingester.handleLine(line("UserPromptSubmit", t0.addingTimeInterval(60)))
+        ingester.handleLine(line("Stop", t0.addingTimeInterval(120)))
+        let s = try XCTUnwrap(try session())
+        XCTAssertEqual(s.startedAt, t0)
+        XCTAssertNil(s.endedAt)
+        XCTAssertEqual(s.promptCount, 1)
+        XCTAssertEqual(s.activeSeconds, 120, accuracy: 0.001)
+        // And a placeholder never replaces a row hooks already made.
+        var other = s
+        other.promptCount = 0
+        try db.insertSessionIfAbsent(other)
+        XCTAssertEqual(try session()?.promptCount, 1)
+    }
+
     // MARK: no regression for live sessions
 
     func testOpenSessionStillBillsGapWithinThreshold() throws {

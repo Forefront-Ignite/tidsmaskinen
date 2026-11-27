@@ -60,6 +60,13 @@ enum MeetingBilling {
         }
     }
 
+    /// Time no foreground sample can bill: every eligible booking's full
+    /// span, whoever wins its overlaps, so contradictory double-booking
+    /// answers can't hand a meeting slot to the app in front.
+    static func blocked(events: [CalendarEvent], matcher: RuleMatcher) -> [DateInterval] {
+        eligible(events, matcher: matcher).map { DateInterval(start: $0.0.startAt, end: $0.0.endAt) }
+    }
+
     static func billed(events: [CalendarEvent], matcher: RuleMatcher,
                        choices: [MeetingOverlapChoice]) -> [Billed] {
         let pool = eligible(events, matcher: matcher)

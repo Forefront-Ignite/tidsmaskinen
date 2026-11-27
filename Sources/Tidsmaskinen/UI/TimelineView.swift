@@ -1296,7 +1296,12 @@ struct TimelineView: View {
                 idleThresholdSeconds: idleThreshold, minMinutes: AppSettings.reviewMinMinutes)
             dayOpenCount = open.count
             dayOpenSeconds = open.reduce(0) { $0 + $1.totalSeconds }
-            dayMeetingSeconds = bundle.calendar.filter { !$0.isIgnored }.reduce(0) { $0 + $1.durationSeconds }
+            // What meetings bill today after overlaps, as the report counts them.
+            dayMeetingSeconds = MeetingBilling.billed(events: events, matcher: matcher,
+                                                      choices: try state.database.meetingOverlapChoices())
+                .flatMap(\.intervals)
+                .compactMap { $0.intersectionIfPositive(with: dayInterval)?.duration }
+                .reduce(0, +)
             recomputeDerived()
             loadError = nil
             focusPendingBlock()
