@@ -11,7 +11,7 @@ import AppKit
 @MainActor
 final class CaptureHealth: ObservableObject {
     enum Check: String, CaseIterable, Identifiable {
-        case accessibility, chrome, microphone, calendar, hooks, menuBar, customers
+        case accessibility, chrome, agentFocus, microphone, calendar, hooks, menuBar, customers
         var id: String { rawValue }
 
         /// Short label for the tray stripe.
@@ -19,6 +19,7 @@ final class CaptureHealth: ObservableObject {
             switch self {
             case .accessibility: return "Accessibility"
             case .chrome:        return "Chrome"
+            case .agentFocus:    return "Claude focus"
             case .microphone:    return "Calls"
             case .calendar:      return "Calendar"
             case .hooks:         return "Hooks"
@@ -32,6 +33,7 @@ final class CaptureHealth: ObservableObject {
             switch self {
             case .accessibility: return "window titles and repos"
             case .chrome:        return "tab URLs (Chrome automation)"
+            case .agentFocus:    return "which Claude Code session you have in front"
             case .microphone:    return "noticing calls and huddles"
             case .calendar:      return "meetings from Microsoft 365"
             case .hooks:         return "Claude Code and Codex sessions"
@@ -62,6 +64,9 @@ final class CaptureHealth: ObservableObject {
     /// True while the stored Microsoft identity is still being restored at launch.
     var isRestoringSignIn: () -> Bool = { false }
     var isCallDetectionRunning: () -> Bool = { false }
+    /// When Claude's log was last read (nil: unreadable) and the newest
+    /// session switch stored from it.
+    var agentFocusState: () -> (lastReadAt: Date?, latestEventAt: Date?) = { (nil, nil) }
     private var timer: Timer?
     private var notified: Set<Check> = []
 
@@ -118,6 +123,27 @@ final class CaptureHealth: ObservableObject {
             case .targetNotRunning: set(.chrome, .off, "Chrome isn't running")
             case .unknown(let s):   set(.chrome, .warn, "not asked yet (OSStatus \(s)) — request access")
             }
+        }
+
+        // Claude's own log names the Code session in front. Undocumented, so
+        // verify it is still readable and still saying something.
+        let claude = NSRunningApplication.runningApplications(withBundleIdentifier: ClaudeFocusLog.bundleID).first
+        let focus = agentFocusState()
+        if claude == nil {
+            set(.agentFocus, .off, "Claude isn't running")
+        } else if focus.lastReadAt == nil {
+            set(.agentFocus, .warn, "Claude's log can't be read — time in Claude keeps no session")
+        } else if let launched = claude?.launchDate,
+                  (focus.latestEventAt ?? .distantPast) < launched.addingTimeInterval(-2) {
+            if now.timeIntervalSince(launched) > 120 {
+                set(.agentFocus, .warn, "no session switch read since Claude started — its log may have changed")
+            } else {
+                set(.agentFocus, .off, "waiting for Claude to open a session")
+            }
+        } else if let last = focus.latestEventAt {
+            set(.agentFocus, .ok, "last session switch \(Self.age(now.timeIntervalSince(last))) ago")
+        } else {
+            set(.agentFocus, .ok, "reading Claude's log")
         }
 
         // Call detection reads which processes hold the microphone through

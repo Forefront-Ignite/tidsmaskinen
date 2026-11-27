@@ -42,19 +42,6 @@ final class WeeklyReportCallsTests: XCTestCase {
         report.rows.first { $0.id == customerID }?.totalHours ?? 0
     }
 
-    func testDeclinedMeetingDoesNotBillOrAbsorbCalls() {
-        let matcher = RuleMatcher.make(customers: [customer("A")], projects: [], rules: [])
-        var booking = event("declined", from: at(2026, 4, 15, 10), to: at(2026, 4, 15, 11), customerID: "A")
-        booking.rsvpStatus = "declined"
-        let mic = micSession("call", from: booking.startAt, to: booking.endAt, customerID: "A")
-        XCTAssertTrue(CalendarEvent.meetingMicSessionIDs(events: [booking], micSessions: [mic], matcher: matcher).isEmpty)
-        let report = WeeklyReport.compute(week: week, samples: [], events: [booking], micSessions: [mic],
-                                          matcher: matcher, sampleIntervalSeconds: 15)
-        XCTAssertEqual(report.grandTotal, 1)
-        XCTAssertEqual(report.breakdownsByRowID["A"]?.perDay(.events).reduce(0, +), 0)
-        XCTAssertEqual(report.breakdownsByRowID["A"]?.perDay(.calls).reduce(0, +), 1)
-    }
-
     func testCallAndRuleSaveRollsBackTogether() throws {
         let db = try AppDatabase.inMemoryForTesting()
         try db.upsert(customer("A"))
@@ -64,27 +51,6 @@ final class WeeklyReportCallsTests: XCTestCase {
         XCTAssertThrowsError(try db.setMicSessionAttribution(id: id, customerID: "A", projectID: nil, rule: invalidRule))
         XCTAssertNil(try db.micSessions(in: week).first?.customerID)
         XCTAssertTrue(try db.allRules().isEmpty)
-    }
-
-    func testIgnoredSeriesDoesNotAbsorbAttributedCall() {
-        let series = MeetingSeriesAttribution(seriesMasterID: "series", customerID: nil,
-                                              projectID: nil, isIgnored: true,
-                                              updatedAt: Date())
-        let matcher = RuleMatcher.make(customers: [customer("A")], projects: [], rules: [], series: [series])
-        var booking = event("e1", from: at(2026, 4, 15, 10), to: at(2026, 4, 15, 11), customerID: nil)
-        booking.seriesMasterID = "series"
-        let mic = micSession("m1", from: at(2026, 4, 15, 9, 30), to: at(2026, 4, 15, 11, 30), customerID: "A")
-        let extended = CalendarEvent.withMicOverrun(events: [booking], micSessions: [mic], matcher: matcher)
-        XCTAssertEqual(extended.first?.startAt, booking.startAt)
-        XCTAssertEqual(extended.first?.endAt, booking.endAt)
-        XCTAssertTrue(CalendarEvent.meetingMicSessionIDs(events: extended, micSessions: [mic], matcher: matcher).isEmpty)
-        let report = WeeklyReport.compute(week: week, samples: [], events: extended, micSessions: [mic],
-                                          matcher: matcher, sampleIntervalSeconds: 15)
-        XCTAssertEqual(report.grandTotal, 2, accuracy: 0.001)
-
-        // An explicitly assigned occurrence still overrides an ignored series.
-        booking.customerID = "A"
-        XCTAssertEqual(CalendarEvent.meetingMicSessionIDs(events: [booking], micSessions: [mic], matcher: matcher)[booking.id], [mic.id])
     }
 
     func testReviewDoesNotAskAboutIndividuallyIgnoredOrAssignedSeriesOccurrences() throws {
@@ -112,14 +78,14 @@ final class WeeklyReportCallsTests: XCTestCase {
         XCTAssertEqual(try db.micSessions(in: interval).map(\.id), [crossing])
     }
 
-    /// A call crossing the week boundary is queued in both weeks (clipped), but
-    /// the rolling badge counts it once, owned by the earlier week.
-    func testRollingBacklogCountsBoundaryCrossingCallOnce() throws {
+    /// A meeting crossing the week boundary is queued in both weeks (clipped),
+    /// but the rolling badge counts it once, owned by the earlier week.
+    func testRollingBacklogCountsBoundaryCrossingMeetingOnce() throws {
         let db = try AppDatabase.inMemoryForTesting()
         let now = at(2026, 4, 15, 12)
         let weekStart = cal.currentWeekInterval(reference: now).start
-        let id = try db.startMicSession(at: weekStart.addingTimeInterval(-3600), voipApps: [])
-        try db.endMicSession(id: id, endedAt: weekStart.addingTimeInterval(3600), participant: nil, slackChannel: nil, voipApps: nil)
+        try db.upsertEvents([event("crossing", from: weekStart.addingTimeInterval(-3600),
+                                   to: weekStart.addingTimeInterval(3600), customerID: nil)])
         let rolling = try ReviewQueue.rolling(database: db, now: now, weeksBack: 1, sampleIntervalSeconds: 15,
                                               idleThresholdSeconds: 300, minMinutes: 5)
         XCTAssertEqual(rolling.totalCount, 1)
@@ -163,117 +129,6 @@ final class WeeklyReportCallsTests: XCTestCase {
         let after = event("after", from: interval.end, to: interval.end.addingTimeInterval(1800), customerID: nil)
         try db.upsertEvents([crossing, before, after])
         XCTAssertEqual(try db.calendarEvents(in: interval).map(\.id), ["crossing"])
-    }
-
-    /// An attributed ad-hoc call with no overlapping meeting contributes its
-    /// full duration to its customer.
-    func testAttributedCallAddsHours() {
-        let m = RuleMatcher.make(customers: [customer("A")], projects: [], rules: [])
-        let mic = micSession("m1", from: at(2026, 4, 15, 13), to: at(2026, 4, 15, 13, 30), customerID: "A")
-        let report = WeeklyReport.compute(
-            week: week, samples: [], micSessions: [mic], matcher: m, sampleIntervalSeconds: 15)
-        XCTAssertEqual(rowHours(report, customerID: "A"), 0.5, accuracy: 0.001)
-        XCTAssertEqual(report.grandTotal, 0.5, accuracy: 0.001)
-    }
-
-    /// An unattributed call (no manual save, no matching rule) is NOT counted —
-    /// it belongs in the Review backlog, not the report totals.
-    func testUnattributedCallIsNotCounted() {
-        let m = RuleMatcher.make(customers: [customer("A")], projects: [], rules: [])
-        let mic = micSession("m1", from: at(2026, 4, 15, 13), to: at(2026, 4, 15, 13, 30), customerID: nil)
-        let report = WeeklyReport.compute(
-            week: week, samples: [], micSessions: [mic], matcher: m, sampleIntervalSeconds: 15)
-        XCTAssertEqual(report.grandTotal, 0, accuracy: 0.001)
-    }
-
-    /// An ignored call contributes nothing, even when it carries an attribution
-    /// (manual save or rule) — ignore wins.
-    func testIgnoredCallIsNotCounted() {
-        let m = RuleMatcher.make(customers: [customer("A")], projects: [], rules: [])
-        var mic = micSession("m1", from: at(2026, 4, 15, 13), to: at(2026, 4, 15, 13, 30), customerID: "A")
-        mic.isIgnored = true
-        let report = WeeklyReport.compute(
-            week: week, samples: [], micSessions: [mic], matcher: m, sampleIntervalSeconds: 15)
-        XCTAssertEqual(report.grandTotal, 0, accuracy: 0.001)
-    }
-
-    /// Mic time fully inside a meeting is credited once (via the meeting), not
-    /// added again as a call — the call's overlap with the meeting is subtracted.
-    func testCallOverlappingMeetingIsNotDoubleCounted() {
-        let m = RuleMatcher.make(customers: [customer("A")], projects: [], rules: [])
-        let e = event("e1", from: at(2026, 4, 15, 10), to: at(2026, 4, 15, 11), customerID: "A")
-        let mic = micSession("m1", from: at(2026, 4, 15, 10), to: at(2026, 4, 15, 11), customerID: "A")
-        let report = WeeklyReport.compute(
-            week: week, samples: [], events: [e], micSessions: [mic], matcher: m, sampleIntervalSeconds: 15)
-        // 1.0h from the meeting, nothing extra from the fully-overlapping call.
-        XCTAssertEqual(rowHours(report, customerID: "A"), 1.0, accuracy: 0.001)
-        XCTAssertEqual(report.grandTotal, 1.0, accuracy: 0.001)
-    }
-
-    /// A Teams meeting that ended early, followed by a Slack huddle for another
-    /// customer inside the booked block. The huddle is not the meeting's audio,
-    /// so it keeps its full duration and lands on its own customer instead of
-    /// being swallowed by the booking.
-    func testHuddleDuringTeamsMeetingIsCountedSeparately() {
-        let m = RuleMatcher.make(customers: [customer("A"), customer("B")], projects: [], rules: [])
-        let e = event("e1", from: at(2026, 4, 15, 13), to: at(2026, 4, 15, 15),
-                      customerID: "A", provider: "teamsForBusiness")
-        let teams = micSession("m1", from: at(2026, 4, 15, 13), to: at(2026, 4, 15, 13, 15),
-                               customerID: nil, app: "com.microsoft.teams2")
-        let huddle = micSession("m2", from: at(2026, 4, 15, 13, 20), to: at(2026, 4, 15, 14, 20),
-                                customerID: "B")
-        let report = WeeklyReport.compute(
-            week: week, samples: [], events: [e], micSessions: [teams, huddle],
-            matcher: m, sampleIntervalSeconds: 15)
-        XCTAssertEqual(rowHours(report, customerID: "A"), 2.0, accuracy: 0.001)
-        XCTAssertEqual(rowHours(report, customerID: "B"), 1.0, accuracy: 0.001)
-    }
-
-    /// A Teams meeting joined from the browser records the browser's bundle ID,
-    /// not Teams'. That is not evidence of another platform, so the booking must
-    /// still own its own audio — otherwise the same hour bills twice.
-    func testBrowserJoinedTeamsMeetingStillOwnsItsAudio() {
-        let e = event("e1", from: at(2026, 4, 15, 13), to: at(2026, 4, 15, 14),
-                      customerID: "A", provider: "teamsForBusiness")
-        // Pinned to a different customer, so a failure shows up as a second row
-        // rather than being masked by same-bucket dedup.
-        let web = micSession("m1", from: at(2026, 4, 15, 13), to: at(2026, 4, 15, 14),
-                             customerID: "B", app: "com.google.chrome")
-        let report = WeeklyReport.compute(
-            week: week, samples: [], events: [e], micSessions: [web],
-            matcher: RuleMatcher.make(customers: [customer("A"), customer("B")], projects: [], rules: []),
-            sampleIntervalSeconds: 15)
-        XCTAssertEqual(rowHours(report, customerID: "A"), 1.0, accuracy: 0.001)
-        XCTAssertEqual(rowHours(report, customerID: "B"), 0.0, accuracy: 0.001)
-    }
-
-    /// A meeting with no typed provider (in-person, dial-in, a Meet link in the
-    /// body) still owns every overlapping session. This is the branch that keeps
-    /// behaviour unchanged for most of the calendar — flipping it would make
-    /// every untyped meeting double-bill its own audio.
-    func testUntypedMeetingStillOwnsForeignPlatformAudio() {
-        let m = RuleMatcher.make(customers: [customer("A")], projects: [], rules: [])
-        let e = event("e1", from: at(2026, 4, 15, 13), to: at(2026, 4, 15, 14), customerID: "A")
-        let slack = micSession("m1", from: at(2026, 4, 15, 13), to: at(2026, 4, 15, 14), customerID: "A")
-        let report = WeeklyReport.compute(
-            week: week, samples: [], events: [e], micSessions: [slack],
-            matcher: m, sampleIntervalSeconds: 15)
-        XCTAssertEqual(rowHours(report, customerID: "A"), 1.0, accuracy: 0.001)
-        XCTAssertEqual(report.grandTotal, 1.0, accuracy: 0.001)
-    }
-
-    /// An ignored meeting (a lunch hold) contributes no time itself, so it must
-    /// not absorb a call either — otherwise the call's hours vanish entirely.
-    func testIgnoredMeetingDoesNotSwallowCall() {
-        let m = RuleMatcher.make(customers: [customer("A")], projects: [], rules: [])
-        var e = event("e1", from: at(2026, 4, 15, 12), to: at(2026, 4, 15, 13), customerID: nil)
-        e.isIgnored = true
-        let call = micSession("m1", from: at(2026, 4, 15, 12, 10), to: at(2026, 4, 15, 12, 50),
-                              customerID: "A")
-        let report = WeeklyReport.compute(
-            week: week, samples: [], events: [e], micSessions: [call],
-            matcher: m, sampleIntervalSeconds: 15)
-        XCTAssertEqual(rowHours(report, customerID: "A"), 0.75, accuracy: 0.001)
     }
 
     /// Ownership has no overlap floor: a fragment of a meeting's own audio that
@@ -326,18 +181,4 @@ final class WeeklyReportCallsTests: XCTestCase {
         XCTAssertEqual(out[0].endAt, at(2026, 4, 15, 14))
     }
 
-    /// The flip side: a Teams meeting's own Teams audio is still absorbed, so
-    /// pinning it can't double-count the booked time.
-    func testTeamsAudioInsideTeamsMeetingIsNotDoubleCounted() {
-        let m = RuleMatcher.make(customers: [customer("A")], projects: [], rules: [])
-        let e = event("e1", from: at(2026, 4, 15, 13), to: at(2026, 4, 15, 14),
-                      customerID: "A", provider: "teamsForBusiness")
-        let teams = micSession("m1", from: at(2026, 4, 15, 13), to: at(2026, 4, 15, 13, 50),
-                               customerID: "A", app: "com.microsoft.teams2")
-        let report = WeeklyReport.compute(
-            week: week, samples: [], events: [e], micSessions: [teams],
-            matcher: m, sampleIntervalSeconds: 15)
-        XCTAssertEqual(rowHours(report, customerID: "A"), 1.0, accuracy: 0.001)
-        XCTAssertEqual(report.grandTotal, 1.0, accuracy: 0.001)
-    }
 }

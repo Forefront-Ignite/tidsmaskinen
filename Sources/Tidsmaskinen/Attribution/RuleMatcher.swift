@@ -51,6 +51,9 @@ struct RuleMatcher {
     let rulesByKind: [Rule.Kind: [Rule]]
     let seriesAttributionsByID: [String: MeetingSeriesAttribution]
     let ignoredRepoSlugs: Set<String>
+    /// Agent sessions by id, so a Claude or Codex sample is attributed
+    /// through the session that was in front (`ActivitySample.agentSessionID`).
+    var sessionsByID: [String: ClaudeSession] = [:]
 
     static func load(from db: AppDatabase) throws -> RuleMatcher {
         let customers = try db.allCustomersIncludingArchived()
@@ -59,14 +62,15 @@ struct RuleMatcher {
         let series = try db.allMeetingSeriesAttributions()
         let hiddenSignals = try db.allHiddenSignals()
         return make(customers: customers, projects: projects, rules: rules, series: series,
-                    hiddenSignals: hiddenSignals)
+                    hiddenSignals: hiddenSignals, sessions: try db.allSessions())
     }
 
     static func make(customers: [Customer],
                      projects: [Project],
                      rules: [Rule],
                      series: [MeetingSeriesAttribution] = [],
-                     hiddenSignals: [HiddenSignal] = []) -> RuleMatcher {
+                     hiddenSignals: [HiddenSignal] = [],
+                     sessions: [ClaudeSession] = []) -> RuleMatcher {
         let byID = Dictionary(uniqueKeysWithValues: customers.map { ($0.id, $0) })
         let projByID = Dictionary(uniqueKeysWithValues: projects.map { ($0.id, $0) })
         let byKind = Dictionary(grouping: rules, by: { $0.kind })
@@ -80,8 +84,20 @@ struct RuleMatcher {
             projectsByID: projByID,
             rulesByKind: byKind,
             seriesAttributionsByID: seriesByID,
-            ignoredRepoSlugs: Set(hiddenSignals.filter { $0.kind == .gitRepoSlug }.map { $0.value.lowercased() })
+            ignoredRepoSlugs: Set(hiddenSignals.filter { $0.kind == .gitRepoSlug }.map { $0.value.lowercased() }),
+            sessionsByID: Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         )
+    }
+
+    /// The agent session that was in front when `sample` was captured.
+    func session(for sample: ActivitySample) -> ClaudeSession? {
+        sample.agentSessionID.flatMap { sessionsByID[$0] }
+    }
+
+    /// A sample counts as ignored-repo activity when its own repo or the repo
+    /// of the agent session in front is ignored.
+    func isRepoIgnored(sample: ActivitySample) -> Bool {
+        isRepoIgnored(remoteURL: sample.gitRemoteURL) || isRepoIgnored(remoteURL: session(for: sample)?.gitRemoteURL)
     }
 
     /// Exact repo identity, case-insensitive like repo attribution rules. Ignore
@@ -107,6 +123,13 @@ struct RuleMatcher {
         // Time-bounded ("this week"/"today") rules only apply to activity within
         // their window — match against this sample's own capture time.
         let at = sample.capturedAt
+        // Claude or Codex in front: the session decides — its pin, then its
+        // repo's rules at this sample's time. A session no rule covers falls
+        // through to the app's own rules.
+        if let session = session(for: sample) {
+            let viaSession = attribute(session: session, at: at)
+            if viaSession.customer != nil { return viaSession }
+        }
         // Most-specific signals first.
         if let url = sample.gitRemoteURL {
             if let slug = Self.gitSlug(fromRemote: url),
@@ -165,12 +188,15 @@ struct RuleMatcher {
 
     /// Attribute a Claude Code session. Manual override (session.customerID/projectID)
     /// wins; otherwise match by gitRemoteURL → slug → host fallback.
-    func attribute(session: ClaudeSession) -> AttributionResult {
+    /// `at` is when the time being attributed happened, so a week-bounded
+    /// repo rule applies to that week's focus only; it defaults to the
+    /// session's last activity for session-level views.
+    func attribute(session: ClaudeSession, at date: Date? = nil) -> AttributionResult {
         if let customerID = session.customerID, let customer = customersByID[customerID] {
             let project = session.projectID.flatMap { projectsByID[$0] }
             return AttributionResult(customer: customer, project: project, matchingRule: nil)
         }
-        let at = session.lastActivityAt ?? session.startedAt
+        let at = date ?? session.lastActivityAt ?? session.startedAt
         if let url = session.gitRemoteURL {
             if let slug = Self.gitSlug(fromRemote: url),
                let r = match(kind: .gitRepoSlug, against: slug, at: at) {

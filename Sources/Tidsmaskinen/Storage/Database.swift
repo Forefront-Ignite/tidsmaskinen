@@ -450,7 +450,119 @@ struct AppDatabase {
             }
         }
 
+        // Which Claude Code session was in front, copied from Claude desktop's
+        // own log before it rotates away, and the agent session each sample
+        // belongs to (Claude via that history, Codex via its window title).
+        migrator.registerMigration("v24_agent_focus") { db in
+            try db.create(table: "claude_focus_events") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("occurredAt", .datetime).notNull().indexed()
+                t.column("seq", .integer).notNull()
+                t.column("kind", .text).notNull()
+                t.column("localSessionID", .text)
+                t.column("cliSessionID", .text)
+                t.uniqueKey(["occurredAt", "seq"])
+            }
+            try db.alter(table: "activity_samples") { t in
+                t.add(column: "agentSessionID", .text)
+            }
+        }
+
+        // Which meeting the user was in when two they accepted overlap.
+        migrator.registerMigration("v25_meeting_overlap_choices") { db in
+            try db.create(table: "meeting_overlap_choices") { t in
+                t.column("eventID", .text).notNull()
+                t.column("otherEventID", .text).notNull()
+                t.column("winnerEventID", .text)
+                t.primaryKey(["eventID", "otherEventID"])
+            }
+        }
+
         try migrator.migrate(dbQueue)
+    }
+
+    // MARK: - Double bookings
+
+    func meetingOverlapChoices() throws -> [MeetingOverlapChoice] {
+        try dbQueue.read { db in try MeetingOverlapChoice.fetchAll(db) }
+    }
+
+    /// Records which meeting the user was in (nil: both), or with
+    /// `clear` forgets the answer so the overlap is open again.
+    func setMeetingOverlapChoice(_ choice: MeetingOverlapChoice, clear: Bool = false) throws {
+        try dbQueue.write { db in
+            if clear {
+                _ = try MeetingOverlapChoice.deleteOne(db, key: ["eventID": choice.eventID, "otherEventID": choice.otherEventID])
+            } else {
+                try choice.upsert(db)
+            }
+        }
+    }
+
+    // MARK: - Agent focus
+
+    /// Stores focus lines; lines already stored (same second and order) are skipped.
+    func insertClaudeFocusEvents(_ events: [ClaudeFocusEvent]) throws {
+        guard !events.isEmpty else { return }
+        try dbQueue.write { db in
+            for e in events {
+                try db.execute(sql: """
+                    INSERT INTO claude_focus_events (occurredAt, seq, kind, localSessionID, cliSessionID)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(occurredAt, seq) DO UPDATE SET
+                        cliSessionID = coalesce(claude_focus_events.cliSessionID, excluded.cliSessionID)
+                    """, arguments: [e.occurredAt, e.seq, e.kind.rawValue, e.localSessionID, e.cliSessionID])
+            }
+        }
+    }
+
+    func allClaudeFocusEvents() throws -> [ClaudeFocusEvent] {
+        try dbQueue.read { db in
+            try ClaudeFocusEvent.fetchAll(db, sql: """
+                SELECT occurredAt, seq, kind, localSessionID, cliSessionID
+                FROM claude_focus_events ORDER BY occurredAt, seq
+                """)
+        }
+    }
+
+    func latestClaudeFocusEvent() throws -> ClaudeFocusEvent? {
+        try dbQueue.read { db in
+            try ClaudeFocusEvent.fetchOne(db, sql: """
+                SELECT occurredAt, seq, kind, localSessionID, cliSessionID
+                FROM claude_focus_events ORDER BY occurredAt DESC, seq DESC LIMIT 1
+                """)
+        }
+    }
+
+    /// Active samples of one app that have no agent session yet.
+    func samplesWithoutAgentSession(bundleID: String, since: Date?) throws -> [ActivitySample] {
+        try dbQueue.read { db in
+            var request = ActivitySample
+                .filter(ActivitySample.Columns.appBundleID == bundleID
+                        && ActivitySample.Columns.isIdle == false
+                        && ActivitySample.Columns.agentSessionID == nil)
+            if let since { request = request.filter(ActivitySample.Columns.capturedAt >= since) }
+            return try request.fetchAll(db)
+        }
+    }
+
+    func setAgentSessions(_ updates: [(sampleID: Int64, sessionID: String)]) throws {
+        guard !updates.isEmpty else { return }
+        try dbQueue.write { db in
+            for u in updates {
+                try db.execute(sql: "UPDATE activity_samples SET agentSessionID = ? WHERE id = ? AND agentSessionID IS NULL",
+                               arguments: [u.sessionID, u.sampleID])
+            }
+        }
+    }
+
+    /// Every agent session, by id, for attributing samples through their session.
+    func sessionsByID(_ ids: Set<String>) throws -> [String: ClaudeSession] {
+        guard !ids.isEmpty else { return [:] }
+        return try dbQueue.read { db in
+            let rows = try ClaudeSession.filter(ids.contains(ClaudeSession.Columns.id)).fetchAll(db)
+            return Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        }
     }
 
     func insert(_ sample: ActivitySample) throws -> ActivitySample {
@@ -1005,6 +1117,10 @@ struct AppDatabase {
             var s = session
             try s.upsert(db)
         }
+    }
+
+    func allSessions() throws -> [ClaudeSession] {
+        try dbQueue.read { db in try ClaudeSession.fetchAll(db) }
     }
 
     func session(id: String) throws -> ClaudeSession? {

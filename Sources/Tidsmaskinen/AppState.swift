@@ -38,6 +38,7 @@ final class AppState: ObservableObject {
     let graph: GraphClient
     let calendarSync: CalendarSync
     let hookIngester: HookIngester
+    let agentFocus: AgentFocusRecorder
     let micMonitor: MicMonitor
     let commandCenter: CommandCenterClient
     let commandCenterSync: CommandCenterSync
@@ -77,6 +78,7 @@ final class AppState: ObservableObject {
             fatalError("Failed to open database: \(error)")
         }
         self.monitor = ActivityMonitor(database: database)
+        self.agentFocus = AgentFocusRecorder(database: database)
         self.graph = GraphClient()
         self.calendarSync = CalendarSync(database: database, client: graph)
         self.hookIngester = HookIngester(database: database)
@@ -107,6 +109,9 @@ final class AppState: ObservableObject {
         health.isSignedIn = { [weak self] in self?.signedInPrincipal != nil }
         health.isRestoringSignIn = { [weak self] in self?.isRestoringSignIn ?? false }
         health.isCallDetectionRunning = { [weak self] in self?.micMonitor.isPolling ?? false }
+        health.agentFocusState = { [weak self] in
+            (self?.agentFocus.lastReadAt, self?.agentFocus.latestEventAt)
+        }
         health.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)
@@ -135,6 +140,8 @@ final class AppState: ObservableObject {
                 self?.lastError = error.localizedDescription
             }
         }
+        self.agentFocus.start()
+        self.monitor.focus = agentFocus
         self.monitor.start()
         self.hookIngester.start()
         self.micMonitor.onSessionStart = { [weak self] _ in

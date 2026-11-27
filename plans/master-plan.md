@@ -1,18 +1,37 @@
 # Tidsmaskinen — MacBook Activity Tracker for Weekly Time Reports
 
-## Current implementation status (reviewed 2026-09-19)
+## Current implementation status (reviewed 2026-11-27)
 
 The rest of this document is the original design proposal, not a feature checklist. Use the source and README for current behavior. In particular:
 
 - Capture, rules, timeline, weekly report, Microsoft Graph sync, Command Center sync, and Claude Code/Codex hooks are implemented.
 - Hook capture uses an append-only JSONL log and a file watcher/polling ingester. There is no Unix socket receiver or transcript-directory backup scanner.
 - Attribution is rule-based or manual. There is no Claude API fallback, suggestion service, timeline split/merge editor, or attendance verifier.
-- Concurrent work for different customers can count in parallel. Overlapping sources within a customer/project bucket are deduplicated. This is fixed behavior, not a settings toggle.
-- Idle foreground samples are excluded; calendar duration still counts while idle. The former idle-meeting and attendance toggles had no implementation and have been removed.
+- **Billed time is the user's focus** (focus rework phase 1, below): one timeline where a booked meeting owns its slot and active foreground samples fill the rest, each second once. Claude and Codex samples are attributed through the session that was in front. Agent runtime from hooks is context only and bills nothing. The one exception to "each second once" is a double booking of two accepted meetings the user hasn't resolved yet.
+- Idle foreground samples are excluded, even while agents run; calendar duration still counts while idle. The former idle-meeting and attendance toggles had no implementation and have been removed.
 - Calendar sync follows all Graph pages before reconciliation. RSVP filtering applies to saved history so changing the filter preserves assignments; cancelled events are excluded from the snapshot.
 - Review and Discover coexist in the main window. Customer/project assignment is available for every supported rule kind, not only repository rules.
 
 Original proposals below remain as design history; they are not promises of shipped functionality.
+
+## Focus rework (decided 2026-11-27)
+
+The report used to bill agent runtime: every running Claude/Codex session added hours to its repo's customer, in parallel. A November 2026 replay showed about 338 h credited against about 91 h of the user's own focus on customers. The rework bills where the user's attention is instead. Plan page with the full reasoning and the November replay: https://claude.ai/artifact/VgG73hk3yNXtDArF6xWxdB
+
+Decisions:
+
+- **What bills**: only active foreground samples and booked meetings. Away from the keyboard counts nothing, even while agents run. Agent runtime (hook activity) is shown as context beside each row and never billed.
+- **Meetings**: booked time only (the mic overrun goes). A meeting owns its slot; nothing else bills beside it. In an overlap, accepted or organized beats tentative or unanswered. Two of the same standing both bill until the user says which one they were in (Review lists the double booking; `meeting_overlap_choices` stores the answer).
+- **Cells calls** (phase 3): count only for the minutes Cells is in front, between the user's own join and leave times; while in a call with Cells in front the 5-minute idle rule pauses. Calls in a project Cell take its Command Center customer; DM and group calls are open Review items.
+- **Past weeks**: backfilled only from Claude's own log, which is exact. Nothing is estimated or guessed; Claude time before the log reaches keeps no session.
+- **Slack, microphone call detection and window-title rules go** (phase 2). Their stored rows stay in the database unread.
+
+Phases:
+
+1. **Focus billing** (implemented on `feat/focus-timeline`). `AgentFocusRecorder` copies `setFocusedSession` lines from `~/Library/Logs/Claude/main*.log` into `claude_focus_events` as they are written (the log keeps about three weeks) and puts the focused session on each sample (`activity_samples.agentSessionID`; Codex by window title → its `threads` table). `RuleMatcher.attribute(_:)` resolves a sample: manual assignment, then the session's pin, then its repo rules at the sample's time, then the app's own rules. `WeeklyReport`, `ReviewQueue` and My day share `MeetingBilling` and `FocusSpans` (`Attribution/FocusTimeline.swift`). Review gains agent-session rows (pin a session with no git repo) and double-booking rows. Health: a "Claude focus" check.
+2. **Remove call detection, Slack and window-title rules**: MicMonitor, the Calls tab, call rows and the report's call source, participant rules, overrun/ownership logic, the call health row and Call UI probe, Slack parsing, and the retired rule kinds. Retired kinds must be skipped when rules load (a leftover row must not break decoding), and the Slack parsers stay for the old migrations that call them.
+3. **Cells**: in the Cells repo, allow read-only tokens on recent calls with a date range, return each call's Cell customer/project ids and the user's join/leave times, and mirror `document.title` (with the Cell name) into the native window title. Then a Cells token setting, call sync, attribution through Command Center external ids, focus-only call minutes, and mapping Cells window titles to their Cell.
+4. **Attention detail** in My day (insight only): key/scroll/click counts from system event counters, your turn vs agent running (needs the Notification hook added to `tm-hook` and the installer), switches per hour.
 
 ## Context
 

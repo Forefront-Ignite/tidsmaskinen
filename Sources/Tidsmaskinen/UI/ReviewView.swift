@@ -100,7 +100,7 @@ struct ReviewView: View {
         case repos, meetings, calls, appsAndSites
         var title: String {
             switch self {
-            case .repos:        return "Git repos"
+            case .repos:        return "Repos and agent sessions"
             case .meetings:     return "Meetings"
             case .calls:        return "Calls"
             case .appsAndSites: return "Apps & sites"
@@ -112,7 +112,8 @@ struct ReviewView: View {
         switch unit {
         case .signal(let s):  return s.kind == .gitRepoSlug ? .repos : .appsAndSites
         case .hostGroup:      return .appsAndSites
-        case .series, .event: return .meetings
+        case .series, .event, .doubleBooking: return .meetings
+        case .agentSession:   return .repos
         case .call:           return .calls
         }
     }
@@ -535,11 +536,11 @@ struct ReviewView: View {
 
     private func rowSubtitle(_ row: ReviewRow) -> String {
         switch row.unit {
-        case .signal, .hostGroup:
+        case .signal, .hostGroup, .agentSession:
             return "\(formatHours(row.totalSeconds)) · \(daysLabel(row.perDay))"
         case .series(let s):
             return "Series · \(s.occurrenceCount)× · \(formatHours(row.totalSeconds))"
-        case .event, .call:
+        case .event, .call, .doubleBooking:
             return "\(row.unit.subtitle ?? "") · \(formatHours(row.totalSeconds))"
         }
     }
@@ -664,6 +665,8 @@ struct ReviewView: View {
                 }
             } else if unit.isHostGroup, case .hostGroup(let host, _) = unit {
                 hostGroupBody(row, host: host)
+            } else if case .doubleBooking(let booking) = unit {
+                doubleBookingBody(booking)
             } else {
                 decisionForm(row)
             }
@@ -671,6 +674,8 @@ struct ReviewView: View {
             Text(row.status == .ignored
                  ? "E restore · J K move · ⌘Z undo · ? all shortcuts"
                  : unit.isHostGroup ? "H skip · E ignore host · J K move · ⌘Z undo · ? all shortcuts"
+                 : !unit.canIgnore && !unit.isConfirmable ? "H skip · J K move · ⌘Z undo · ? all shortcuts"
+                 : !unit.canIgnore ? "↵ confirm · H skip · J K move · 1–3 suggestion · ⌘Z undo · ? all shortcuts"
                  : (row.isOpen ? "↵ confirm · H skip · E ignore · J K move · 1–3 suggestion · ⌘Z undo · ? all shortcuts"
                                : "↵ confirm · E ignore · J K move · ⌘Z undo · ? all shortcuts"))
                 .font(.caption2).foregroundStyle(.secondary)
@@ -812,7 +817,7 @@ struct ReviewView: View {
         var options: [AttributionScope] = [.always, .thisWeek]
         if selectedDay != nil { options.append(.today) }
         switch unit {
-        case .event: return nil
+        case .event, .agentSession, .doubleBooking: return nil
         case .call(let s, _): return s.learnableRule == nil ? nil : options + [.justThis]
         case .signal, .hostGroup, .series: return options
         }
@@ -835,6 +840,10 @@ struct ReviewView: View {
             return (scope == .always ? "Applies to every occurrence of the series, past and future." : "Overrides only the occurrences in \(scopeWindowLabel); the series itself stays as it is.") + undo
         case .event:
             return "Attributes just this meeting." + undo
+        case .agentSession:
+            return "Pins this session: your time in it attributes here, whatever its folder. No rule is written." + undo
+        case .doubleBooking:
+            return ""   // double bookings render `doubleBookingBody`
         case .call(let s, _):
             guard let what = s.learnableRuleLabel else { return "Pins just this call — no rule is created." + undo }
             return (scope == .justThis ? "Pins just this call — no rule is created."
@@ -947,7 +956,7 @@ struct ReviewView: View {
             if s.kind == .urlHost { host = s.value }
         case .hostGroup(let h, _):  pattern = (.urlHost, h.value); host = h.value
         case .call(let s, _):       pattern = s.learnableRule.map { ($0.kind, $0.pattern) }
-        case .series, .event:       pattern = nil
+        case .series, .event, .agentSession, .doubleBooking: pattern = nil
         }
         if let (kind, value) = pattern {
             for r in allRules.filter({ $0.kind == kind && $0.pattern == value }).sorted(by: { $0.createdAt > $1.createdAt }) {
@@ -1007,7 +1016,7 @@ struct ReviewView: View {
         switch row.unit {
         case .signal(let s):         ids = s.kind == .urlHost ? [row.id, "host:\(s.value)"] : [row.id]
         case .hostGroup(let h, _):   ids = [row.id, "sig:urlHost:\(h.value)"]
-        case .series, .event, .call: return
+        case .series, .event, .call, .agentSession, .doubleBooking: return
         }
         let db = state.database, cal = calendar, viewed = weekStart
         let currentStart = cal.currentWeekInterval().start
@@ -1040,6 +1049,42 @@ struct ReviewView: View {
     }
 
     @ViewBuilder
+    /// Which meeting the user was in during a double booking.
+    private func doubleBookingBody(_ booking: MeetingBilling.DoubleBooking) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Both meetings bill these \(formatHours(booking.overlap.duration)) until you say which one you were in.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach([booking.first, booking.second], id: \.id) { meeting in
+                    Button { resolve(booking, winner: meeting) } label: {
+                        Label("I was in \(meeting.subject.isEmpty ? "(no subject)" : meeting.subject)", systemImage: "calendar")
+                            .lineLimit(1)
+                    }
+                }
+                Button { resolve(booking, winner: nil) } label: {
+                    Label("I was in both", systemImage: "calendar.badge.plus")
+                }
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    private func resolve(_ booking: MeetingBilling.DoubleBooking, winner: CalendarEvent?) {
+        let unit = ReviewUnit.doubleBooking(booking)
+        let choice = MeetingOverlapChoice(booking.first.id, booking.second.id, winner: winner?.id)
+        if run({ try state.database.setMeetingOverlapChoice(choice) }) {
+            finish(unit, winner.map { "Overlap → \($0.subject)" } ?? "Both meetings keep the overlap")
+        }
+    }
+
+    private func agentSessionDetail(_ session: ClaudeSession) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            detailRow("folder", session.cwd ?? "No folder recorded")
+            detailRow("wand.and.stars", "\(session.provider.displayName) session with no git repo, so no repo rule can place it. Pin it once.")
+        }
+    }
+
     private func hostGroupBody(_ row: ReviewRow, host: AppDatabase.SignalAggregate) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             AttributionScopePicker(scope: $scope, options: scopeOptions(for: row.unit) ?? [.always])
@@ -1098,7 +1143,8 @@ struct ReviewView: View {
         case .event(let e):         meetingEventDetail(e)
         case .series(let s):        meetingSeriesDetail(s)
         case .call(let session, _): callDetail(session)
-        case .signal, .hostGroup:   EmptyView()
+        case .agentSession(let session, _): agentSessionDetail(session)
+        case .signal, .hostGroup, .doubleBooking: EmptyView()
         }
     }
 
@@ -1246,6 +1292,10 @@ struct ReviewView: View {
             }
             ok = run { try state.database.setMicSessionAttribution(id: session.id, customerID: cid, projectID: pid, rule: rule) }
             if ok { writtenRules[unit.id] = rule }
+        case .agentSession(let session, _):
+            ok = run { try state.database.setClaudeSessionAttribution(sessionID: session.id, customerID: cid, projectID: pid) }
+        case .doubleBooking:
+            return   // answered with its own buttons
         }
         if ok { finish(unit, "\(unit.title) → \(attrLabel(cid, pid))\(scopeText)") }
     }
@@ -1317,6 +1367,8 @@ struct ReviewView: View {
             ok = run { try state.database.setCalendarEventIgnored(eventID: e.id, isIgnored: true) }
         case .call(let session, _):
             ok = run { try state.database.setMicSessionIgnored(id: session.id, isIgnored: true) }
+        case .agentSession, .doubleBooking:
+            ok = false
         }
         if ok { finish(unit, "Ignored \(unit.title)") }
     }
@@ -1371,6 +1423,11 @@ struct ReviewView: View {
             try state.database.setMicSessionAttribution(id: session.id, customerID: nil, projectID: nil)
             try state.database.setMicSessionIgnored(id: session.id, isIgnored: false)
             if let rule = writtenRules[unit.id] { try state.database.deleteRule(id: rule.id) }
+        case .agentSession(let session, _):
+            try state.database.setClaudeSessionAttribution(sessionID: session.id, customerID: nil, projectID: nil)
+        case .doubleBooking(let booking):
+            try state.database.setMeetingOverlapChoice(
+                MeetingOverlapChoice(booking.first.id, booking.second.id, winner: nil), clear: true)
         }
         writtenRules[unit.id] = nil
     }
@@ -1513,6 +1570,12 @@ enum ReviewUnit: Identifiable {
     /// An ad-hoc mic session (Slack huddle, impromptu Teams/FaceTime). `seconds`
     /// is the meeting-subtracted ad-hoc duration, matching the Calls tab.
     case call(session: MicSession, seconds: Double)
+    /// A Claude Code or Codex session you had in front, outside any git
+    /// repo. `seconds` is your focus time in it. Confirming pins the session.
+    case agentSession(session: ClaudeSession, seconds: Double)
+    /// Two meetings of the same standing at once; both bill the overlap
+    /// until you say which one you were in.
+    case doubleBooking(MeetingBilling.DoubleBooking)
 
     var id: String {
         switch self {
@@ -1521,10 +1584,15 @@ enum ReviewUnit: Identifiable {
         case .series(let s):       return "series:\(s.seriesMasterID)"
         case .event(let e):        return "event:\(e.id)"
         case .call(let s, _):      return "call:\(s.id)"
+        case .agentSession(let s, _): return "agent:\(s.id)"
+        case .doubleBooking(let d): return "double:\(d.id)"
         }
     }
 
     var isHostGroup: Bool { if case .hostGroup = self { return true }; return false }
+
+    /// Whether ↵ assigns it a customer. A double booking is answered with its own buttons.
+    var isConfirmable: Bool { if case .doubleBooking = self { return false }; return true }
 
     /// The scope Review preselects. Always where the pattern names one customer
     /// for good (a repo, a site, a recurring meeting, a Slack channel); narrower
@@ -1535,6 +1603,7 @@ enum ReviewUnit: Identifiable {
         case .signal(let s):        return s.kind == .appBundleID ? .thisWeek : .always
         case .hostGroup, .series, .event: return .always
         case .call(let s, _):       return s.learnableRule?.kind == .slackChannel ? .always : .justThis
+        case .agentSession, .doubleBooking: return .justThis
         }
     }
 
@@ -1549,6 +1618,8 @@ enum ReviewUnit: Identifiable {
         case .series(let s):        return s.totalSeconds
         case .event(let e):         return max(0, e.endAt.timeIntervalSince(e.startAt))
         case .call(_, let secs):    return secs
+        case .agentSession(_, let secs): return secs
+        case .doubleBooking(let d): return d.overlap.duration
         }
     }
 
@@ -1559,6 +1630,10 @@ enum ReviewUnit: Identifiable {
         case .series(let s):       return s.sampleSubject
         case .event(let e):        return e.subject.isEmpty ? "(no subject)" : e.subject
         case .call(let s, _):      return Self.callTitle(s)
+        case .agentSession(let s, _):
+            return s.cwd.map { ($0 as NSString).lastPathComponent } ?? "\(s.provider.displayName) session"
+        case .doubleBooking(let d):
+            return "\(d.first.subject.isEmpty ? "(no subject)" : d.first.subject) / \(d.second.subject.isEmpty ? "(no subject)" : d.second.subject)"
         }
     }
 
@@ -1575,6 +1650,12 @@ enum ReviewUnit: Identifiable {
             let apps = Self.callApps(s)
             let when = df.string(from: s.startedAt)
             return apps.isEmpty ? when : "\(apps.joined(separator: ", ")) · \(when)"
+        case .agentSession(let s, _):
+            return "\(s.provider.displayName) session outside a git repo"
+        case .doubleBooking(let d):
+            let df = DateFormatter(); df.dateFormat = "EEE d MMM HH:mm"
+            let tf = DateFormatter(); tf.dateFormat = "HH:mm"
+            return "Overlap \(df.string(from: d.overlap.start))–\(tf.string(from: d.overlap.end))"
         }
     }
 
@@ -1591,6 +1672,8 @@ enum ReviewUnit: Identifiable {
         case .series:    return "Meeting series"
         case .event:     return "Meeting"
         case .call:      return "Call"
+        case .agentSession: return "Agent session"
+        case .doubleBooking: return "Double booking"
         }
     }
 
@@ -1607,6 +1690,8 @@ enum ReviewUnit: Identifiable {
         case .series:    return "repeat"
         case .event:     return "calendar"
         case .call:      return "mic.fill"
+        case .agentSession: return "wand.and.stars"
+        case .doubleBooking: return "calendar.badge.exclamationmark"
         }
     }
 
@@ -1615,7 +1700,7 @@ enum ReviewUnit: Identifiable {
     var createsRule: Bool {
         switch self {
         case .signal, .hostGroup, .series: return true
-        case .event:                       return false
+        case .event, .agentSession, .doubleBooking: return false
         case .call(let s, _):              return s.learnableRule != nil
         }
     }
@@ -1630,6 +1715,7 @@ enum ReviewUnit: Identifiable {
         switch self {
         case .signal(let s): return s.kind == .gitRepoSlug || s.kind == .urlHost || s.kind == .appBundleID
         case .hostGroup, .series, .event, .call: return true
+        case .agentSession, .doubleBooking: return false
         }
     }
 

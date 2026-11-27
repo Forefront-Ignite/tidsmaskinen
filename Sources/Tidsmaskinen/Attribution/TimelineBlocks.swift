@@ -265,10 +265,18 @@ enum TimelineBuilder {
         }
         var groups: [Acc] = []
 
+        // A block is one attribution: a new session, or a rule that starts
+        // or ends mid-stretch, starts a new block instead of being labelled
+        // by the stretch's first sample.
+        func owner(_ s: ActivitySample) -> String {
+            let r = matcher.attribute(s)
+            return "\(r.customer?.id ?? "")/\(r.project?.id ?? "")"
+        }
         for sample in sorted {
             guard let sid = sample.id else { continue }
             if var prev = groups.last,
                sameBlockIdentity(prev.representative, sample),
+               owner(prev.representative) == owner(sample),
                sample.capturedAt.timeIntervalSince(prev.last) <= maxGap {
                 prev.ids.append(sid)
                 prev.samples.append(sample)
@@ -287,12 +295,17 @@ enum TimelineBuilder {
             let attribution = matcher.attribute(g.representative)
             let override = (g.representative.customerID != nil)
             let title = g.representative.appName ?? g.representative.appBundleID ?? "—"
-            let subtitle = representativeSubtitle(for: g.samples)
+            let rep = g.representative
+            // Claude or Codex in front: the session's repo or folder says what it was.
+            let session = matcher.session(for: rep)
+            let subtitle = session.flatMap { s in
+                s.gitRemoteURL.flatMap(RuleMatcher.gitSlug(fromRemote:))
+                    ?? (s.gitRepoPath ?? s.cwd).map { ($0 as NSString).lastPathComponent }
+            } ?? representativeSubtitle(for: g.samples)
 
             // Most-specific signal a rule could attach to: repo > host > app.
-            let rep = g.representative
             let signal: TimelineBlock.RuleSignal? = {
-                if let url = rep.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: url) {
+                if let url = rep.gitRemoteURL ?? session?.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: url) {
                     return TimelineBlock.RuleSignal(kind: .gitRepoSlug, pattern: slug)
                 }
                 if let host = rep.chromeHost { return TimelineBlock.RuleSignal(kind: .urlHost, pattern: host) }
@@ -321,7 +334,7 @@ enum TimelineBuilder {
                 appBundleID: g.representative.appBundleID,
                 seriesMasterID: nil,
                 ruleSignal: signal,
-                isIgnored: matcher.isRepoIgnored(remoteURL: rep.gitRemoteURL)
+                isIgnored: matcher.isRepoIgnored(sample: rep)
             )
         }
     }
@@ -335,6 +348,7 @@ enum TimelineBuilder {
             && a.chromeHost == b.chromeHost
             && a.gitRepoPath == b.gitRepoPath
             && a.isIdle == b.isIdle
+            && a.agentSessionID == b.agentSessionID
             && a.customerID == b.customerID
             && a.projectID == b.projectID
     }

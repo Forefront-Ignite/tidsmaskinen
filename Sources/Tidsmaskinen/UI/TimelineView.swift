@@ -1254,7 +1254,8 @@ struct TimelineView: View {
             let rawEvents = try state.database.calendarEvents(in: dayInterval)
             let micSessions = try state.database.micSessions(in: dayInterval)
             let matcher = try RuleMatcher.load(from: state.database)
-            let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions, matcher: matcher)
+            // Meetings at their booked time, as the report bills them.
+            let events = rawEvents
             let sessions = try state.database.sessions(in: dayInterval)
             let claudeDeltas = try state.database.claudeActiveDeltas(in: dayInterval)
             customers = try state.database.allCustomers()
@@ -1284,8 +1285,8 @@ struct TimelineView: View {
             // Review's backlog for the day.
             let report = WeeklyReport.compute(
                 week: dayInterval, samples: allSamples, events: events, sessions: sessions,
-                claudeDeltas: claudeDeltas, micSessions: micSessions,
-                idleThresholdSeconds: idleThreshold, matcher: matcher,
+                claudeDeltas: claudeDeltas, overlapChoices: try state.database.meetingOverlapChoices(),
+                matcher: matcher,
                 sampleIntervalSeconds: AppSettings.sampleIntervalSeconds, rounding: AppSettings.reportRounding)
             dayActiveSeconds = report.activeHours * 3600
             dayAttributedSeconds = report.grandTotal * 3600

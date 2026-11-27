@@ -12,6 +12,9 @@ final class ActivityMonitor {
     // Read in deinit-style teardown paths; mutated only on MainActor.
     nonisolated(unsafe) private var settingsObserver: NSObjectProtocol?
 
+    /// Resolves which Claude Code or Codex session is in front. Set by AppState.
+    var focus: AgentFocusRecorder?
+
     var onSample: ((ActivitySample) -> Void)?
     var onError: ((Error) -> Void)?
 
@@ -77,6 +80,9 @@ final class ActivityMonitor {
 
     private func captureNow() {
         guard !isPaused else { return }
+        // Keep copying Claude's focus lines whatever is in front: its log
+        // rotates away after a few weeks.
+        focus?.poll()
         guard let frontmost = NSWorkspace.shared.frontmostApplication else { return }
         // Don't track ourselves.
         if frontmost.processIdentifier == ownPID { return }
@@ -110,6 +116,10 @@ final class ActivityMonitor {
             }
         }
 
+        // Away from the keyboard nothing is in focus, whatever agent runs.
+        let agentSessionID = isIdle ? nil : focus?.sessionID(
+            bundleID: bundleID, windowTitle: title, claudeLaunchedAt: frontmost.launchDate)
+
         let sample = ActivitySample(
             id: nil,
             capturedAt: Date(),
@@ -120,7 +130,8 @@ final class ActivityMonitor {
             chromeHost: chromeHost,
             gitRepoPath: repoPath,
             gitRemoteURL: remoteURL,
-            isIdle: isIdle
+            isIdle: isIdle,
+            agentSessionID: agentSessionID
         )
 
         do {

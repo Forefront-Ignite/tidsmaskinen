@@ -492,6 +492,9 @@ struct ActivitySample: Codable, FetchableRecord, MutablePersistableRecord, Ident
     var isIdle: Bool
     var customerID: String?      // manual override from timeline view
     var projectID: String?
+    /// The Claude Code or Codex session in front when this was captured
+    /// (`claude_sessions.id`). Nil for other apps and when it can't be read.
+    var agentSessionID: String? = nil
 
     static let databaseTableName = "activity_samples"
 
@@ -503,6 +506,7 @@ struct ActivitySample: Codable, FetchableRecord, MutablePersistableRecord, Ident
         static let isIdle = Column(CodingKeys.isIdle)
         static let customerID = Column(CodingKeys.customerID)
         static let projectID = Column(CodingKeys.projectID)
+        static let agentSessionID = Column(CodingKeys.agentSessionID)
     }
 
     mutating func didInsert(_ inserted: InsertionSuccess) {

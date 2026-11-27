@@ -196,19 +196,37 @@ enum ReviewQueue {
         var hosts: [String: Acc] = [:]
         var paths: [String: [String: Acc]] = [:]     // host → path → acc
         var apps: [String: Acc] = [:]
+        var agentSessions: [String: Acc] = [:]      // focused agent sessions outside a git repo
 
-        for sample in try database.samples(in: interval) where !sample.isIdle {
-            let seconds = min(Double(sampleIntervalSeconds), interval.end.timeIntervalSince(sample.capturedAt))
+        // The same focus timeline as the report: a meeting owns its booked
+        // slot, and each sample counts until the next one, minus meeting time.
+        let events = try database.calendarEvents(in: interval)
+        let overlapChoices = try database.meetingOverlapChoices()
+        let billed = MeetingBilling.billed(events: events, matcher: m, choices: overlapChoices)
+        let spans = FocusSpans.spans(samples: try database.samples(in: interval),
+                                     sampleInterval: TimeInterval(sampleIntervalSeconds),
+                                     blocked: billed.flatMap(\.intervals))
+        for (sample, pieces) in spans {
+            let seconds = pieces.reduce(0.0) { $0 + ($1.intersectionIfPositive(with: interval)?.duration ?? 0) }
+            guard seconds > 0 else { continue }
             let day = dayIndex(sample.capturedAt)
             let r = m.attribute(sample)
             let open = r.customer == nil
             let title = sample.windowTitle?.trimmingCharacters(in: .whitespaces)
-            if let remote = sample.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: remote) {
+            // Claude or Codex in front: the session's repo is the signal, and
+            // a session outside any repo is its own row to pin.
+            let session = m.session(for: sample)
+            if let remote = sample.gitRemoteURL ?? session?.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: remote) {
                 var acc = repos[slug] ?? Acc(days: dayCount)
                 acc.hidden = m.isRepoIgnored(slug: slug)
                 acc.add(seconds, day: day, r)
                 acc.note(seconds, at: sample.capturedAt, open: open, detail: title)
                 repos[slug] = acc
+            } else if let session {
+                var acc = agentSessions[session.id] ?? Acc(days: dayCount)
+                acc.add(seconds, day: day, r)
+                acc.note(seconds, at: sample.capturedAt, open: open, detail: nil)
+                agentSessions[session.id] = acc
             } else if let host = sample.chromeHost {
                 let path = sample.chromeURL.flatMap { RuleMatcher.urlPathPrefix($0) }
                 if let path {
@@ -233,30 +251,6 @@ enum ReviewQueue {
                 apps[bundle] = acc
             }
         }
-        let sessionSeconds = try database.sessionActiveSeconds(in: interval, idleThresholdSeconds: idleThresholdSeconds)
-        // Delta-backed sessions know when they were active, so an overnight
-        // session splits across its days; the total stays `sessionActiveSeconds`.
-        var deltaDays: [String: [Double]] = [:]
-        for delta in try database.claudeActiveDeltas(in: interval) where delta.gainedSeconds > 0 {
-            let days = spread(delta.occurredAt.addingTimeInterval(-delta.gainedSeconds), delta.occurredAt)
-            var acc = deltaDays[delta.sessionID] ?? Array(repeating: 0.0, count: dayCount)
-            for i in 0..<dayCount { acc[i] += days[i] }
-            deltaDays[delta.sessionID] = acc
-        }
-        for session in try database.sessions(in: interval) {
-            guard let remote = session.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: remote),
-                  let seconds = sessionSeconds[session.id], seconds > 0 else { continue }
-            var acc = repos[slug] ?? Acc(days: dayCount)
-            acc.hidden = m.isRepoIgnored(slug: slug)
-            let attribution = m.attribute(session: session)
-            if let days = deltaDays[session.id], case let total = days.reduce(0, +), total > 0 {
-                for i in 0..<dayCount where days[i] > 0 { acc.add(seconds * days[i] / total, day: i, attribution) }
-            } else {
-                acc.add(seconds, day: dayIndex(max(session.startedAt, interval.start)), attribution)
-            }
-            repos[slug] = acc
-        }
-
         var rows: [ReviewRow] = []
         func signalRow(_ kind: AppDatabase.SignalAggregate.Kind, _ value: String, _ acc: Acc, ambient: Bool = false) -> ReviewRow {
             let st = status(acc, ambientWhenOpen: ambient)
@@ -267,6 +261,15 @@ enum ReviewQueue {
                              evidence: acc.evidence(openOnly: st == .open), stretchCount: acc.stretchCount(openOnly: st == .open))
         }
         for (slug, acc) in repos { rows.append(signalRow(.gitRepoSlug, slug, acc)) }
+        for (id, acc) in agentSessions {
+            guard let session = m.sessionsByID[id] else { continue }
+            let st = status(acc, ambientWhenOpen: false)
+            let seconds = st == .open ? acc.open : acc.total
+            rows.append(ReviewRow(unit: .agentSession(session: session, seconds: seconds), status: st,
+                                  perDay: st == .open ? acc.openPerDay : acc.perDay,
+                                  belowThreshold: st == .open && seconds < minSec,
+                                  evidence: acc.evidence(openOnly: st == .open), stretchCount: acc.stretchCount(openOnly: st == .open)))
+        }
         for (bundle, acc) in apps { rows.append(signalRow(.appBundleID, bundle, acc, ambient: true)) }
         for (host, acc) in hosts {
             let st = status(acc, ambientWhenOpen: false)
@@ -286,15 +289,11 @@ enum ReviewQueue {
                                   evidence: acc.evidence(openOnly: true), stretchCount: acc.stretchCount(openOnly: true)))
         }
 
-        // Meetings, stretched over the mic time each one owns (as the report and
-        // My day count them). Declined bookings never bill, so they are not listed.
-        let rawEvents = try database.calendarEvents(in: interval)
-        let micSessions = try database.micSessions(in: interval)
-        let extendedEvents = micSessions.isEmpty ? rawEvents
-            : CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions, matcher: m)
-        let events = extendedEvents.filter { $0.rsvpStatus != "declined" }
+        // Meetings at their booked time. Declined bookings and all-day holds
+        // never bill, so they are not listed.
+        let meetings = events.filter { $0.rsvpStatus != "declined" && !$0.isAllDay }
         func eventDays(_ e: CalendarEvent) -> [Double] { spread(e.startAt, e.endAt) }
-        for (seriesID, occurrences) in Dictionary(grouping: events.filter { $0.seriesMasterID != nil }, by: { $0.seriesMasterID! }) {
+        for (seriesID, occurrences) in Dictionary(grouping: meetings.filter { $0.seriesMasterID != nil }, by: { $0.seriesMasterID! }) {
             let sorted = occurrences.sorted { $0.startAt < $1.startAt }
             var retained: [CalendarEvent] = []   // the occurrences the series row stands for
             var perDay = Array(repeating: 0.0, count: dayCount)
@@ -339,7 +338,7 @@ enum ReviewQueue {
             rows.append(ReviewRow(unit: unit, status: st, perDay: st == .open ? openPerDay : perDay,
                                   belowThreshold: st == .open && seconds < minSec))
         }
-        for var event in events where event.seriesMasterID == nil {
+        for var event in meetings where event.seriesMasterID == nil {
             let perDay = eventDays(event)
             let secs = event.seconds(within: interval)
             let st: ReviewRow.Status
@@ -353,32 +352,14 @@ enum ReviewQueue {
             rows.append(ReviewRow(unit: .event(event), status: st, perDay: perDay, belowThreshold: st == .open && secs < minSec))
         }
 
-        // Ad-hoc calls: mic time minus the meetings each session *is*, mirroring
-        // the Calls tab, so a huddle can be attributed from Review too.
-        if !micSessions.isEmpty {
-            let owned = CalendarEvent.meetingMicSessionIDs(events: extendedEvents, micSessions: micSessions, matcher: m)
-            for session in micSessions {
-                guard let endedAt = session.endedAt, endedAt > session.startedAt else { continue }
-                var perDay = Array(repeating: 0.0, count: dayCount)
-                for range in CallSegment.adHocRanges(of: session, endedAt: endedAt, events: extendedEvents,
-                                                     owned: owned, minimumSeconds: 30) {
-                    let days = spread(range.start, range.end)
-                    for i in 0..<dayCount { perDay[i] += days[i] }
-                }
-                let adHoc = perDay.reduce(0, +)
-                guard adHoc > 0 else { continue }
-                let st: ReviewRow.Status
-                if session.isIgnored { st = .ignored }
-                else {
-                    let r = m.attribute(micSession: session)
-                    if let c = r.customer {
-                        st = .attributed(customerID: c.id, projectID: r.project?.id,
-                                         scope: r.matchingRule == nil ? "Pinned" : ReviewQueue.scopeLabel(r.matchingRule))
-                    } else { st = .open }
-                }
-                rows.append(ReviewRow(unit: .call(session: session, seconds: adHoc), status: st,
-                                      perDay: perDay, belowThreshold: st == .open && adHoc < minSec))
-            }
+        // Two accepted meetings at once bill twice until the user says which
+        // one they were in.
+        for booking in MeetingBilling.doubleBookings(events: meetings, matcher: m, choices: overlapChoices)
+        where !booking.isResolved {
+            guard let clipped = booking.overlap.intersectionIfPositive(with: interval) else { continue }
+            rows.append(ReviewRow(unit: .doubleBooking(booking), status: .open,
+                                  perDay: spread(clipped.start, clipped.end),
+                                  belowThreshold: clipped.duration < minSec))
         }
         return rows
     }
