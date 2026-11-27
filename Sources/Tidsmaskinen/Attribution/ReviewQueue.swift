@@ -26,7 +26,7 @@ struct ReviewRow: Identifiable {
         case open
         /// `scope` says how: "Always", "This week", "This day", "Bounded" (a rule
         /// window), "Manual" (per-item override), "Series", "This meeting",
-        /// "Pinned" (a saved call), or "Mixed" when the period's time splits
+        /// or "Mixed" when the period's time splits
         /// across several attributions — `customerID` is then the largest share.
         case attributed(customerID: String, projectID: String?, scope: String)
         case ignored
@@ -118,7 +118,7 @@ enum ReviewQueue {
             return min(max(d, 0), dayCount - 1)
         }
         /// Seconds of [start, end) ∩ interval on each day of the period, so a
-        /// meeting, call or coding session that crosses midnight lands on both
+        /// meeting that crosses midnight lands on both
         /// days as it does in the report.
         func spread(_ start: Date, _ end: Date) -> [Double] {
             var d = Array(repeating: 0.0, count: dayCount)
@@ -380,7 +380,7 @@ enum ReviewQueue {
 
     /// Aggregate review backlog across the current week plus the previous
     /// `weeksBack` weeks. The always-on surfaces (menu-bar glance) use this so
-    /// "all reviewed" reflects *every* recent week — a stray huddle left
+    /// "all reviewed" reflects *every* recent week — a stray meeting left
     /// unattributed last week no longer hides behind a clean current week.
     struct Rolling {
         var totalCount: Int = 0
@@ -408,7 +408,7 @@ enum ReviewQueue {
         let cal = Calendar.weekStartingMonday()
         let currentStart = cal.currentWeekInterval(reference: now).start
         var result = Rolling()
-        // Walk oldest → newest. A call or meeting crossing a week boundary is
+        // Walk oldest → newest. A meeting crossing a week boundary is
         // queued in both weeks (each clipped), so each unit id is counted once
         // and the oldest week owns it — Review still lands where the backlog
         // tail begins. Seconds stay summed: the clipped parts are disjoint.

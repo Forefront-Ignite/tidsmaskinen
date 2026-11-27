@@ -1,7 +1,7 @@
 import Foundation
 
 /// The app's data folder — `~/Library/Application Support/Tidsmaskinen` — home
-/// of the database, the hook events log, the mic debug log and AX dumps.
+/// of the database and the hook events log.
 /// `TIDSMASKINEN_DATA_DIR` points a dev build somewhere else so it can run
 /// beside the installed app on a snapshot of the data without sharing (and
 /// truncating) the live hook events log. `bin/dev-instance.sh` sets it; the

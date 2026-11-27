@@ -256,15 +256,11 @@ struct WeeklyReport {
         enum SourceKind: String, CaseIterable, Hashable {
             case samples
             case events
-            case calls
-            case claude
 
             var label: String {
                 switch self {
                 case .samples: return "App activity"
                 case .events:  return "Calendar"
-                case .calls:   return "Calls"
-                case .claude:  return "Coding agents"
                 }
             }
 
@@ -272,8 +268,6 @@ struct WeeklyReport {
                 switch self {
                 case .samples: return "app.dashed"
                 case .events:  return "calendar"
-                case .calls:   return "mic.fill"
-                case .claude:  return "wand.and.stars"
                 }
             }
         }
@@ -339,10 +333,9 @@ struct WeeklyReport {
         let seriesMasterID: String?
     }
 
-    /// Priority order when overlapping sources cover the same second of wall
-    /// time for the same bucket: calendar events outrank calls outrank Claude
-    /// sessions outrank app activity samples. Each second can only credit one
-    /// source, so the per-bucket total never exceeds elapsed wall time.
+    /// Priority order when sources cover the same second for the same bucket:
+    /// meetings before samples. Samples are already clipped around meetings,
+    /// so this only orders records; meetings themselves are never deduplicated.
     private static func byPriority(_ a: AttributedRecord, _ b: AttributedRecord) -> Bool {
         priorityIndex(a.source) < priorityIndex(b.source)
     }
@@ -350,9 +343,7 @@ struct WeeklyReport {
     private static func priorityIndex(_ kind: Breakdown.SourceKind) -> Int {
         switch kind {
         case .events:  return 0
-        case .calls:   return 1
-        case .claude:  return 2
-        case .samples: return 3
+        case .samples: return 1
         }
     }
 
@@ -610,30 +601,7 @@ struct WeeklyReport {
                         seriesMasterID: nil
                     )
                 }
-            case .windowTitle:
-                if let title = sample.windowTitle, !title.isEmpty {
-                    return ContributorInfo(
-                        id: "title:\(title)",
-                        label: title,
-                        kindLabel: "Window title",
-                        systemImage: "macwindow",
-                        eventID: nil,
-                        seriesMasterID: nil
-                    )
-                }
-            case .slackChannel:
-                if let title = sample.windowTitle,
-                   let channel = MicSession.parseSlackChannel(fromTitle: title) {
-                    return ContributorInfo(
-                        id: "slack:\(channel)",
-                        label: "#\(channel)",
-                        kindLabel: "Slack channel",
-                        systemImage: "bubble.left.and.bubble.right",
-                        eventID: nil,
-                        seriesMasterID: nil
-                    )
-                }
-            case .appBundleID, .participant:
+            case .appBundleID:
                 break
             }
         }

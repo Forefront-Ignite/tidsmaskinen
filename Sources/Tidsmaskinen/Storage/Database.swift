@@ -630,117 +630,6 @@ struct AppDatabase {
         }
     }
 
-    // MARK: - Mic sessions
-
-    /// Inserts a new open mic session (endedAt = nil). Returns the new id.
-    @discardableResult
-    func startMicSession(at startedAt: Date, voipApps: [String]) throws -> String {
-        let id = UUID().uuidString
-        let csv = voipApps.isEmpty ? nil : voipApps.joined(separator: ",")
-        let now = Date()
-        var session = MicSession(
-            id: id,
-            startedAt: startedAt,
-            endedAt: nil,
-            voipAppsCSV: csv,
-            participant: nil,
-            slackChannel: nil,
-            customerID: nil,
-            projectID: nil,
-            createdAt: now,
-            updatedAt: now
-        )
-        try dbQueue.write { db in
-            try session.insert(db)
-        }
-        return id
-    }
-
-    func endMicSession(id: String, endedAt: Date, participant: String?, slackChannel: String?, voipApps: [String]?) throws {
-        _ = try dbQueue.write { db in
-            if let voipApps {
-                let csv = voipApps.isEmpty ? nil : voipApps.joined(separator: ",")
-                try MicSession
-                    .filter(MicSession.Columns.id == id)
-                    .updateAll(db,
-                               MicSession.Columns.endedAt.set(to: endedAt),
-                               MicSession.Columns.participant.set(to: participant),
-                               MicSession.Columns.slackChannel.set(to: slackChannel),
-                               MicSession.Columns.voipAppsCSV.set(to: csv),
-                               MicSession.Columns.updatedAt.set(to: Date()))
-            } else {
-                try MicSession
-                    .filter(MicSession.Columns.id == id)
-                    .updateAll(db,
-                               MicSession.Columns.endedAt.set(to: endedAt),
-                               MicSession.Columns.participant.set(to: participant),
-                               MicSession.Columns.slackChannel.set(to: slackChannel),
-                               MicSession.Columns.updatedAt.set(to: Date()))
-            }
-        }
-    }
-
-    /// Closes any sessions left open from a previous run (app crash, force-quit).
-    /// Sets their endedAt to startedAt + 1s so they don't show as ongoing forever.
-    func closeOrphanedMicSessions(currentlyRunningSessionID: String?) throws {
-        try dbQueue.write { db in
-            let openSessions = try MicSession
-                .filter(MicSession.Columns.endedAt == nil)
-                .fetchAll(db)
-            for var s in openSessions {
-                if let current = currentlyRunningSessionID, s.id == current { continue }
-                s.endedAt = s.startedAt.addingTimeInterval(1)
-                s.updatedAt = Date()
-                try s.update(db)
-            }
-        }
-    }
-
-    func micSessions(in interval: DateInterval, minDurationSeconds: Double = 60) throws -> [MicSession] {
-        try dbQueue.read { db in
-            try MicSession
-                .filter(MicSession.Columns.startedAt < interval.end
-                        && (MicSession.Columns.endedAt == nil || MicSession.Columns.endedAt > interval.start))
-                .order(MicSession.Columns.startedAt.desc)
-                .fetchAll(db)
-                .filter { ($0.durationSeconds ?? 0) >= minDurationSeconds || $0.endedAt == nil }
-        }
-    }
-
-    func setMicSessionAttribution(id: String, customerID: String?, projectID: String?, rule: Rule? = nil) throws {
-        try dbQueue.write { db in
-            _ = try MicSession
-                .filter(MicSession.Columns.id == id)
-                .updateAll(db,
-                           MicSession.Columns.customerID.set(to: customerID),
-                           MicSession.Columns.projectID.set(to: projectID),
-                           MicSession.Columns.updatedAt.set(to: Date()))
-            if let rule { try upsertReplacingWindow(rule, in: db) }
-        }
-    }
-
-    func setMicSessionIgnored(id: String, isIgnored: Bool) throws {
-        _ = try dbQueue.write { db in
-            try MicSession
-                .filter(MicSession.Columns.id == id)
-                .updateAll(db,
-                           MicSession.Columns.isIgnored.set(to: isIgnored),
-                           MicSession.Columns.updatedAt.set(to: Date()))
-        }
-    }
-
-    /// Find frontmost-app + window-title samples that overlap a time window —
-    /// used to enrich a mic session with a participant guess from Teams titles.
-    func samplesOverlapping(start: Date, end: Date) throws -> [ActivitySample] {
-        try dbQueue.read { db in
-            try ActivitySample
-                .filter(ActivitySample.Columns.capturedAt >= start
-                        && ActivitySample.Columns.capturedAt <= end)
-                .order(ActivitySample.Columns.capturedAt.asc)
-                .fetchAll(db)
-        }
-    }
-
     func samples(in interval: DateInterval) throws -> [ActivitySample] {
         try dbQueue.read { db in
             try ActivitySample
@@ -829,16 +718,20 @@ struct AppDatabase {
         try dbQueue.write { db in _ = try ReportedWeek.deleteOne(db, key: ["weekStart": weekStart]) }
     }
 
+    /// Rules of the kinds this version knows. Rows of retired kinds
+    /// (`Rule.Kind.retiredRawValues`) stay stored but are never decoded.
     func allRules() throws -> [Rule] {
         try dbQueue.read { db in
-            try Rule.order(Rule.Columns.priority.desc).fetchAll(db)
+            try Rule.filter(Rule.Kind.activeRawValues.contains(Rule.Columns.kind))
+                .order(Rule.Columns.priority.desc).fetchAll(db)
         }
     }
 
     func rules(forCustomer customerID: String) throws -> [Rule] {
         try dbQueue.read { db in
             try Rule
-                .filter(Rule.Columns.customerID == customerID)
+                .filter(Rule.Columns.customerID == customerID
+                        && Rule.Kind.activeRawValues.contains(Rule.Columns.kind))
                 .order(Rule.Columns.priority.desc, Rule.Columns.kind.asc)
                 .fetchAll(db)
         }
@@ -985,8 +878,7 @@ struct AppDatabase {
     /// glob runs once per distinct value, not once per sample.
     struct RuleMatchCount: Equatable {
         var sampleSeconds: Double = 0
-        var calls: Int = 0
-        var isEmpty: Bool { sampleSeconds == 0 && calls == 0 }
+        var isEmpty: Bool { sampleSeconds == 0 }
     }
 
     func ruleMatchCount(kind: Rule.Kind, pattern: String, since: Date,
@@ -1010,20 +902,7 @@ struct AppDatabase {
             case .gitRemoteHost: try tally(Column("gitRemoteURL")) { RuleMatcher.gitHost(fromRemote: $0) }
             case .urlHost:       try tally(Column("chromeHost")) { $0 }
             case .urlPath:       try tally(Column("chromeURL")) { RuleMatcher.normalizedURL($0) }
-            case .windowTitle:   try tally(Column("windowTitle")) { $0 }
             case .appBundleID:   try tally(Column("appBundleID")) { $0 }
-            case .slackChannel:
-                try tally(Column("windowTitle"), where: Column("appBundleID").like("%slack%")) {
-                    MicSession.parseSlackChannel(fromTitle: $0)
-                }
-            case .participant:   break
-            }
-            if kind == .slackChannel || kind == .participant {
-                let sessions = try MicSession.filter(MicSession.Columns.startedAt >= since).fetchAll(db)
-                out.calls = sessions.filter { s in
-                    guard let v = kind == .slackChannel ? s.slackChannel : s.participant else { return false }
-                    return RuleMatcher.matches(kind: kind, pattern: pattern, value: v)
-                }.count
             }
             return out
         }

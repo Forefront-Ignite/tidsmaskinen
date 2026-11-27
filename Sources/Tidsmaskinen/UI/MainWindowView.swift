@@ -4,7 +4,6 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
     case weeklyReport
     case timeline
     case review
-    case calls
     case customers
     case debug
     case settings
@@ -21,7 +20,6 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
         case .weeklyReport:   return "Weekly Report"
         case .timeline:       return "My day"
         case .review:         return "Review"
-        case .calls:          return "Calls"
         case .customers:      return "Customers"
         case .debug:          return "Debug"
         case .settings:       return "Settings"
@@ -37,7 +35,6 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
         case .weeklyReport:   return "chart.bar.doc.horizontal.fill"
         case .timeline:       return "calendar.day.timeline.left"
         case .review:         return "sparkles"
-        case .calls:          return "phone.fill"
         case .customers:      return "person.2.fill"
         case .debug:          return "wrench.and.screwdriver.fill"
         case .settings:       return "gearshape.fill"
@@ -54,7 +51,6 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
         case .weeklyReport: return "report"
         case .timeline:     return "myday"
         case .review:       return "review"
-        case .calls:        return "call"
         case .customers:    return "people"
         case .settings:     return "sliders"
         default:            return nil   // debug + hidden sub-screens use SF Symbols
@@ -74,7 +70,7 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
         var items: [SidebarItem] {
             switch self {
             case .reports: return [.weeklyReport, .timeline]
-            case .sources: return [.review, .calls, .customers]
+            case .sources: return [.review, .customers]
             case .system:  return [.settings]   // Debug lives under Settings › Advanced
             }
         }
@@ -173,7 +169,6 @@ struct MainWindowView: View {
         case .weeklyReport:   WeeklyReportView()
         case .timeline:       TimelineView()
         case .review:         ReviewView()
-        case .calls:          TeamsCallsView()
         case .customers:      CustomersView()
         case .debug:          DebugHubView()
         case .settings:       SettingsView()

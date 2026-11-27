@@ -4,12 +4,11 @@ import Foundation
 /// events / sessions and are not persisted as their own table.
 struct TimelineBlock: Identifiable {
     enum Track: String, CaseIterable {
-        case calendar, calls, foreground, claudeCode
+        case calendar, foreground, claudeCode
 
         var label: String {
             switch self {
             case .calendar:    return "Calendar"
-            case .calls:       return "Calls"
             case .foreground:  return "Foreground"
             case .claudeCode:  return "Coding agents"
             }
@@ -21,8 +20,6 @@ struct TimelineBlock: Identifiable {
         case claudeSession(id: String)
         /// Inclusive range of sample IDs (sorted) that make up this foreground block.
         case foregroundSamples(ids: [Int64])
-        /// An ad-hoc call: the mic session minus the meetings it is.
-        case micSession(id: String)
     }
 
     /// The signal a time-bounded/permanent rule would be built from when the
@@ -52,7 +49,7 @@ struct TimelineBlock: Identifiable {
     let seriesMasterID: String?
     /// Signal for "attribute this signal for today/this week/always" from My day.
     var ruleSignal: RuleSignal? = nil
-    /// Ignored meeting or call, or work in an ignored repo: drawn dimmed and
+    /// Ignored meeting, or work in an ignored repo: drawn dimmed and
     /// excluded from the report, never silently dropped from the day.
     var isIgnored: Bool = false
 
@@ -64,7 +61,6 @@ struct TimelineBlock: Identifiable {
 enum TimelineBuilder {
     struct DayBundle {
         let calendar: [TimelineBlock]
-        let calls: [TimelineBlock]
         let foreground: [TimelineBlock]
         let claudeCode: [TimelineBlock]
     }
@@ -86,20 +82,18 @@ enum TimelineBuilder {
         }
     }
 
-    /// Build all four tracks for a given day. When `includeIgnoredEvents` is
-    /// false (the default), ignored calendar events and calls are dropped;
+    /// Build the tracks for a given day. When `includeIgnoredEvents` is
+    /// false (the default), ignored calendar events are dropped;
     /// when true, they're emitted flagged `isIgnored` so the Timeline can
     /// render them faded and the user can recover from an accidental ignore.
     /// Work in ignored repos is always emitted, flagged `isIgnored`, so the
     /// day stays complete and the repo can be un-ignored from where it shows.
-    /// `events` should already be mic-extended (`CalendarEvent.withMicOverrun`)
-    /// so the calls lane subtracts exactly the meetings each session is.
+    /// `events` are drawn at their booked times, as the report bills them.
     static func build(day: DateInterval,
                       samples: [ActivitySample],
                       events: [CalendarEvent],
                       sessions: [ClaudeSession],
                       claudeDeltas: [AppDatabase.ClaudeActiveDelta] = [],
-                      micSessions: [MicSession] = [],
                       now: Date = Date(),
                       matcher: RuleMatcher,
                       sampleIntervalSeconds: Int,
@@ -130,39 +124,6 @@ enum TimelineBuilder {
                 seriesMasterID: event.seriesMasterID,
                 isIgnored: eventAttribution.isIgnored
             )
-        }
-
-        // ---- Calls: each session's ad-hoc time (mic minus the meetings it is) ----
-        let owned = micSessions.isEmpty ? [:]
-            : CalendarEvent.meetingMicSessionIDs(events: events, micSessions: micSessions, now: now, matcher: matcher)
-        let callBlocks: [TimelineBlock] = micSessions.flatMap { session -> [TimelineBlock] in
-            if session.isIgnored && !includeIgnoredEvents { return [] }
-            let end = session.endedAt ?? min(now, day.end)
-            guard end > session.startedAt else { return [] }
-            let attribution = matcher.attribute(micSession: session)
-            let apps = ReviewUnit.callApps(session)
-            return CallSegment.adHocRanges(of: session, endedAt: end, events: events, owned: owned, minimumSeconds: 30)
-                .enumerated().compactMap { i, range -> TimelineBlock? in
-                    let s = max(range.start, day.start), e = min(range.end, day.end)
-                    guard e > s else { return nil }
-                    return TimelineBlock(
-                        id: "call-\(session.id)-\(i)",
-                        track: .calls,
-                        source: .micSession(id: session.id),
-                        startedAt: s,
-                        endedAt: e,
-                        title: ReviewUnit.callTitle(session),
-                        subtitle: apps.isEmpty ? nil : apps.joined(separator: ", "),
-                        attribution: attribution,
-                        eventAttribution: nil,
-                        hasManualOverride: session.customerID != nil,
-                        isIdle: false,
-                        appBundleID: nil,
-                        seriesMasterID: nil,
-                        ruleSignal: session.learnableRule.map { TimelineBlock.RuleSignal(kind: $0.kind, pattern: $0.pattern) },
-                        isIgnored: session.isIgnored
-                    )
-                }
         }
 
         // ---- Foreground (group consecutive same-identity samples) ----
@@ -244,7 +205,6 @@ enum TimelineBuilder {
         }
 
         return DayBundle(calendar: calendarBlocks,
-                         calls: callBlocks,
                          foreground: foregroundBlocks,
                          claudeCode: claudeBlocks)
     }

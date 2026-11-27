@@ -97,12 +97,11 @@ struct ReviewView: View {
     // MARK: - Rows
 
     enum Section: Int, CaseIterable {
-        case repos, meetings, calls, appsAndSites
+        case repos, meetings, appsAndSites
         var title: String {
             switch self {
             case .repos:        return "Repos and agent sessions"
             case .meetings:     return "Meetings"
-            case .calls:        return "Calls"
             case .appsAndSites: return "Apps & sites"
             }
         }
@@ -114,7 +113,6 @@ struct ReviewView: View {
         case .hostGroup:      return .appsAndSites
         case .series, .event, .doubleBooking: return .meetings
         case .agentSession:   return .repos
-        case .call:           return .calls
         }
     }
 
@@ -460,7 +458,7 @@ struct ReviewView: View {
     private var content: some View {
         if rows.isEmpty {
             ContentUnavailableView("Nothing recorded for \(periodLabel)", systemImage: "clock.arrow.circlepath",
-                                   description: Text("Apps, sites, repos, meetings and calls show up here as you work."))
+                                   description: Text("Apps, sites, repos, sessions and meetings show up here as you work."))
         } else {
             HStack(spacing: 0) {
                 list
@@ -540,7 +538,7 @@ struct ReviewView: View {
             return "\(formatHours(row.totalSeconds)) · \(daysLabel(row.perDay))"
         case .series(let s):
             return "Series · \(s.occurrenceCount)× · \(formatHours(row.totalSeconds))"
-        case .event, .call, .doubleBooking:
+        case .event, .doubleBooking:
             return "\(row.unit.subtitle ?? "") · \(formatHours(row.totalSeconds))"
         }
     }
@@ -818,7 +816,6 @@ struct ReviewView: View {
         if selectedDay != nil { options.append(.today) }
         switch unit {
         case .event, .agentSession, .doubleBooking: return nil
-        case .call(let s, _): return s.learnableRule == nil ? nil : options + [.justThis]
         case .signal, .hostGroup, .series: return options
         }
     }
@@ -844,10 +841,6 @@ struct ReviewView: View {
             return "Pins this session: your time in it attributes here, whatever its folder. No rule is written." + undo
         case .doubleBooking:
             return ""   // double bookings render `doubleBookingBody`
-        case .call(let s, _):
-            guard let what = s.learnableRuleLabel else { return "Pins just this call — no rule is created." + undo }
-            return (scope == .justThis ? "Pins just this call — no rule is created."
-                    : "Pins this call and teaches a rule for \(what)\(scope == .always ? "" : " for \(scopeWindowLabel)").") + undo
         }
     }
 
@@ -955,7 +948,6 @@ struct ReviewView: View {
             pattern = (ruleKind(s.kind), s.kind == .urlPath ? s.value + "*" : s.value)
             if s.kind == .urlHost { host = s.value }
         case .hostGroup(let h, _):  pattern = (.urlHost, h.value); host = h.value
-        case .call(let s, _):       pattern = s.learnableRule.map { ($0.kind, $0.pattern) }
         case .series, .event, .agentSession, .doubleBooking: pattern = nil
         }
         if let (kind, value) = pattern {
@@ -1016,7 +1008,7 @@ struct ReviewView: View {
         switch row.unit {
         case .signal(let s):         ids = s.kind == .urlHost ? [row.id, "host:\(s.value)"] : [row.id]
         case .hostGroup(let h, _):   ids = [row.id, "sig:urlHost:\(h.value)"]
-        case .series, .event, .call, .agentSession, .doubleBooking: return
+        case .series, .event, .agentSession, .doubleBooking: return
         }
         let db = state.database, cal = calendar, viewed = weekStart
         let currentStart = cal.currentWeekInterval().start
@@ -1132,9 +1124,9 @@ struct ReviewView: View {
         }
     }
 
-    // MARK: - Detail panel (meetings & calls)
+    // MARK: - Detail panel (meetings & sessions)
 
-    /// Extra context under the header so meetings and calls aren't a bare
+    /// Extra context under the header so meetings and sessions aren't a bare
     /// subject + time — attendee domains and organizer in particular are the
     /// strongest hints for which customer a meeting belongs to.
     @ViewBuilder
@@ -1142,7 +1134,6 @@ struct ReviewView: View {
         switch unit {
         case .event(let e):         meetingEventDetail(e)
         case .series(let s):        meetingSeriesDetail(s)
-        case .call(let session, _): callDetail(session)
         case .agentSession(let session, _): agentSessionDetail(session)
         case .signal, .hostGroup, .doubleBooking: EmptyView()
         }
@@ -1199,35 +1190,12 @@ struct ReviewView: View {
         }
     }
 
-    @ViewBuilder
-    private func callDetail(_ s: MicSession) -> some View {
-        let timeRange = callTimeRange(s)
-        let apps = ReviewUnit.callApps(s)
-        detailCard {
-            if let timeRange { detailRow("clock", timeRange) }
-            if !apps.isEmpty { detailRow("app", "Running: \(apps.joined(separator: ", "))") }
-            if let p = s.participant, !p.isEmpty { detailRow("person.crop.circle", "1:1 with \(p) — Always teaches a rule for calls with them") }
-            if let ch = s.slackChannel, !ch.isEmpty {
-                detailRow("number", "Huddle in #\(ch)")
-            } else if s.participant == nil {
-                detailRow("info.circle", "Ad-hoc call — assigns just this session. No channel or participant was captured, so there is nothing to learn a rule from.")
-            }
-        }
-    }
-
     private func seriesSpan(_ s: AppDatabase.MeetingSeriesAggregate) -> String {
         let df = DateFormatter(); df.dateFormat = "EEE d MMM"
         if s.occurrenceCount > 1 {
             return "\(df.string(from: s.firstStartAt)) – \(df.string(from: s.lastStartAt))"
         }
         return df.string(from: s.firstStartAt)
-    }
-
-    private func callTimeRange(_ s: MicSession) -> String? {
-        guard let end = s.endedAt else { return nil }
-        let f = DateFormatter(); f.dateFormat = "EEE d MMM HH:mm"
-        let tf = DateFormatter(); tf.dateFormat = "HH:mm"
-        return "\(f.string(from: s.startedAt))–\(tf.string(from: end))"
     }
 
     private func eventTimeRange(_ e: CalendarEvent) -> String {
@@ -1279,19 +1247,6 @@ struct ReviewView: View {
             ok = run { try writeSeries(s, customerID: cid, projectID: pid) }
         case .event(let e):
             ok = run { try state.database.setCalendarEventAttribution(eventID: e.id, customerID: cid, projectID: pid) }
-        case .call(let session, _):
-            // Pin the session; a channel huddle or a 1:1 call also teaches a
-            // channel / participant rule under Always / This week / This day. One
-            // transaction: a failed rule insert never leaves the session pinned on its own.
-            var rule: Rule?
-            if scope.createsRule, let learn = session.learnableRule {
-                let (validFrom, validTo) = scopeBounds
-                rule = Rule(id: UUID().uuidString, customerID: cid, projectID: pid,
-                            kind: learn.kind, pattern: learn.pattern, priority: 100, createdAt: Date(),
-                            validFrom: validFrom, validTo: validTo)
-            }
-            ok = run { try state.database.setMicSessionAttribution(id: session.id, customerID: cid, projectID: pid, rule: rule) }
-            if ok { writtenRules[unit.id] = rule }
         case .agentSession(let session, _):
             ok = run { try state.database.setClaudeSessionAttribution(sessionID: session.id, customerID: cid, projectID: pid) }
         case .doubleBooking:
@@ -1365,8 +1320,6 @@ struct ReviewView: View {
             ok = run { try state.database.setMeetingSeriesAttribution(seriesID: s.seriesMasterID, customerID: nil, projectID: nil, isIgnored: true) }
         case .event(let e):
             ok = run { try state.database.setCalendarEventIgnored(eventID: e.id, isIgnored: true) }
-        case .call(let session, _):
-            ok = run { try state.database.setMicSessionIgnored(id: session.id, isIgnored: true) }
         case .agentSession, .doubleBooking:
             ok = false
         }
@@ -1419,10 +1372,6 @@ struct ReviewView: View {
         case .event(let e):
             try state.database.setCalendarEventAttribution(eventID: e.id, customerID: nil, projectID: nil)
             try state.database.setCalendarEventIgnored(eventID: e.id, isIgnored: false)
-        case .call(let session, _):
-            try state.database.setMicSessionAttribution(id: session.id, customerID: nil, projectID: nil)
-            try state.database.setMicSessionIgnored(id: session.id, isIgnored: false)
-            if let rule = writtenRules[unit.id] { try state.database.deleteRule(id: rule.id) }
         case .agentSession(let session, _):
             // The row's session is how it stood before this decision: put its pin back.
             try state.database.setClaudeSessionAttribution(sessionID: session.id, customerID: session.customerID,
@@ -1569,9 +1518,6 @@ enum ReviewUnit: Identifiable {
     case hostGroup(host: AppDatabase.SignalAggregate, paths: [AppDatabase.SignalAggregate])
     case series(AppDatabase.MeetingSeriesAggregate)
     case event(CalendarEvent)
-    /// An ad-hoc mic session (Slack huddle, impromptu Teams/FaceTime). `seconds`
-    /// is the meeting-subtracted ad-hoc duration, matching the Calls tab.
-    case call(session: MicSession, seconds: Double)
     /// A Claude Code or Codex session you had in front, outside any git
     /// repo. `seconds` is your focus time in it. Confirming pins the session.
     case agentSession(session: ClaudeSession, seconds: Double)
@@ -1585,7 +1531,6 @@ enum ReviewUnit: Identifiable {
         case .hostGroup(let h, _): return "host:\(h.value)"
         case .series(let s):       return "series:\(s.seriesMasterID)"
         case .event(let e):        return "event:\(e.id)"
-        case .call(let s, _):      return "call:\(s.id)"
         case .agentSession(let s, _): return "agent:\(s.id)"
         case .doubleBooking(let d): return "double:\(d.id)"
         }
@@ -1597,14 +1542,12 @@ enum ReviewUnit: Identifiable {
     var isConfirmable: Bool { if case .doubleBooking = self { return false }; return true }
 
     /// The scope Review preselects. Always where the pattern names one customer
-    /// for good (a repo, a site, a recurring meeting, a Slack channel); narrower
-    /// where one pattern legitimately serves several: an app is ambient, and a
-    /// colleague talks about many things, so a person rule is opt-in.
+    /// for good (a repo, a site, a recurring meeting); This week for an app,
+    /// which legitimately serves several; a pin for a session or a meeting.
     var defaultScope: AttributionScope {
         switch self {
         case .signal(let s):        return s.kind == .appBundleID ? .thisWeek : .always
         case .hostGroup, .series, .event: return .always
-        case .call(let s, _):       return s.learnableRule?.kind == .slackChannel ? .always : .justThis
         case .agentSession, .doubleBooking: return .justThis
         }
     }
@@ -1619,7 +1562,6 @@ enum ReviewUnit: Identifiable {
         case .hostGroup(let h, _):  return h.totalSeconds   // the host's open time, not just the paths above the threshold
         case .series(let s):        return s.totalSeconds
         case .event(let e):         return max(0, e.endAt.timeIntervalSince(e.startAt))
-        case .call(_, let secs):    return secs
         case .agentSession(_, let secs): return secs
         case .doubleBooking(let d): return d.overlap.duration
         }
@@ -1631,7 +1573,6 @@ enum ReviewUnit: Identifiable {
         case .hostGroup(let h, _): return h.value
         case .series(let s):       return s.sampleSubject
         case .event(let e):        return e.subject.isEmpty ? "(no subject)" : e.subject
-        case .call(let s, _):      return Self.callTitle(s)
         case .agentSession(let s, _):
             return s.cwd.map { ($0 as NSString).lastPathComponent } ?? "\(s.provider.displayName) session"
         case .doubleBooking(let d):
@@ -1647,11 +1588,6 @@ enum ReviewUnit: Identifiable {
         case .event(let e):
             let df = DateFormatter(); df.dateFormat = "EEE d MMM HH:mm"
             return df.string(from: e.startAt)
-        case .call(let s, _):
-            let df = DateFormatter(); df.dateFormat = "EEE d MMM HH:mm"
-            let apps = Self.callApps(s)
-            let when = df.string(from: s.startedAt)
-            return apps.isEmpty ? when : "\(apps.joined(separator: ", ")) · \(when)"
         case .agentSession(let s, _):
             return "\(s.provider.displayName) session outside a git repo"
         case .doubleBooking(let d):
@@ -1673,7 +1609,6 @@ enum ReviewUnit: Identifiable {
         case .hostGroup: return "Shared host"
         case .series:    return "Meeting series"
         case .event:     return "Meeting"
-        case .call:      return "Call"
         case .agentSession: return "Agent session"
         case .doubleBooking: return "Double booking"
         }
@@ -1691,19 +1626,16 @@ enum ReviewUnit: Identifiable {
         case .hostGroup: return "globe"
         case .series:    return "repeat"
         case .event:     return "calendar"
-        case .call:      return "mic.fill"
         case .agentSession: return "wand.and.stars"
         case .doubleBooking: return "calendar.badge.exclamationmark"
         }
     }
 
     /// Confirming this unit writes a reusable rule (vs a one-off attribution).
-    /// A call only teaches a rule when it carries a Slack channel or a participant.
     var createsRule: Bool {
         switch self {
         case .signal, .hostGroup, .series: return true
         case .event, .agentSession, .doubleBooking: return false
-        case .call(let s, _):              return s.learnableRule != nil
         }
     }
 
@@ -1716,31 +1648,11 @@ enum ReviewUnit: Identifiable {
     var canIgnore: Bool {
         switch self {
         case .signal(let s): return s.kind == .gitRepoSlug || s.kind == .urlHost || s.kind == .appBundleID
-        case .hostGroup, .series, .event, .call: return true
+        case .hostGroup, .series, .event: return true
         case .agentSession, .doubleBooking: return false
         }
     }
 
-    // MARK: Call display helpers
-
-    static func callApps(_ s: MicSession) -> [String] {
-        var seen: Set<String> = []
-        var out: [String] = []
-        for bid in s.voipApps {
-            if let label = MicMonitor.displayName(forBundleID: bid), !seen.contains(label) {
-                seen.insert(label); out.append(label)
-            }
-        }
-        return out
-    }
-
-    static func callTitle(_ s: MicSession) -> String {
-        if let p = s.participant, !p.isEmpty { return p }
-        if let ch = s.slackChannel, !ch.isEmpty { return "#\(ch)" }
-        let apps = callApps(s)
-        if !apps.isEmpty { return apps.joined(separator: " / ") }
-        return "Microphone activity"
-    }
 }
 
 // MARK: - Inline assign control

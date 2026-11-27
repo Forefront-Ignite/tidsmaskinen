@@ -11,7 +11,7 @@ import AppKit
 @MainActor
 final class CaptureHealth: ObservableObject {
     enum Check: String, CaseIterable, Identifiable {
-        case accessibility, chrome, agentFocus, microphone, calendar, hooks, menuBar, customers
+        case accessibility, chrome, agentFocus, calendar, hooks, menuBar, customers
         var id: String { rawValue }
 
         /// Short label for the tray stripe.
@@ -20,7 +20,6 @@ final class CaptureHealth: ObservableObject {
             case .accessibility: return "Accessibility"
             case .chrome:        return "Chrome"
             case .agentFocus:    return "Claude focus"
-            case .microphone:    return "Calls"
             case .calendar:      return "Calendar"
             case .hooks:         return "Hooks"
             case .menuBar:       return "Menu bar"
@@ -34,7 +33,6 @@ final class CaptureHealth: ObservableObject {
             case .accessibility: return "window titles and repos"
             case .chrome:        return "tab URLs (Chrome automation)"
             case .agentFocus:    return "which Claude Code session you have in front"
-            case .microphone:    return "noticing calls and huddles"
             case .calendar:      return "meetings from Microsoft 365"
             case .hooks:         return "Claude Code and Codex sessions"
             case .menuBar:       return "the icon macOS can hide"
@@ -63,7 +61,6 @@ final class CaptureHealth: ObservableObject {
     var isSignedIn: () -> Bool = { false }
     /// True while the stored Microsoft identity is still being restored at launch.
     var isRestoringSignIn: () -> Bool = { false }
-    var isCallDetectionRunning: () -> Bool = { false }
     /// When Claude's log was last read (nil: unreadable) and the newest
     /// session switch stored from it.
     var agentFocusState: () -> (lastReadAt: Date?, latestEventAt: Date?) = { (nil, nil) }
@@ -145,12 +142,6 @@ final class CaptureHealth: ObservableObject {
         } else {
             set(.agentFocus, .ok, "reading Claude's log")
         }
-
-        // Call detection reads which processes hold the microphone through
-        // CoreAudio; it needs no microphone permission of its own.
-        set(.microphone, isCallDetectionRunning() ? .ok : .warn,
-            isCallDetectionRunning() ? "watching for calls and huddles (no microphone permission needed)"
-                                     : "call detection isn't running")
 
         if isRestoringSignIn() {
             set(.calendar, .off, "checking the Microsoft sign-in…")

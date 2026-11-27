@@ -273,9 +273,6 @@ struct CustomersView: View {
         .init(title: "Repositories", icon: "chevron.left.forwardslash.chevron.right", kinds: [.gitRepoSlug, .gitRemoteHost]),
         .init(title: "Browser URLs", icon: "globe", kinds: [.urlHost, .urlPath]),
         .init(title: "Apps", icon: "app", kinds: [.appBundleID]),
-        .init(title: "Window titles", icon: "macwindow", kinds: [.windowTitle]),
-        .init(title: "Slack channels", icon: "number", kinds: [.slackChannel]),
-        .init(title: "Call participants", icon: "person.crop.circle", kinds: [.participant]),
     ]
 
     /// This customer's rules grouped by (kind, pattern), newest first.
@@ -692,7 +689,6 @@ private struct AddRuleSheet: View {
             let h = r.sampleSeconds / 3600
             parts.append(h < 1 ? "\(Int((r.sampleSeconds / 60).rounded())) min of activity" : String(format: "%.1f h of activity", h))
         }
-        if r.calls > 0 { parts.append("\(r.calls) call\(r.calls == 1 ? "" : "s")") }
         return "Matches " + parts.joined(separator: " · ") + " in the last \(matchWindowDays) days"
     }
 
@@ -706,14 +702,8 @@ private struct AddRuleSheet: View {
             return "Matches the host of the active Chrome tab URL. Wildcards supported, e.g. `*.acme.com`."
         case .urlPath:
             return "Matches the full Chrome tab URL after the scheme is stripped. Wildcards supported, e.g. `github.com/forefront/foo*` to attribute a single repo."
-        case .windowTitle:
-            return "Substring (case-insensitive) found in the frontmost window title."
         case .appBundleID:
             return "App bundle identifier of the frontmost app. Wildcards supported."
-        case .slackChannel:
-            return "Slack channel name (no #), e.g. `nfc-internal`. Attributes both foreground time in that channel and huddles started there. Wildcards supported, e.g. `nfc-*`."
-        case .participant:
-            return "The other person in a 1:1 Teams, Zoom or Slack call, as the Calls tab shows them. Wildcards supported, e.g. `Anna *`."
         }
     }
 }

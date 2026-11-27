@@ -39,7 +39,6 @@ final class AppState: ObservableObject {
     let calendarSync: CalendarSync
     let hookIngester: HookIngester
     let agentFocus: AgentFocusRecorder
-    let micMonitor: MicMonitor
     let commandCenter: CommandCenterClient
     let commandCenterSync: CommandCenterSync
     let health: CaptureHealth
@@ -82,7 +81,6 @@ final class AppState: ObservableObject {
         self.graph = GraphClient()
         self.calendarSync = CalendarSync(database: database, client: graph)
         self.hookIngester = HookIngester(database: database)
-        self.micMonitor = MicMonitor(database: database)
         let ccClient = CommandCenterClient()
         self.commandCenter = ccClient
         self.commandCenterSync = CommandCenterSync(database: database, client: ccClient)
@@ -108,7 +106,6 @@ final class AppState: ObservableObject {
 
         health.isSignedIn = { [weak self] in self?.signedInPrincipal != nil }
         health.isRestoringSignIn = { [weak self] in self?.isRestoringSignIn ?? false }
-        health.isCallDetectionRunning = { [weak self] in self?.micMonitor.isPolling ?? false }
         health.agentFocusState = { [weak self] in
             (self?.agentFocus.lastReadAt, self?.agentFocus.latestEventAt)
         }
@@ -144,13 +141,6 @@ final class AppState: ObservableObject {
         self.monitor.focus = agentFocus
         self.monitor.start()
         self.hookIngester.start()
-        self.micMonitor.onSessionStart = { [weak self] _ in
-            Task { @MainActor in self?.objectWillChange.send() }
-        }
-        self.micMonitor.onSessionEnd = { [weak self] _ in
-            Task { @MainActor in self?.objectWillChange.send() }
-        }
-        self.micMonitor.start()
         self.health.start()
 
         // Restore signed-in identity (best-effort, non-blocking).

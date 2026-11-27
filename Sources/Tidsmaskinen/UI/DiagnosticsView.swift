@@ -6,7 +6,6 @@ struct DiagnosticsView: View {
     @State private var lastRun: Date = Date()
     @State private var lastRequestStatus: String?
     @State private var lastResetMessage: String?
-    @State private var axProbeMessage: String?
 
     var body: some View {
         ScrollView {
@@ -27,9 +26,6 @@ struct DiagnosticsView: View {
 
                 chromeSection
 
-                Divider()
-
-                callUIProbeSection
 
                 if !diagnostics.notes.isEmpty {
                     Divider()
@@ -186,51 +182,6 @@ struct DiagnosticsView: View {
                 : "tccutil failed (status \(task.terminationStatus)): \(output.trimmingCharacters(in: .whitespacesAndNewlines))"
         } catch {
             lastResetMessage = "tccutil error: \(error.localizedDescription)"
-        }
-    }
-
-    @ViewBuilder
-    private var callUIProbeSection: some View {
-        sectionHeader("Call UI probe (Accessibility tree)")
-        Text("Start a Slack huddle or Teams call, then dump that app's Accessibility tree to see whether participant names are exposed (e.g. avatar tiles in a channel huddle). For group huddles, expand the participant panel first — the names may only be in the tree when it's visible.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        HStack(spacing: 10) {
-            Button {
-                dumpAXTree(forBundleSubstring: "slack", label: "Slack")
-            } label: {
-                Label("Dump Slack tree", systemImage: "bubble.left.and.bubble.right")
-            }
-            Button {
-                dumpAXTree(forBundleSubstring: "teams", label: "Teams")
-            } label: {
-                Label("Dump Teams tree", systemImage: "phone")
-            }
-        }
-        if let msg = axProbeMessage {
-            Text(msg)
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-        }
-    }
-
-    private func dumpAXTree(forBundleSubstring substring: String, label: String) {
-        guard let app = NSWorkspace.shared.runningApplications.first(where: {
-            ($0.bundleIdentifier ?? "").lowercased().contains(substring) && $0.activationPolicy == .regular
-        }) else {
-            axProbeMessage = "\(label) is not running."
-            return
-        }
-        let dump = Probes.dumpAXTree(pid: app.processIdentifier)
-        do {
-            let url = try AppPaths.supportDirectory()
-                .appendingPathComponent("ax-dump-\(substring).txt", isDirectory: false)
-            try dump.write(to: url, atomically: true, encoding: .utf8)
-            NSWorkspace.shared.activateFileViewerSelecting([url])
-            axProbeMessage = "\(label) tree written to \(url.path) — revealed in Finder."
-        } catch {
-            axProbeMessage = "Failed to write \(label) tree: \(error.localizedDescription)"
         }
     }
 

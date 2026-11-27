@@ -156,20 +156,6 @@ struct RuleMatcher {
            let r = match(kind: .urlHost, against: host, at: at) {
             return result(for: r)
         }
-        // Slack channel rules: parse the channel out of the Slack window title
-        // and match it before the generic window-title rules, so e.g.
-        // `nfc-internal → NCF` attributes foreground Slack time too (not just
-        // huddles in the Calls tab).
-        if let bundle = sample.appBundleID?.lowercased(), bundle.contains("slack"),
-           let title = sample.windowTitle,
-           let channel = MicSession.parseSlackChannel(fromTitle: title),
-           let r = match(kind: .slackChannel, against: channel, at: at) {
-            return result(for: r)
-        }
-        if let title = sample.windowTitle,
-           let r = match(kind: .windowTitle, against: title, at: at) {
-            return result(for: r)
-        }
         if let bundle = sample.appBundleID,
            let r = match(kind: .appBundleID, against: bundle, at: at) {
             return result(for: r)
@@ -210,33 +196,6 @@ struct RuleMatcher {
         return .unattributed
     }
 
-    /// Attribute a mic session (Calls tab). Manual override
-    /// (session.customerID/projectID) wins; otherwise match the inferred Slack
-    /// channel against `slackChannel` rules. The result's `matchingRule` is
-    /// non-nil exactly when the attribution came from a rule rather than a
-    /// manual save, which the UI uses to label auto-matched rows.
-    func attribute(micSession s: MicSession) -> AttributionResult {
-        if let cid = s.customerID, let customer = customersByID[cid] {
-            let project = s.projectID.flatMap { projectsByID[$0] }
-            return AttributionResult(customer: customer, project: project, matchingRule: nil)
-        }
-        if let channel = s.slackChannel,
-           let r = match(kind: .slackChannel, against: channel, at: s.startedAt) {
-            return result(for: r)
-        }
-        if let participant = s.participant,
-           let r = match(kind: .participant, against: participant, at: s.startedAt) {
-            return result(for: r)
-        }
-        return .unattributed
-    }
-
-    /// Attribute a calendar event. Priority:
-    ///   1. event.isIgnored                             → .ignored(.event)
-    ///   2. event.customerID set                        → .attributed(_, _, .event)
-    ///   3. series ignored (if seriesMasterID != nil)   → .ignored(.series)
-    ///   4. series has customerID                       → .attributed(_, _, .series)
-    ///   5. otherwise                                   → .unattributed
     func attribute(event: CalendarEvent) -> EventAttribution {
         if event.isIgnored {
             return .ignored(source: .event)
@@ -310,11 +269,7 @@ struct RuleMatcher {
     }
 
     static func matches(kind: Rule.Kind, pattern: String, value: String) -> Bool {
-        if kind.supportsGlob {
-            return globMatch(pattern: pattern, value: value)
-        } else {
-            return value.range(of: pattern, options: .caseInsensitive) != nil
-        }
+        globMatch(pattern: pattern, value: value)
     }
 
     static func globMatch(pattern: String, value: String) -> Bool {

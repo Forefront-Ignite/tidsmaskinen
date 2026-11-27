@@ -173,7 +173,7 @@ struct MenuBarView: View {
     /// labels stay readable at the tray's width.
     private var healthStripe: some View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 3), spacing: 4) {
-            ForEach([CaptureHealth.Check.accessibility, .chrome, .microphone, .calendar, .hooks, .menuBar]) { check in
+            ForEach([CaptureHealth.Check.accessibility, .chrome, .agentFocus, .calendar, .hooks, .menuBar]) { check in
                 let st = state.health.status(check)
                 Button {
                     state.settingsTarget = .setup
