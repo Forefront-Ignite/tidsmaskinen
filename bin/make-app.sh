@@ -279,8 +279,6 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>Tidsmaskinen reads the active Chrome tab URL to attribute browsing time to customers.</string>
     <key>NSAppleScriptEnabled</key>
     <true/>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Tidsmaskinen detects when the microphone is in use (without recording audio) to identify VoIP calls for time attribution.</string>
 $ICON_PLIST_ENTRY
 $SPARKLE_PLIST_ENTRY
 </dict>
