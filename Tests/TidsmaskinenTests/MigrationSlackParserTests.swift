@@ -1,10 +1,10 @@
 import XCTest
 @testable import Tidsmaskinen
 
-/// Slack changed its huddle window title format in Aug 2026: the `Huddle:`
-/// prefix and the `@`/`#` channel-vs-person marker are gone. Both formats must
-/// keep parsing, and main-window titles must keep being ignored.
-final class SlackHuddleTitleTests: XCTestCase {
+/// Call detection is gone, but migrations v13, v15, v16 and v21 still parse
+/// Slack huddle titles when an existing database upgrades. These cases keep
+/// those parsers from drifting and writing wrong channels into history.
+final class MigrationSlackParserTests: XCTestCase {
 
     private func parse(_ t: String) -> (name: String, isChannel: Bool)? {
         MicSession.parseSlackHuddleTitle(fromTitle: t)

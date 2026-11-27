@@ -28,12 +28,17 @@ final class ReviewRowsTests: XCTestCase {
         try db.upsert(Rule(id: "r1", customerID: "A", projectID: nil, kind: .urlHost, pattern: "a.com",
                            priority: 100, createdAt: Date(), validFrom: from, validTo: to))
         try db.hideSignal(kind: .urlHost, value: "hidden.com")
-        for i in 0..<40 {   // 40 × 15 s = 10 min each, above the 5-minute threshold
-            let t = at(15, 10).addingTimeInterval(Double(i) * 15)
-            _ = try db.insert(sample(t, host: "a.com"))
-            _ = try db.insert(sample(t, host: "hidden.com"))
-            _ = try db.insert(sample(t, app: "com.openai.chat"))
-            _ = try db.insert(sample(t, remote: "git@github.com:acme/repo.git", app: "com.microsoft.VSCode"))
+        // 40 × 15 s = 10 min each, above the 5-minute threshold, one after another.
+        let blocks: [(Int, (Date) -> ActivitySample)] = [
+            (0, { self.sample($0, host: "a.com") }),
+            (1, { self.sample($0, host: "hidden.com") }),
+            (2, { self.sample($0, app: "com.openai.chat") }),
+            (3, { self.sample($0, remote: "git@github.com:acme/repo.git", app: "com.microsoft.VSCode") }),
+        ]
+        for (k, make) in blocks {
+            for i in 0..<40 {
+                _ = try db.insert(make(at(15, 10).addingTimeInterval(Double(k) * 600 + Double(i) * 15)))
+            }
         }
         _ = try db.insert(sample(at(16, 9), host: "short.com"))   // 15 s: below the threshold
 
@@ -55,6 +60,25 @@ final class ReviewRowsTests: XCTestCase {
         let backlog = try ReviewQueue.build(database: db, interval: week, sampleIntervalSeconds: 15,
                                             idleThresholdSeconds: 300, minMinutes: 5)
         XCTAssertEqual(backlog.map(\.id), ["sig:gitRepoSlug:acme/repo"])
+    }
+
+    /// A tentative booking that an accepted one covers bills nothing, so
+    /// Review doesn't ask for it; the accepted one is still listed.
+    func testMeetingThatLostItsSlotIsNotAsked() throws {
+        let db = try AppDatabase.inMemoryForTesting()
+        func meeting(_ id: String, rsvp: String) -> CalendarEvent {
+            CalendarEvent(id: id, iCalUID: nil, subject: id, bodyPreview: nil,
+                          startAt: at(15, 10), endAt: at(15, 11), isAllDay: false,
+                          organizerEmail: nil, organizerName: nil, rsvpStatus: rsvp,
+                          isOnlineMeeting: false, onlineMeetingProvider: nil, attendeeDomainsCSV: nil,
+                          location: nil, verifiedAttended: false, customerID: nil, projectID: nil,
+                          eventType: "singleInstance", seriesMasterID: nil, isIgnored: false,
+                          createdAt: Date(), updatedAt: Date())
+        }
+        try db.upsertEvents([meeting("accepted", rsvp: "accepted"), meeting("maybe", rsvp: "tentativelyAccepted")])
+        let open = try ReviewQueue.build(database: db, interval: week, sampleIntervalSeconds: 15,
+                                         idleThresholdSeconds: 300, minMinutes: 5)
+        XCTAssertEqual(open.map(\.id), ["event:accepted"])
     }
 
     /// Evidence: consecutive samples on a signal form a stretch, a gap over two

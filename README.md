@@ -28,14 +28,14 @@ swift build
 swift run Tidsmaskinen
 ```
 
-TCC permissions (Accessibility, Automation, Microphone) only persist for the signed `.app` produced by `make-app.sh`. The bare `swift run` binary has no stable bundle identifier, so macOS treats every rebuild as a new app and resets grants.
+TCC permissions (Accessibility, Automation) only persist for the signed `.app` produced by `make-app.sh`. The bare `swift run` binary has no stable bundle identifier, so macOS treats every rebuild as a new app and resets grants.
 
 ## What it does
 
 - Samples the frontmost app every 15 s
 - Reads Chrome's active tab URL via AppleScript
 - Detects which git repo the active editor window belongs to
-- Tracks Microsoft Teams calls and microphone activity
+- Follows which Claude Code or Codex session you have in front (Claude desktop's own log, Codex thread titles), so hours go to the repo you work in rather than to how long agents run
 - Optional Microsoft Graph calendar sync
 - Optional Claude Code and Codex session ingest via shell hooks (`tm-hook`)
 - Attributes signals to a `Customer · Project` via user-defined rules

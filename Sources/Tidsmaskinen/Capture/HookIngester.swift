@@ -161,10 +161,14 @@ final class HookIngester {
 
         do {
             let existing = try database.session(id: sessionID)
+            // A row no hook has touched yet is a placeholder the focus
+            // recorder created so a focused session can be attributed. Its
+            // invented start and end must not reject the session's real events.
+            let isPlaceholder = existing != nil && existing?.lastActivityAt == nil
             // Concurrent hook processes can append out of timestamp order. Never
             // rewind the activity cursor and bill the same gap a second time.
             if let last = existing?.lastActivityAt, ts < last { return }
-            if let ended = existing?.endedAt, ts < ended { return }
+            if !isPlaceholder, let ended = existing?.endedAt, ts < ended { return }
             // A closed session can legitimately resurrect: a long-lived `claude` session that
             // survived an overnight sleep was closed by sleep-finalization, but the user may keep
             // working in it the next morning under the same session_id. Genuine continuation
@@ -172,7 +176,7 @@ final class HookIngester {
             // (Stop / SessionEnd) for a closed session, however, are stale — Claude Code emitting
             // SessionEnd after wake would re-bill a second ghost idle gap on top of what
             // sleep-finalize already recorded — so those are still dropped.
-            let wasClosed = existing?.endedAt != nil
+            let wasClosed = existing?.endedAt != nil && !isPlaceholder
             if wasClosed {
                 switch envelope.eventType {
                 case "SessionStart", "UserPromptSubmit":
@@ -224,6 +228,10 @@ final class HookIngester {
                 activeUntil = last.addingTimeInterval(gainedSeconds)
             }
             session.lastActivityAt = ts
+            if isPlaceholder {
+                session.startedAt = min(session.startedAt, ts)
+                session.endedAt = nil
+            }
             if wasClosed {
                 session.endedAt = nil // reopen — the user is continuing this session
             }

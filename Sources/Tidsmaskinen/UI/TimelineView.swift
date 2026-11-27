@@ -5,7 +5,7 @@ struct TimelineView: View {
     @EnvironmentObject private var state: AppState
 
     @State private var day: Date = Calendar.current.startOfDay(for: Date())
-    @State private var bundle: TimelineBuilder.DayBundle = TimelineBuilder.DayBundle(calendar: [], calls: [], foreground: [], claudeCode: [])
+    @State private var bundle: TimelineBuilder.DayBundle = TimelineBuilder.DayBundle(calendar: [], foreground: [], claudeCode: [])
     @State private var customers: [Customer] = []
     @State private var projects: [Project] = []
     @State private var selectedBlock: TimelineBlock?
@@ -96,7 +96,7 @@ struct TimelineView: View {
         var visibleStart = cal.date(byAdding: .hour, value: 6, to: dayInterval.start) ?? dayInterval.start
         var visibleEnd = cal.date(byAdding: .hour, value: 22, to: dayInterval.start) ?? dayInterval.end
 
-        let allBlocks = bundle.calendar + bundle.calls + bundle.foreground + bundle.claudeCode
+        let allBlocks = bundle.calendar + bundle.foreground + bundle.claudeCode
         for b in allBlocks {
             if b.startedAt < visibleStart { visibleStart = b.startedAt }
             if b.endedAt > visibleEnd { visibleEnd = b.endedAt }
@@ -171,7 +171,7 @@ struct TimelineView: View {
     private func focusPendingBlock() {
         guard let at = pendingFocus else { return }
         pendingFocus = nil
-        let candidates = bundle.foreground + bundle.calls + bundle.calendar + bundle.claudeCode
+        let candidates = bundle.foreground + bundle.calendar + bundle.claudeCode
         guard let block = candidates.first(where: { !$0.isIdle && $0.startedAt <= at && at < $0.endedAt }) else { return }
         closeAgendaPopover()
         selectedBlock = block
@@ -221,7 +221,6 @@ struct TimelineView: View {
     private func groupKey(_ b: TimelineBlock) -> String {
         switch b.source {
         case .calendarEvent(let id): return "evt:\(id)"
-        case .micSession(let id):    return "call:\(id)"
         case .claudeSession:         return "agent:\(b.ruleSignal?.pattern ?? b.title)"   // the repo, not a folder name two repos can share
         case .foregroundSamples:
             if let sig = b.ruleSignal { return "fg:\(sig.kind.rawValue):\(sig.pattern)" }
@@ -495,7 +494,6 @@ struct TimelineView: View {
     private func ignoredTag(_ block: TimelineBlock) -> String {
         switch block.track {
         case .calendar: return "Ignored"
-        case .calls:    return "Ignored call"
         default:        return "Ignored repo"
         }
     }
@@ -556,7 +554,7 @@ struct TimelineView: View {
                 Toggle(track.label, isOn: laneBinding(track))
             }
             Divider()
-            Toggle("Show hidden apps and hosts, ignored meetings and calls", isOn: $showHidden)
+            Toggle("Show hidden apps and hosts and ignored meetings", isOn: $showHidden)
                 .disabled(!hasHiddenContent)
         } label: {
             Label("Lanes", systemImage: "rectangle.split.3x1")
@@ -816,7 +814,6 @@ struct TimelineView: View {
     private func trackTint(_ track: TimelineBlock.Track) -> Color {
         switch track {
         case .calendar:   return .blue
-        case .calls:      return .orange
         case .foreground: return .green
         case .claudeCode: return .pink
         }
@@ -825,7 +822,6 @@ struct TimelineView: View {
     private func trackIcon(_ track: TimelineBlock.Track) -> String {
         switch track {
         case .calendar:   return "calendar"
-        case .calls:      return "mic.fill"
         case .foreground: return "macwindow"
         case .claudeCode: return "sparkles"
         }
@@ -834,7 +830,6 @@ struct TimelineView: View {
     private func blocks(for track: TimelineBlock.Track) -> [TimelineBlock] {
         switch track {
         case .calendar:   return bundle.calendar
-        case .calls:      return bundle.calls
         case .foreground: return bundle.foreground
         case .claudeCode: return bundle.claudeCode
         }
@@ -1125,8 +1120,6 @@ struct TimelineView: View {
             }
         case .calendar:
             glyph(block.isIgnored ? "eye.slash" : "calendar")
-        case .calls:
-            glyph(block.isIgnored ? "eye.slash" : "mic.fill")
         case .claudeCode:
             glyph("sparkles")
         }
@@ -1171,8 +1164,6 @@ struct TimelineView: View {
             case .calendar:
                 attr = block.eventAttribution == .ignored(source: .series)
                     ? "Ignored (series) — click to restore" : "Ignored — click to restore"
-            case .calls:
-                attr = "Ignored call — restore in Review's Ignored filter"
             default:
                 attr = "Ignored repo — restore in Review's Ignored filter"
             }
@@ -1252,16 +1243,15 @@ struct TimelineView: View {
         do {
             let allSamples = try state.database.samples(in: dayInterval)
             let rawEvents = try state.database.calendarEvents(in: dayInterval)
-            let micSessions = try state.database.micSessions(in: dayInterval)
             let matcher = try RuleMatcher.load(from: state.database)
-            let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions, matcher: matcher)
+            // Meetings at their booked time, as the report bills them.
+            let events = rawEvents
             let sessions = try state.database.sessions(in: dayInterval)
             let claudeDeltas = try state.database.claudeActiveDeltas(in: dayInterval)
             customers = try state.database.allCustomers()
             projects = try state.database.allProjects()
             let hidden = try state.database.allHiddenSignals()
             hasIgnoredMeetings = events.contains { matcher.attribute(event: $0).isIgnored }
-                || micSessions.contains { $0.isIgnored }
             // Ignored repos are always drawn (dimmed), so only hidden apps and
             // hosts make the reveal toggle change anything.
             hasHiddenSignals = hidden.contains { $0.kind == .appBundleID || $0.kind == .urlHost }
@@ -1273,7 +1263,7 @@ struct TimelineView: View {
                 events: events,
                 sessions: sessions,
                 claudeDeltas: claudeDeltas,
-                micSessions: micSessions,
+                cellsCalls: try state.database.cellsCalls(in: dayInterval),
                 matcher: matcher,
                 sampleIntervalSeconds: AppSettings.sampleIntervalSeconds,
                 claudeIdleThresholdSeconds: idleThreshold,
@@ -1284,8 +1274,9 @@ struct TimelineView: View {
             // Review's backlog for the day.
             let report = WeeklyReport.compute(
                 week: dayInterval, samples: allSamples, events: events, sessions: sessions,
-                claudeDeltas: claudeDeltas, micSessions: micSessions,
-                idleThresholdSeconds: idleThreshold, matcher: matcher,
+                claudeDeltas: claudeDeltas, overlapChoices: try state.database.meetingOverlapChoices(),
+                cellsCalls: try state.database.cellsCalls(in: dayInterval),
+                matcher: matcher,
                 sampleIntervalSeconds: AppSettings.sampleIntervalSeconds, rounding: AppSettings.reportRounding)
             dayActiveSeconds = report.activeHours * 3600
             dayAttributedSeconds = report.grandTotal * 3600
@@ -1295,7 +1286,12 @@ struct TimelineView: View {
                 idleThresholdSeconds: idleThreshold, minMinutes: AppSettings.reviewMinMinutes)
             dayOpenCount = open.count
             dayOpenSeconds = open.reduce(0) { $0 + $1.totalSeconds }
-            dayMeetingSeconds = bundle.calendar.filter { !$0.isIgnored }.reduce(0) { $0 + $1.durationSeconds }
+            // What meetings bill today after overlaps, as the report counts them.
+            dayMeetingSeconds = MeetingBilling.billed(events: events, matcher: matcher,
+                                                      choices: try state.database.meetingOverlapChoices())
+                .flatMap(\.intervals)
+                .compactMap { $0.intersectionIfPositive(with: dayInterval)?.duration }
+                .reduce(0, +)
             recomputeDerived()
             loadError = nil
             focusPendingBlock()
@@ -1782,8 +1778,6 @@ private struct ReattributePopover: View {
                 try state.database.setClaudeSessionAttribution(sessionIDs: [id] + extraSessionIDs, customerID: customerID, projectID: projectID)
             case .foregroundSamples(let ids):
                 try state.database.setSampleAttribution(sampleIDs: ids, customerID: customerID, projectID: projectID)
-            case .micSession(let id):
-                try state.database.setMicSessionAttribution(id: id, customerID: customerID, projectID: projectID)
             }
             onSaved()
         } catch let e {

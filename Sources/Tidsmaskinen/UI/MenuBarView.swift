@@ -173,7 +173,7 @@ struct MenuBarView: View {
     /// labels stay readable at the tray's width.
     private var healthStripe: some View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 3), spacing: 4) {
-            ForEach([CaptureHealth.Check.accessibility, .chrome, .microphone, .calendar, .hooks, .menuBar]) { check in
+            ForEach([CaptureHealth.Check.accessibility, .chrome, .agentFocus, .calendar, .cells, .hooks, .menuBar]) { check in
                 let st = state.health.status(check)
                 Button {
                     state.settingsTarget = .setup
@@ -295,23 +295,13 @@ struct MenuBarView: View {
         let cal = Calendar.weekStartingMonday()
         let week = cal.currentWeekInterval()
         let sampleInterval = AppSettings.sampleIntervalSeconds
-        let idleMinutes = AppSettings.claudeIdleThresholdMinutes
         let rounding = AppSettings.reportRounding
         reloadTask = Task { @MainActor in
             do {
                 let (report, now) = try await Task.detached(priority: .utility) { () -> (WeeklyReport, NowCard?) in
-                    let samples = try db.samples(in: week)
-                    let rawEvents = try db.calendarEvents(in: week)
-                    let micSessions = try db.micSessions(in: week)
                     let matcher = try RuleMatcher.load(from: db)
-                    let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions, matcher: matcher)
-                    let sessions = try db.sessions(in: week)
-                    let deltas = try db.claudeActiveDeltas(in: week)
-                    let report = WeeklyReport.compute(
-                        week: week, samples: samples, events: events, sessions: sessions,
-                        claudeDeltas: deltas, micSessions: micSessions,
-                        idleThresholdSeconds: TimeInterval(idleMinutes * 60),
-                        matcher: matcher, sampleIntervalSeconds: sampleInterval, rounding: rounding)
+                    let report = try WeeklyReport.load(from: db, week: week, matcher: matcher,
+                                                       sampleIntervalSeconds: sampleInterval, rounding: rounding)
                     return (report, Self.nowCard(recent: try db.recentSamples(limit: 120), matcher: matcher))
                 }.value
                 if Task.isCancelled { return }

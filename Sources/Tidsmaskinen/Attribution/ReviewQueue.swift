@@ -26,7 +26,7 @@ struct ReviewRow: Identifiable {
         case open
         /// `scope` says how: "Always", "This week", "This day", "Bounded" (a rule
         /// window), "Manual" (per-item override), "Series", "This meeting",
-        /// "Pinned" (a saved call), or "Mixed" when the period's time splits
+        /// or "Mixed" when the period's time splits
         /// across several attributions — `customerID` is then the largest share.
         case attributed(customerID: String, projectID: String?, scope: String)
         case ignored
@@ -118,7 +118,7 @@ enum ReviewQueue {
             return min(max(d, 0), dayCount - 1)
         }
         /// Seconds of [start, end) ∩ interval on each day of the period, so a
-        /// meeting, call or coding session that crosses midnight lands on both
+        /// meeting that crosses midnight lands on both
         /// days as it does in the report.
         func spread(_ start: Date, _ end: Date) -> [Double] {
             var d = Array(repeating: 0.0, count: dayCount)
@@ -196,19 +196,62 @@ enum ReviewQueue {
         var hosts: [String: Acc] = [:]
         var paths: [String: [String: Acc]] = [:]     // host → path → acc
         var apps: [String: Acc] = [:]
+        var agentSessions: [String: Acc] = [:]      // focused agent sessions outside a git repo
 
-        for sample in try database.samples(in: interval) where !sample.isIdle {
-            let seconds = min(Double(sampleIntervalSeconds), interval.end.timeIntervalSince(sample.capturedAt))
+        // The same focus timeline as the report: a meeting owns its booked
+        // slot, and each sample counts until the next one, minus meeting time.
+        let events = try database.calendarEvents(in: interval)
+        let overlapChoices = try database.meetingOverlapChoices()
+        let billed = MeetingBilling.billed(events: events, matcher: m, choices: overlapChoices)
+        // Cells in front during one of your calls is that call's time.
+        let cellsCalls = try database.cellsCalls(in: interval)
+        let callIndex = CellsCallIndex(calls: cellsCalls)
+        // Ignored calls are listed with the time they would have counted.
+        let ignoredIndex = CellsCallIndex(calls: cellsCalls.filter(\.isIgnored), includeIgnored: true)
+        var callAccs: [String: Acc] = [:]
+        var ignoredSeconds: [String: [Double]] = [:]
+        let spans = FocusSpans.spans(samples: try database.samples(in: interval),
+                                     sampleInterval: TimeInterval(sampleIntervalSeconds),
+                                     blocked: MeetingBilling.blocked(events: events, matcher: m),
+                                     isActive: callIndex.mayCount)
+        func within(_ iv: DateInterval) -> Double { iv.intersectionIfPositive(with: interval)?.duration ?? 0 }
+        for (sample, pieces) in spans {
             let day = dayIndex(sample.capturedAt)
+            if ActivitySample.isCells(sample.appBundleID), !ignoredIndex.isEmpty {
+                for case let (part, call?) in pieces.flatMap(ignoredIndex.split) {
+                    ignoredSeconds[call.id, default: Array(repeating: 0, count: dayCount)][day] += within(part)
+                }
+            }
+            // Cut at your join and leave times: inside a stay it is the call's.
+            var seconds = 0.0
+            for (part, call) in callIndex.billable(sample, pieces: pieces) {
+                guard let call else { seconds += within(part); continue }
+                let secs = within(part)
+                guard secs > 0 else { continue }
+                let r = m.attribute(cellsCall: call)
+                var acc = callAccs[call.id] ?? Acc(days: dayCount)
+                acc.add(secs, day: day, r)
+                acc.note(secs, at: sample.capturedAt, open: r.customer == nil, detail: nil)
+                callAccs[call.id] = acc
+            }
+            guard seconds > 0 else { continue }
             let r = m.attribute(sample)
             let open = r.customer == nil
             let title = sample.windowTitle?.trimmingCharacters(in: .whitespaces)
-            if let remote = sample.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: remote) {
+            // Claude or Codex in front: the session's repo is the signal, and
+            // a session outside any repo is its own row to pin.
+            let session = m.session(for: sample)
+            if let remote = sample.gitRemoteURL ?? session?.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: remote) {
                 var acc = repos[slug] ?? Acc(days: dayCount)
                 acc.hidden = m.isRepoIgnored(slug: slug)
                 acc.add(seconds, day: day, r)
                 acc.note(seconds, at: sample.capturedAt, open: open, detail: title)
                 repos[slug] = acc
+            } else if let session {
+                var acc = agentSessions[session.id] ?? Acc(days: dayCount)
+                acc.add(seconds, day: day, r)
+                acc.note(seconds, at: sample.capturedAt, open: open, detail: nil)
+                agentSessions[session.id] = acc
             } else if let host = sample.chromeHost {
                 let path = sample.chromeURL.flatMap { RuleMatcher.urlPathPrefix($0) }
                 if let path {
@@ -233,30 +276,6 @@ enum ReviewQueue {
                 apps[bundle] = acc
             }
         }
-        let sessionSeconds = try database.sessionActiveSeconds(in: interval, idleThresholdSeconds: idleThresholdSeconds)
-        // Delta-backed sessions know when they were active, so an overnight
-        // session splits across its days; the total stays `sessionActiveSeconds`.
-        var deltaDays: [String: [Double]] = [:]
-        for delta in try database.claudeActiveDeltas(in: interval) where delta.gainedSeconds > 0 {
-            let days = spread(delta.occurredAt.addingTimeInterval(-delta.gainedSeconds), delta.occurredAt)
-            var acc = deltaDays[delta.sessionID] ?? Array(repeating: 0.0, count: dayCount)
-            for i in 0..<dayCount { acc[i] += days[i] }
-            deltaDays[delta.sessionID] = acc
-        }
-        for session in try database.sessions(in: interval) {
-            guard let remote = session.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: remote),
-                  let seconds = sessionSeconds[session.id], seconds > 0 else { continue }
-            var acc = repos[slug] ?? Acc(days: dayCount)
-            acc.hidden = m.isRepoIgnored(slug: slug)
-            let attribution = m.attribute(session: session)
-            if let days = deltaDays[session.id], case let total = days.reduce(0, +), total > 0 {
-                for i in 0..<dayCount where days[i] > 0 { acc.add(seconds * days[i] / total, day: i, attribution) }
-            } else {
-                acc.add(seconds, day: dayIndex(max(session.startedAt, interval.start)), attribution)
-            }
-            repos[slug] = acc
-        }
-
         var rows: [ReviewRow] = []
         func signalRow(_ kind: AppDatabase.SignalAggregate.Kind, _ value: String, _ acc: Acc, ambient: Bool = false) -> ReviewRow {
             let st = status(acc, ambientWhenOpen: ambient)
@@ -267,6 +286,15 @@ enum ReviewQueue {
                              evidence: acc.evidence(openOnly: st == .open), stretchCount: acc.stretchCount(openOnly: st == .open))
         }
         for (slug, acc) in repos { rows.append(signalRow(.gitRepoSlug, slug, acc)) }
+        for (id, acc) in agentSessions {
+            guard let session = m.sessionsByID[id] else { continue }
+            let st = status(acc, ambientWhenOpen: false)
+            let seconds = st == .open ? acc.open : acc.total
+            rows.append(ReviewRow(unit: .agentSession(session: session, seconds: seconds), status: st,
+                                  perDay: st == .open ? acc.openPerDay : acc.perDay,
+                                  belowThreshold: st == .open && seconds < minSec,
+                                  evidence: acc.evidence(openOnly: st == .open), stretchCount: acc.stretchCount(openOnly: st == .open)))
+        }
         for (bundle, acc) in apps { rows.append(signalRow(.appBundleID, bundle, acc, ambient: true)) }
         for (host, acc) in hosts {
             let st = status(acc, ambientWhenOpen: false)
@@ -286,15 +314,42 @@ enum ReviewQueue {
                                   evidence: acc.evidence(openOnly: true), stretchCount: acc.stretchCount(openOnly: true)))
         }
 
-        // Meetings, stretched over the mic time each one owns (as the report and
-        // My day count them). Declined bookings never bill, so they are not listed.
-        let rawEvents = try database.calendarEvents(in: interval)
-        let micSessions = try database.micSessions(in: interval)
-        let extendedEvents = micSessions.isEmpty ? rawEvents
-            : CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions, matcher: m)
-        let events = extendedEvents.filter { $0.rsvpStatus != "declined" }
+        // Cells calls: the minutes Cells was in front during your stays. A call
+        // in a linked Cell takes the Cell's customer; a DM or group call is
+        // open until pinned. Ignored calls are listed to restore them.
+        for call in cellsCalls {
+            let chat = m.cellsChatsByID[call.chatID]
+            if call.isIgnored {
+                guard let perDay = ignoredSeconds[call.id], case let total = perDay.reduce(0, +), total > 0 else { continue }
+                rows.append(ReviewRow(unit: .cellsCall(call: call, chat: chat, seconds: total),
+                                      status: .ignored, perDay: perDay, belowThreshold: false))
+                continue
+            }
+            guard let acc = callAccs[call.id], acc.total > 0 else { continue }
+            let r = m.attribute(cellsCall: call)
+            let st: ReviewRow.Status = r.customer.map {
+                .attributed(customerID: $0.id, projectID: r.project?.id, scope: call.customerID != nil ? "Pinned" : "Cell")
+            } ?? .open
+            rows.append(ReviewRow(unit: .cellsCall(call: call, chat: chat, seconds: acc.total), status: st,
+                                  perDay: acc.perDay, belowThreshold: st == .open && acc.total < minSec,
+                                  evidence: acc.evidence(openOnly: false), stretchCount: acc.stretchCount(openOnly: false)))
+        }
+
+        // Meetings at their booked time. Declined bookings and all-day holds
+        // never bill, so they are not listed.
+        let meetings = events.filter { $0.rsvpStatus != "declined" && !$0.isAllDay }
         func eventDays(_ e: CalendarEvent) -> [Double] { spread(e.startAt, e.endAt) }
-        for (seriesID, occurrences) in Dictionary(grouping: events.filter { $0.seriesMasterID != nil }, by: { $0.seriesMasterID! }) {
+        // What each meeting bills in the period after overlaps: a tentative
+        // booking that lost its whole slot has nothing to assign.
+        var billedByID: [String: [DateInterval]] = [:]
+        for b in billed { billedByID[b.event.id] = b.intervals.compactMap { $0.intersectionIfPositive(with: interval) } }
+        func billedSeconds(_ e: CalendarEvent) -> Double { billedByID[e.id]?.reduce(0) { $0 + $1.duration } ?? 0 }
+        func billedDays(_ e: CalendarEvent) -> [Double] {
+            var d = Array(repeating: 0.0, count: dayCount)
+            for iv in billedByID[e.id] ?? [] { let x = spread(iv.start, iv.end); for i in 0..<dayCount { d[i] += x[i] } }
+            return d
+        }
+        for (seriesID, occurrences) in Dictionary(grouping: meetings.filter { $0.seriesMasterID != nil }, by: { $0.seriesMasterID! }) {
             let sorted = occurrences.sorted { $0.startAt < $1.startAt }
             var retained: [CalendarEvent] = []   // the occurrences the series row stands for
             var perDay = Array(repeating: 0.0, count: dayCount)
@@ -302,8 +357,10 @@ enum ReviewQueue {
             var open = 0.0, total = 0.0
             var shares: [Share: Double] = [:]
             for e in sorted {
-                let secs = e.seconds(within: interval)
                 let attribution = m.attribute(event: e)
+                // Ignored time is shown whole so it can be restored; anything
+                // else counts what it bills.
+                let secs = attribution.isIgnored ? e.seconds(within: interval) : billedSeconds(e)
                 // An occurrence ignored on its own is its own row and not part
                 // of the series' time; a series ignore covers every occurrence.
                 if case .ignored(.event) = attribution {
@@ -315,7 +372,7 @@ enum ReviewQueue {
                 }
                 retained.append(e)
                 total += secs
-                let days = eventDays(e)
+                let days = attribution.isIgnored ? eventDays(e) : billedDays(e)
                 for i in 0..<dayCount { perDay[i] += days[i] }
                 switch attribution {
                 case .unattributed: open += secs; for i in 0..<dayCount { openPerDay[i] += days[i] }
@@ -339,11 +396,13 @@ enum ReviewQueue {
             rows.append(ReviewRow(unit: unit, status: st, perDay: st == .open ? openPerDay : perDay,
                                   belowThreshold: st == .open && seconds < minSec))
         }
-        for var event in events where event.seriesMasterID == nil {
-            let perDay = eventDays(event)
-            let secs = event.seconds(within: interval)
+        for var event in meetings where event.seriesMasterID == nil {
+            let attribution = m.attribute(event: event)
+            let perDay = attribution.isIgnored ? eventDays(event) : billedDays(event)
+            let secs = attribution.isIgnored ? event.seconds(within: interval) : billedSeconds(event)
+            if !attribution.isIgnored, secs <= 0 { continue }   // lost its whole slot to another booking
             let st: ReviewRow.Status
-            switch m.attribute(event: event) {
+            switch attribution {
             case .unattributed: st = .open
             case .ignored: st = .ignored
             case .attributed(let c, let p, _): st = .attributed(customerID: c.id, projectID: p?.id, scope: "This meeting")
@@ -353,39 +412,21 @@ enum ReviewQueue {
             rows.append(ReviewRow(unit: .event(event), status: st, perDay: perDay, belowThreshold: st == .open && secs < minSec))
         }
 
-        // Ad-hoc calls: mic time minus the meetings each session *is*, mirroring
-        // the Calls tab, so a huddle can be attributed from Review too.
-        if !micSessions.isEmpty {
-            let owned = CalendarEvent.meetingMicSessionIDs(events: extendedEvents, micSessions: micSessions, matcher: m)
-            for session in micSessions {
-                guard let endedAt = session.endedAt, endedAt > session.startedAt else { continue }
-                var perDay = Array(repeating: 0.0, count: dayCount)
-                for range in CallSegment.adHocRanges(of: session, endedAt: endedAt, events: extendedEvents,
-                                                     owned: owned, minimumSeconds: 30) {
-                    let days = spread(range.start, range.end)
-                    for i in 0..<dayCount { perDay[i] += days[i] }
-                }
-                let adHoc = perDay.reduce(0, +)
-                guard adHoc > 0 else { continue }
-                let st: ReviewRow.Status
-                if session.isIgnored { st = .ignored }
-                else {
-                    let r = m.attribute(micSession: session)
-                    if let c = r.customer {
-                        st = .attributed(customerID: c.id, projectID: r.project?.id,
-                                         scope: r.matchingRule == nil ? "Pinned" : ReviewQueue.scopeLabel(r.matchingRule))
-                    } else { st = .open }
-                }
-                rows.append(ReviewRow(unit: .call(session: session, seconds: adHoc), status: st,
-                                      perDay: perDay, belowThreshold: st == .open && adHoc < minSec))
-            }
+        // Two accepted meetings at once bill twice until the user says which
+        // one they were in.
+        for booking in MeetingBilling.doubleBookings(events: meetings, matcher: m, choices: overlapChoices)
+        where !booking.isResolved {
+            guard let clipped = booking.overlap.intersectionIfPositive(with: interval) else { continue }
+            rows.append(ReviewRow(unit: .doubleBooking(booking), status: .open,
+                                  perDay: spread(clipped.start, clipped.end),
+                                  belowThreshold: clipped.duration < minSec))
         }
         return rows
     }
 
     /// Aggregate review backlog across the current week plus the previous
     /// `weeksBack` weeks. The always-on surfaces (menu-bar glance) use this so
-    /// "all reviewed" reflects *every* recent week — a stray huddle left
+    /// "all reviewed" reflects *every* recent week — a stray meeting left
     /// unattributed last week no longer hides behind a clean current week.
     struct Rolling {
         var totalCount: Int = 0
@@ -413,7 +454,7 @@ enum ReviewQueue {
         let cal = Calendar.weekStartingMonday()
         let currentStart = cal.currentWeekInterval(reference: now).start
         var result = Rolling()
-        // Walk oldest → newest. A call or meeting crossing a week boundary is
+        // Walk oldest → newest. A meeting crossing a week boundary is
         // queued in both weeks (each clipped), so each unit id is counted once
         // and the oldest week owns it — Review still lands where the backlog
         // tail begins. Seconds stay summed: the clipped parts are disjoint.

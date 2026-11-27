@@ -18,9 +18,11 @@ final class ReportRoundingTests: XCTestCase {
         let week = cal.currentWeekInterval(reference: monday)
         var samples: [ActivitySample] = []
         var id: Int64 = 1
+        var blockStart: TimeInterval = 0   // one customer after another: focus is one thing at a time
         for (cust, minutes) in [("A", 6), ("B", 6), ("C", 12)] {
+            defer { blockStart += Double(minutes * 60) }
             for i in 0..<(minutes * 4) {   // 15 s samples
-                samples.append(ActivitySample(id: id, capturedAt: monday.addingTimeInterval(Double(i) * 15 + Double(id) * 0.001),
+                samples.append(ActivitySample(id: id, capturedAt: monday.addingTimeInterval(blockStart + Double(i) * 15),
                                               appBundleID: "app.\(cust)", appName: nil, windowTitle: nil,
                                               chromeURL: nil, chromeHost: nil, gitRepoPath: nil, gitRemoteURL: nil,
                                               isIdle: false, customerID: cust, projectID: nil))

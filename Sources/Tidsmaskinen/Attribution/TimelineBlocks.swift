@@ -4,12 +4,11 @@ import Foundation
 /// events / sessions and are not persisted as their own table.
 struct TimelineBlock: Identifiable {
     enum Track: String, CaseIterable {
-        case calendar, calls, foreground, claudeCode
+        case calendar, foreground, claudeCode
 
         var label: String {
             switch self {
             case .calendar:    return "Calendar"
-            case .calls:       return "Calls"
             case .foreground:  return "Foreground"
             case .claudeCode:  return "Coding agents"
             }
@@ -21,8 +20,6 @@ struct TimelineBlock: Identifiable {
         case claudeSession(id: String)
         /// Inclusive range of sample IDs (sorted) that make up this foreground block.
         case foregroundSamples(ids: [Int64])
-        /// An ad-hoc call: the mic session minus the meetings it is.
-        case micSession(id: String)
     }
 
     /// The signal a time-bounded/permanent rule would be built from when the
@@ -52,7 +49,7 @@ struct TimelineBlock: Identifiable {
     let seriesMasterID: String?
     /// Signal for "attribute this signal for today/this week/always" from My day.
     var ruleSignal: RuleSignal? = nil
-    /// Ignored meeting or call, or work in an ignored repo: drawn dimmed and
+    /// Ignored meeting, or work in an ignored repo: drawn dimmed and
     /// excluded from the report, never silently dropped from the day.
     var isIgnored: Bool = false
 
@@ -64,7 +61,6 @@ struct TimelineBlock: Identifiable {
 enum TimelineBuilder {
     struct DayBundle {
         let calendar: [TimelineBlock]
-        let calls: [TimelineBlock]
         let foreground: [TimelineBlock]
         let claudeCode: [TimelineBlock]
     }
@@ -86,20 +82,19 @@ enum TimelineBuilder {
         }
     }
 
-    /// Build all four tracks for a given day. When `includeIgnoredEvents` is
-    /// false (the default), ignored calendar events and calls are dropped;
+    /// Build the tracks for a given day. When `includeIgnoredEvents` is
+    /// false (the default), ignored calendar events are dropped;
     /// when true, they're emitted flagged `isIgnored` so the Timeline can
     /// render them faded and the user can recover from an accidental ignore.
     /// Work in ignored repos is always emitted, flagged `isIgnored`, so the
     /// day stays complete and the repo can be un-ignored from where it shows.
-    /// `events` should already be mic-extended (`CalendarEvent.withMicOverrun`)
-    /// so the calls lane subtracts exactly the meetings each session is.
+    /// `events` are drawn at their booked times, as the report bills them.
     static func build(day: DateInterval,
                       samples: [ActivitySample],
                       events: [CalendarEvent],
                       sessions: [ClaudeSession],
                       claudeDeltas: [AppDatabase.ClaudeActiveDelta] = [],
-                      micSessions: [MicSession] = [],
+                      cellsCalls: [CellsCall] = [],
                       now: Date = Date(),
                       matcher: RuleMatcher,
                       sampleIntervalSeconds: Int,
@@ -132,43 +127,11 @@ enum TimelineBuilder {
             )
         }
 
-        // ---- Calls: each session's ad-hoc time (mic minus the meetings it is) ----
-        let owned = micSessions.isEmpty ? [:]
-            : CalendarEvent.meetingMicSessionIDs(events: events, micSessions: micSessions, now: now, matcher: matcher)
-        let callBlocks: [TimelineBlock] = micSessions.flatMap { session -> [TimelineBlock] in
-            if session.isIgnored && !includeIgnoredEvents { return [] }
-            let end = session.endedAt ?? min(now, day.end)
-            guard end > session.startedAt else { return [] }
-            let attribution = matcher.attribute(micSession: session)
-            let apps = ReviewUnit.callApps(session)
-            return CallSegment.adHocRanges(of: session, endedAt: end, events: events, owned: owned, minimumSeconds: 30)
-                .enumerated().compactMap { i, range -> TimelineBlock? in
-                    let s = max(range.start, day.start), e = min(range.end, day.end)
-                    guard e > s else { return nil }
-                    return TimelineBlock(
-                        id: "call-\(session.id)-\(i)",
-                        track: .calls,
-                        source: .micSession(id: session.id),
-                        startedAt: s,
-                        endedAt: e,
-                        title: ReviewUnit.callTitle(session),
-                        subtitle: apps.isEmpty ? nil : apps.joined(separator: ", "),
-                        attribution: attribution,
-                        eventAttribution: nil,
-                        hasManualOverride: session.customerID != nil,
-                        isIdle: false,
-                        appBundleID: nil,
-                        seriesMasterID: nil,
-                        ruleSignal: session.learnableRule.map { TimelineBlock.RuleSignal(kind: $0.kind, pattern: $0.pattern) },
-                        isIgnored: session.isIgnored
-                    )
-                }
-        }
-
         // ---- Foreground (group consecutive same-identity samples) ----
         let foregroundBlocks = groupForeground(samples: samples,
                                                sampleIntervalSeconds: sampleIntervalSeconds,
-                                               matcher: matcher)
+                                               matcher: matcher,
+                                               calls: CellsCallIndex(calls: cellsCalls, now: now))
 
         // ---- Claude Code sessions ----
         // A session spans wall-clock from start to end, but most of that can be
@@ -244,15 +207,29 @@ enum TimelineBuilder {
         }
 
         return DayBundle(calendar: calendarBlocks,
-                         calls: callBlocks,
                          foreground: foregroundBlocks,
                          claudeCode: claudeBlocks)
     }
 
     private static func groupForeground(samples: [ActivitySample],
                                         sampleIntervalSeconds: Int,
-                                        matcher: RuleMatcher) -> [TimelineBlock] {
-        let sorted = samples.sorted { $0.capturedAt < $1.capturedAt }
+                                        matcher: RuleMatcher,
+                                        calls: CellsCallIndex = CellsCallIndex(calls: [])) -> [TimelineBlock] {
+        // Cells in front during your call is the call, as the report bills it:
+        // not idle, and attributed through the call unless assigned by hand.
+        func call(_ s: ActivitySample) -> CellsCall? {
+            guard s.customerID == nil, ActivitySample.isCells(s.appBundleID) else { return nil }
+            return calls.call(at: s.capturedAt)
+        }
+        func attribution(_ s: ActivitySample) -> AttributionResult {
+            call(s).map(matcher.attribute(cellsCall:)) ?? matcher.attribute(s)
+        }
+        let sorted = samples.sorted { $0.capturedAt < $1.capturedAt }.map { s -> ActivitySample in
+            guard s.isIdle, call(s) != nil else { return s }
+            var active = s
+            active.isIdle = false
+            return active
+        }
         let interval = TimeInterval(sampleIntervalSeconds)
         let maxGap: TimeInterval = max(60, interval * 3)
 
@@ -265,10 +242,18 @@ enum TimelineBuilder {
         }
         var groups: [Acc] = []
 
+        // A block is one attribution: a new session, or a rule that starts
+        // or ends mid-stretch, starts a new block instead of being labelled
+        // by the stretch's first sample.
+        func owner(_ s: ActivitySample) -> String {
+            let r = attribution(s)
+            return "\(r.customer?.id ?? "")/\(r.project?.id ?? "")"
+        }
         for sample in sorted {
             guard let sid = sample.id else { continue }
             if var prev = groups.last,
                sameBlockIdentity(prev.representative, sample),
+               owner(prev.representative) == owner(sample),
                sample.capturedAt.timeIntervalSince(prev.last) <= maxGap {
                 prev.ids.append(sid)
                 prev.samples.append(sample)
@@ -284,15 +269,21 @@ enum TimelineBuilder {
         }
 
         return groups.map { g in
-            let attribution = matcher.attribute(g.representative)
+            let attribution = attribution(g.representative)
             let override = (g.representative.customerID != nil)
             let title = g.representative.appName ?? g.representative.appBundleID ?? "—"
-            let subtitle = representativeSubtitle(for: g.samples)
+            let rep = g.representative
+            // Claude or Codex in front: the session's repo or folder says what it was.
+            let session = matcher.session(for: rep)
+            let callChat = call(rep).map { matcher.cellsChatsByID[$0.chatID]?.name ?? "Cells call" }
+            let subtitle = callChat.map { "Call · \($0)" } ?? session.flatMap { s in
+                s.gitRemoteURL.flatMap(RuleMatcher.gitSlug(fromRemote:))
+                    ?? (s.gitRepoPath ?? s.cwd).map { ($0 as NSString).lastPathComponent }
+            } ?? representativeSubtitle(for: g.samples)
 
             // Most-specific signal a rule could attach to: repo > host > app.
-            let rep = g.representative
             let signal: TimelineBlock.RuleSignal? = {
-                if let url = rep.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: url) {
+                if let url = rep.gitRemoteURL ?? session?.gitRemoteURL, let slug = RuleMatcher.gitSlug(fromRemote: url) {
                     return TimelineBlock.RuleSignal(kind: .gitRepoSlug, pattern: slug)
                 }
                 if let host = rep.chromeHost { return TimelineBlock.RuleSignal(kind: .urlHost, pattern: host) }
@@ -321,7 +312,7 @@ enum TimelineBuilder {
                 appBundleID: g.representative.appBundleID,
                 seriesMasterID: nil,
                 ruleSignal: signal,
-                isIgnored: matcher.isRepoIgnored(remoteURL: rep.gitRemoteURL)
+                isIgnored: matcher.isRepoIgnored(sample: rep)
             )
         }
     }
@@ -335,6 +326,7 @@ enum TimelineBuilder {
             && a.chromeHost == b.chromeHost
             && a.gitRepoPath == b.gitRepoPath
             && a.isIdle == b.isIdle
+            && a.agentSessionID == b.agentSessionID
             && a.customerID == b.customerID
             && a.projectID == b.projectID
     }

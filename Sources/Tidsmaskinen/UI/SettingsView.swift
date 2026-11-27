@@ -59,6 +59,8 @@ struct SettingsView: View {
     @State private var launchAtLogin: Bool = LoginItemManager.isEnabled
     @State private var loginItemError: String?
     @State private var commandCenterTokenInput: String = ""
+    @State private var cellsTokenInput: String = ""
+    @AppStorage(SettingsKey.cellsBaseURL) private var cellsBaseURL: String = ""
     @State private var commandCenterCustomerCount: Int = 0
     @State private var commandCenterProjectCount: Int = 0
 
@@ -502,6 +504,9 @@ struct SettingsView: View {
         Section("Command Center") {
             commandCenterSection
         }
+        Section("Cells") {
+            cellsSection
+        }
         Section("Claude Code") {
             AgentHookSettingsView(provider: .claude)
         }
@@ -652,6 +657,59 @@ struct SettingsView: View {
             }
 
             if let err = state.commandCenterLastError {
+                Text(err).font(.caption).foregroundStyle(.red)
+            }
+        }
+    }
+
+    /// A read-only Cells token: your calls (with when you joined and left)
+    /// and which Cell each chat is, so Cells calls and chats get a customer.
+    private var cellsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if state.cellsTokenInvalid {
+                Label("Token rejected — paste a fresh one below.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.red)
+            }
+            HStack {
+                SecureField(state.cellsHasToken ? "Token saved (paste to replace)" : "Paste read-only token (cells_pat_…)",
+                            text: $cellsTokenInput)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.body.monospaced())
+                Button("Save") {
+                    let token = cellsTokenInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !token.isEmpty else { return }
+                    state.saveCellsToken(token)
+                    cellsTokenInput = ""
+                }
+                .disabled(cellsTokenInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                if state.cellsHasToken {
+                    Button(role: .destructive) { state.clearCellsToken() } label: { Image(systemName: "trash") }
+                        .buttonStyle(.borderless)
+                }
+            }
+            Text("Make one in Cells' settings under Read-only access tokens. It is kept in the macOS Keychain and only reads: your chats and the calls you were in. A call counts for the minutes Cells is in front while you are in it.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("Base URL", text: $cellsBaseURL, prompt: Text(AppSettings.defaultCellsBaseURL))
+                .textFieldStyle(.roundedBorder)
+                .font(.body.monospaced())
+            HStack {
+                if state.cellsIsSyncing {
+                    ProgressView().controlSize(.small)
+                    Text("Syncing…").font(.caption).foregroundStyle(.secondary)
+                } else if let lastSync = state.cellsLastSyncAt {
+                    Text("Last synced \(lastSync.formatted(.relative(presentation: .named)))")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("Not synced yet").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button { Task { await state.refreshCells() } } label: {
+                    Label("Sync now", systemImage: "arrow.clockwise")
+                }
+                .disabled(!state.cellsHasToken || state.cellsIsSyncing)
+            }
+            if let err = state.cellsLastError {
                 Text(err).font(.caption).foregroundStyle(.red)
             }
         }

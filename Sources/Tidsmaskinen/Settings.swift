@@ -12,6 +12,10 @@ enum SettingsKey {
     static let commandCenterEnabled = "commandCenterEnabled"
     static let commandCenterBaseURL = "commandCenterBaseURL"
     static let commandCenterLastSyncAt = "commandCenterLastSyncAt"
+    static let cellsBaseURL = "cellsBaseURL"
+    static let cellsLastSyncAt = "cellsLastSyncAt"
+    static let cellsTokenOrigin = "cellsTokenOrigin"
+    static let cellsHistoryCompleteSince = "cellsHistoryCompleteSince"
     // AppRelocator: "Don't ask again" on the move-to-~/Applications prompt,
     // and whether to re-register the login item after a completed move.
     static let relocationPromptSuppressed = "relocationPromptSuppressed"
@@ -174,4 +178,30 @@ enum AppSettings {
     static func setCommandCenterLastSyncAt(_ date: Date) {
         defaults.set(date, forKey: SettingsKey.commandCenterLastSyncAt)
     }
+
+    // MARK: Cells
+
+    static let defaultCellsBaseURL = "https://cells.ignitestudio.eu"
+
+    static var cellsBaseURL: String {
+        let v = defaults.string(forKey: SettingsKey.cellsBaseURL)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return v.isEmpty ? defaultCellsBaseURL : v
+    }
+
+    static var cellsLastSyncAt: Date? {
+        defaults.object(forKey: SettingsKey.cellsLastSyncAt) as? Date
+    }
+
+    static func setCellsLastSyncAt(_ date: Date) {
+        defaults.set(date, forKey: SettingsKey.cellsLastSyncAt)
+    }
+
+    /// The origin the saved Cells token belongs to; requests go nowhere else.
+    static var cellsTokenOrigin: String? { defaults.string(forKey: SettingsKey.cellsTokenOrigin) }
+    static func setCellsTokenOrigin(_ origin: String?) { defaults.set(origin, forKey: SettingsKey.cellsTokenOrigin) }
+
+    /// Set once a call-history scan has read back to the first-sync horizon;
+    /// cleared with a new token so its account is read in full.
+    static var cellsHistoryCompleteSince: Date? { defaults.object(forKey: SettingsKey.cellsHistoryCompleteSince) as? Date }
+    static func setCellsHistoryCompleteSince(_ date: Date?) { defaults.set(date, forKey: SettingsKey.cellsHistoryCompleteSince) }
 }

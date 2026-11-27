@@ -527,6 +527,11 @@ struct WeeklyReportView: View {
                 Text(g.name).font(.system(size: 13.5, weight: .semibold)).lineLimit(1)
                 Text("\(projectCount) project\(projectCount == 1 ? "" : "s")")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                if let agents = agentHours(customerID: g.id), agents >= 0.05 {
+                    Text("agents \(oneDecimal(agents)) h")
+                        .font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+                        .help("Agent activity for \(g.name) this week, by the hook measure. Context only: it bills nothing.")
+                }
             }
         case .project(_, let p):
             Text(p.name)
@@ -539,8 +544,18 @@ struct WeeklyReportView: View {
     private func lineHelp(_ line: GridLine) -> String {
         switch line {
         case .customer(let g, _): report.map { contributorsHelp(for: g, in: $0) } ?? g.name
-        case .project(let g, let p): "\(g.name) · \(p.name)"
+        case .project(let g, let p):
+            "\(g.name) · \(p.name)" + ((report?.agentHoursByRowID[p.id]).map { $0 >= 0.05 ? " · agents \(oneDecimal($0)) h, not billed" : "" } ?? "")
         }
+    }
+
+    /// Agent activity across a customer's rows: context beside its billed hours.
+    private func agentHours(customerID: String) -> Double? {
+        guard let report else { return nil }
+        let total = report.agentHoursByRowID
+            .filter { $0.key == customerID || $0.key.hasPrefix(customerID + "/") }
+            .values.reduce(0, +)
+        return total > 0 ? total : nil
     }
 
     private func mark(_ line: GridLine) {
@@ -772,24 +787,8 @@ struct WeeklyReportView: View {
                     let matcher = try RuleMatcher.load(from: database)
 
                     func computeWeek(_ interval: DateInterval) throws -> WeeklyReport {
-                        let samples = try database.samples(in: interval)
-                        let rawEvents = try database.calendarEvents(in: interval)
-                        let micSessions = try database.micSessions(in: interval)
-                        let events = CalendarEvent.withMicOverrun(events: rawEvents, micSessions: micSessions, matcher: matcher)
-                        let sessions = try database.sessions(in: interval)
-                        let claudeDeltas = try database.claudeActiveDeltas(in: interval)
-                        return WeeklyReport.compute(
-                            week: interval,
-                            samples: samples,
-                            events: events,
-                            sessions: sessions,
-                            claudeDeltas: claudeDeltas,
-                            micSessions: micSessions,
-                            idleThresholdSeconds: TimeInterval(idleThresholdMinutes * 60),
-                            matcher: matcher,
-                            sampleIntervalSeconds: sampleInterval,
-                            rounding: rounding
-                        )
+                        try WeeklyReport.load(from: database, week: interval, matcher: matcher,
+                                              sampleIntervalSeconds: sampleInterval, rounding: rounding)
                     }
 
                     let report = try computeWeek(weekValue)

@@ -157,6 +157,30 @@ final class HookIngesterTests: XCTestCase {
         XCTAssertEqual(s.activeSeconds, 300, accuracy: 0.001)
     }
 
+    /// The focus recorder can create a session's row before its hooks are
+    /// read. That placeholder's invented start and end must not reject them.
+    func testPlaceholderRowDoesNotSwallowEarlierHookEvents() throws {
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        let placeholderAt = t0.addingTimeInterval(3600)
+        try db.insertSessionIfAbsent(ClaudeSession(
+            id: "sess-1", cwd: nil, transcriptPath: nil, gitRepoPath: nil, gitRemoteURL: nil,
+            startedAt: placeholderAt, endedAt: placeholderAt, lastActivityAt: nil, activeSeconds: 0,
+            promptCount: 0, customerID: nil, projectID: nil, createdAt: placeholderAt, updatedAt: placeholderAt))
+        ingester.handleLine(line("SessionStart", t0))
+        ingester.handleLine(line("UserPromptSubmit", t0.addingTimeInterval(60)))
+        ingester.handleLine(line("Stop", t0.addingTimeInterval(120)))
+        let s = try XCTUnwrap(try session())
+        XCTAssertEqual(s.startedAt, t0)
+        XCTAssertNil(s.endedAt)
+        XCTAssertEqual(s.promptCount, 1)
+        XCTAssertEqual(s.activeSeconds, 120, accuracy: 0.001)
+        // And a placeholder never replaces a row hooks already made.
+        var other = s
+        other.promptCount = 0
+        try db.insertSessionIfAbsent(other)
+        XCTAssertEqual(try session()?.promptCount, 1)
+    }
+
     // MARK: no regression for live sessions
 
     func testOpenSessionStillBillsGapWithinThreshold() throws {
@@ -227,7 +251,7 @@ final class HookIngesterTests: XCTestCase {
         XCTAssertTrue(deltas.allSatisfy { $0.sessionID == captured.id })
     }
 
-    func testCodexActivityReachesTimelineAndWeeklyReport() throws {
+    func testCodexActivityReachesTimelineAndReportContext() throws {
         let start = Date(timeIntervalSince1970: 1_700_000_000)
         for (event, offset) in [("SessionStart", 0.0), ("UserPromptSubmit", 60.0), ("SessionEnd", 180.0)] {
             let raw = line(event, start.addingTimeInterval(offset))
@@ -249,11 +273,10 @@ final class HookIngesterTests: XCTestCase {
         let week = Calendar.weekStartingMonday().currentWeekInterval(reference: start)
         let report = WeeklyReport.compute(week: week, samples: [], sessions: [captured], claudeDeltas: deltas,
                                           matcher: matcher, sampleIntervalSeconds: 15)
-        // The grid rounds to quarter hours; activeHours retains precise time.
-        XCTAssertEqual(report.activeHours, 180.0 / 3600, accuracy: 0.001)
-        XCTAssertEqual(report.rows.count, 1)
-        let contributors = report.breakdownsByRowID.values.flatMap { $0.topContributors }
-        XCTAssertEqual(contributors.first?.kindLabel, "Codex")
+        // Agent activity is context beside the billed hours, never part of them.
+        XCTAssertEqual(report.activeHours, 0)
+        XCTAssertTrue(report.rows.isEmpty)
+        XCTAssertEqual(report.agentHoursByRowID[customer.id] ?? 0, 180.0 / 3600, accuracy: 0.001)
     }
 
     func testInvalidProviderOrTimestampDoesNotCreateSession() throws {

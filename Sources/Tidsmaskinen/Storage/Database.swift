@@ -450,7 +450,227 @@ struct AppDatabase {
             }
         }
 
+        // Which Claude Code session was in front, copied from Claude desktop's
+        // own log before it rotates away, and the agent session each sample
+        // belongs to (Claude via that history, Codex via its window title).
+        migrator.registerMigration("v24_agent_focus") { db in
+            try db.create(table: "claude_focus_events") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("occurredAt", .datetime).notNull().indexed()
+                t.column("seq", .integer).notNull()
+                t.column("kind", .text).notNull()
+                t.column("localSessionID", .text)
+                t.column("cliSessionID", .text)
+                t.uniqueKey(["occurredAt", "seq"])
+            }
+            try db.alter(table: "activity_samples") { t in
+                t.add(column: "agentSessionID", .text)
+            }
+        }
+
+        // Which meeting the user was in when two they accepted overlap.
+        migrator.registerMigration("v25_meeting_overlap_choices") { db in
+            try db.create(table: "meeting_overlap_choices") { t in
+                t.column("eventID", .text).notNull()
+                t.column("otherEventID", .text).notNull()
+                t.column("winnerEventID", .text)
+                t.primaryKey(["eventID", "otherEventID"])
+            }
+        }
+
+        // Cells: the person's chats with their Command Center links, their own
+        // calls with when they joined and left, and the chat open on each sample.
+        migrator.registerMigration("v26_cells") { db in
+            try db.create(table: "cells_chats") { t in
+                t.primaryKey("id", .text)
+                t.column("name", .text).notNull()
+                t.column("kind", .text).notNull()
+                t.column("externalOf", .text)
+                t.column("ccCustomerID", .text)
+                t.column("ccProjectID", .text)
+                t.column("ccProjectName", .text)
+                t.column("syncedAt", .datetime).notNull()
+            }
+            try db.create(table: "cells_calls") { t in
+                t.primaryKey("id", .text)
+                t.column("chatID", .text).notNull()
+                t.column("startedAt", .datetime).notNull().indexed()
+                t.column("endedAt", .datetime)
+                t.column("isLive", .boolean).notNull().defaults(to: false)
+                t.column("staysJSON", .text).notNull().defaults(to: "[]")
+                t.column("customerID", .text)
+                t.column("projectID", .text)
+                t.column("isIgnored", .boolean).notNull().defaults(to: false)
+                t.column("syncedAt", .datetime).notNull()
+                t.column("ccCustomerID", .text)
+                t.column("ccProjectID", .text)
+            }
+            try db.alter(table: "activity_samples") { t in
+                t.add(column: "cellsChatID", .text)
+            }
+        }
+
         try migrator.migrate(dbQueue)
+    }
+
+    // MARK: - Cells
+
+    /// Stores chats as Cells shows them now. Chats no longer listed stay
+    /// with their last known link, so earlier time in them keeps its customer.
+    func upsertCellsChats(_ chats: [CellsChat]) throws {
+        try dbQueue.write { db in
+            for chat in chats { try chat.upsert(db) }
+        }
+    }
+
+    func allCellsChats() throws -> [CellsChat] {
+        try dbQueue.read { db in try CellsChat.fetchAll(db) }
+    }
+
+    /// Stores calls as Cells reports them, keeping each one's pin and ignore.
+    func upsertCellsCalls(_ calls: [CellsCall]) throws {
+        guard !calls.isEmpty else { return }
+        try dbQueue.write { db in
+            for c in calls {
+                try db.execute(sql: """
+                    INSERT INTO cells_calls (id, chatID, startedAt, endedAt, isLive, staysJSON, syncedAt, ccCustomerID, ccProjectID)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET chatID = excluded.chatID, startedAt = excluded.startedAt,
+                        endedAt = excluded.endedAt, isLive = excluded.isLive, staysJSON = excluded.staysJSON,
+                        syncedAt = excluded.syncedAt,
+                        ccCustomerID = coalesce(cells_calls.ccCustomerID, excluded.ccCustomerID),
+                        ccProjectID = coalesce(cells_calls.ccProjectID, excluded.ccProjectID)
+                    """, arguments: [c.id, c.chatID, c.startedAt, c.endedAt, c.isLive, c.staysJSON, c.syncedAt,
+                                     c.ccCustomerID, c.ccProjectID])
+            }
+        }
+    }
+
+    /// Ends calls stored as live that a complete history scan back to
+    /// `startedSince` no longer lists, at the last time they were seen.
+    func closeCellsCalls(startedSince: Date, notIn ids: Set<String>) throws {
+        try dbQueue.write { db in
+            let live = try CellsCall.fetchAll(db, sql: "SELECT * FROM cells_calls WHERE isLive = 1 AND startedAt >= ?",
+                                              arguments: [startedSince])
+            for call in live where !ids.contains(call.id) {
+                try db.execute(sql: "UPDATE cells_calls SET isLive = 0, endedAt = coalesce(endedAt, syncedAt) WHERE id = ?",
+                               arguments: [call.id])
+            }
+        }
+    }
+
+    func latestCellsCallStart() throws -> Date? {
+        try dbQueue.read { db in
+            try Date.fetchOne(db, sql: "SELECT max(startedAt) FROM cells_calls")
+        }
+    }
+
+    /// Calls that overlap `interval` (a live call has no end yet).
+    func cellsCalls(in interval: DateInterval) throws -> [CellsCall] {
+        try dbQueue.read { db in
+            try CellsCall.fetchAll(db, sql: """
+                SELECT * FROM cells_calls
+                WHERE startedAt < ? AND (endedAt IS NULL OR endedAt > ?)
+                ORDER BY startedAt
+                """, arguments: [interval.end, interval.start])
+        }
+    }
+
+    func setCellsCallAttribution(id: String, customerID: String?, projectID: String?) throws {
+        try dbQueue.write { db in
+            try db.execute(sql: "UPDATE cells_calls SET customerID = ?, projectID = ? WHERE id = ?",
+                           arguments: [customerID, projectID, id])
+        }
+    }
+
+    func setCellsCallIgnored(id: String, isIgnored: Bool) throws {
+        try dbQueue.write { db in
+            try db.execute(sql: "UPDATE cells_calls SET isIgnored = ? WHERE id = ?", arguments: [isIgnored, id])
+        }
+    }
+
+    // MARK: - Double bookings
+
+    func meetingOverlapChoices() throws -> [MeetingOverlapChoice] {
+        try dbQueue.read { db in try MeetingOverlapChoice.fetchAll(db) }
+    }
+
+    /// Records which meeting the user was in (nil: both), or with
+    /// `clear` forgets the answer so the overlap is open again.
+    func setMeetingOverlapChoice(_ choice: MeetingOverlapChoice, clear: Bool = false) throws {
+        try dbQueue.write { db in
+            if clear {
+                _ = try MeetingOverlapChoice.deleteOne(db, key: ["eventID": choice.eventID, "otherEventID": choice.otherEventID])
+            } else {
+                try choice.upsert(db)
+            }
+        }
+    }
+
+    // MARK: - Agent focus
+
+    /// Stores focus lines; lines already stored (same second and order) are skipped.
+    func insertClaudeFocusEvents(_ events: [ClaudeFocusEvent]) throws {
+        guard !events.isEmpty else { return }
+        try dbQueue.write { db in
+            for e in events {
+                try db.execute(sql: """
+                    INSERT INTO claude_focus_events (occurredAt, seq, kind, localSessionID, cliSessionID)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(occurredAt, seq) DO UPDATE SET
+                        cliSessionID = coalesce(claude_focus_events.cliSessionID, excluded.cliSessionID)
+                    """, arguments: [e.occurredAt, e.seq, e.kind.rawValue, e.localSessionID, e.cliSessionID])
+            }
+        }
+    }
+
+    func allClaudeFocusEvents() throws -> [ClaudeFocusEvent] {
+        try dbQueue.read { db in
+            try ClaudeFocusEvent.fetchAll(db, sql: """
+                SELECT occurredAt, seq, kind, localSessionID, cliSessionID
+                FROM claude_focus_events ORDER BY occurredAt, seq
+                """)
+        }
+    }
+
+    func latestClaudeFocusEvent() throws -> ClaudeFocusEvent? {
+        try dbQueue.read { db in
+            try ClaudeFocusEvent.fetchOne(db, sql: """
+                SELECT occurredAt, seq, kind, localSessionID, cliSessionID
+                FROM claude_focus_events ORDER BY occurredAt DESC, seq DESC LIMIT 1
+                """)
+        }
+    }
+
+    /// Active samples of one app that have no agent session yet.
+    func samplesWithoutAgentSession(bundleID: String, since: Date?) throws -> [ActivitySample] {
+        try dbQueue.read { db in
+            var request = ActivitySample
+                .filter(ActivitySample.Columns.appBundleID == bundleID
+                        && ActivitySample.Columns.isIdle == false
+                        && ActivitySample.Columns.agentSessionID == nil)
+            if let since { request = request.filter(ActivitySample.Columns.capturedAt >= since) }
+            return try request.fetchAll(db)
+        }
+    }
+
+    func setAgentSessions(_ updates: [(sampleID: Int64, sessionID: String)]) throws {
+        guard !updates.isEmpty else { return }
+        try dbQueue.write { db in
+            for u in updates {
+                try db.execute(sql: "UPDATE activity_samples SET agentSessionID = ? WHERE id = ? AND agentSessionID IS NULL",
+                               arguments: [u.sessionID, u.sampleID])
+            }
+        }
+    }
+
+    /// Every agent session, by id, for attributing samples through their session.
+    func sessionsByID(_ ids: Set<String>) throws -> [String: ClaudeSession] {
+        guard !ids.isEmpty else { return [:] }
+        return try dbQueue.read { db in
+            let rows = try ClaudeSession.filter(ids.contains(ClaudeSession.Columns.id)).fetchAll(db)
+            return Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        }
     }
 
     func insert(_ sample: ActivitySample) throws -> ActivitySample {
@@ -515,117 +735,6 @@ struct AppDatabase {
                 .updateAll(db,
                            ClaudeSession.Columns.customerID.set(to: customerID),
                            ClaudeSession.Columns.projectID.set(to: projectID))
-        }
-    }
-
-    // MARK: - Mic sessions
-
-    /// Inserts a new open mic session (endedAt = nil). Returns the new id.
-    @discardableResult
-    func startMicSession(at startedAt: Date, voipApps: [String]) throws -> String {
-        let id = UUID().uuidString
-        let csv = voipApps.isEmpty ? nil : voipApps.joined(separator: ",")
-        let now = Date()
-        var session = MicSession(
-            id: id,
-            startedAt: startedAt,
-            endedAt: nil,
-            voipAppsCSV: csv,
-            participant: nil,
-            slackChannel: nil,
-            customerID: nil,
-            projectID: nil,
-            createdAt: now,
-            updatedAt: now
-        )
-        try dbQueue.write { db in
-            try session.insert(db)
-        }
-        return id
-    }
-
-    func endMicSession(id: String, endedAt: Date, participant: String?, slackChannel: String?, voipApps: [String]?) throws {
-        _ = try dbQueue.write { db in
-            if let voipApps {
-                let csv = voipApps.isEmpty ? nil : voipApps.joined(separator: ",")
-                try MicSession
-                    .filter(MicSession.Columns.id == id)
-                    .updateAll(db,
-                               MicSession.Columns.endedAt.set(to: endedAt),
-                               MicSession.Columns.participant.set(to: participant),
-                               MicSession.Columns.slackChannel.set(to: slackChannel),
-                               MicSession.Columns.voipAppsCSV.set(to: csv),
-                               MicSession.Columns.updatedAt.set(to: Date()))
-            } else {
-                try MicSession
-                    .filter(MicSession.Columns.id == id)
-                    .updateAll(db,
-                               MicSession.Columns.endedAt.set(to: endedAt),
-                               MicSession.Columns.participant.set(to: participant),
-                               MicSession.Columns.slackChannel.set(to: slackChannel),
-                               MicSession.Columns.updatedAt.set(to: Date()))
-            }
-        }
-    }
-
-    /// Closes any sessions left open from a previous run (app crash, force-quit).
-    /// Sets their endedAt to startedAt + 1s so they don't show as ongoing forever.
-    func closeOrphanedMicSessions(currentlyRunningSessionID: String?) throws {
-        try dbQueue.write { db in
-            let openSessions = try MicSession
-                .filter(MicSession.Columns.endedAt == nil)
-                .fetchAll(db)
-            for var s in openSessions {
-                if let current = currentlyRunningSessionID, s.id == current { continue }
-                s.endedAt = s.startedAt.addingTimeInterval(1)
-                s.updatedAt = Date()
-                try s.update(db)
-            }
-        }
-    }
-
-    func micSessions(in interval: DateInterval, minDurationSeconds: Double = 60) throws -> [MicSession] {
-        try dbQueue.read { db in
-            try MicSession
-                .filter(MicSession.Columns.startedAt < interval.end
-                        && (MicSession.Columns.endedAt == nil || MicSession.Columns.endedAt > interval.start))
-                .order(MicSession.Columns.startedAt.desc)
-                .fetchAll(db)
-                .filter { ($0.durationSeconds ?? 0) >= minDurationSeconds || $0.endedAt == nil }
-        }
-    }
-
-    func setMicSessionAttribution(id: String, customerID: String?, projectID: String?, rule: Rule? = nil) throws {
-        try dbQueue.write { db in
-            _ = try MicSession
-                .filter(MicSession.Columns.id == id)
-                .updateAll(db,
-                           MicSession.Columns.customerID.set(to: customerID),
-                           MicSession.Columns.projectID.set(to: projectID),
-                           MicSession.Columns.updatedAt.set(to: Date()))
-            if let rule { try upsertReplacingWindow(rule, in: db) }
-        }
-    }
-
-    func setMicSessionIgnored(id: String, isIgnored: Bool) throws {
-        _ = try dbQueue.write { db in
-            try MicSession
-                .filter(MicSession.Columns.id == id)
-                .updateAll(db,
-                           MicSession.Columns.isIgnored.set(to: isIgnored),
-                           MicSession.Columns.updatedAt.set(to: Date()))
-        }
-    }
-
-    /// Find frontmost-app + window-title samples that overlap a time window —
-    /// used to enrich a mic session with a participant guess from Teams titles.
-    func samplesOverlapping(start: Date, end: Date) throws -> [ActivitySample] {
-        try dbQueue.read { db in
-            try ActivitySample
-                .filter(ActivitySample.Columns.capturedAt >= start
-                        && ActivitySample.Columns.capturedAt <= end)
-                .order(ActivitySample.Columns.capturedAt.asc)
-                .fetchAll(db)
         }
     }
 
@@ -717,16 +826,20 @@ struct AppDatabase {
         try dbQueue.write { db in _ = try ReportedWeek.deleteOne(db, key: ["weekStart": weekStart]) }
     }
 
+    /// Rules of the kinds this version knows. Rows of retired kinds
+    /// (`Rule.Kind.retiredRawValues`) stay stored but are never decoded.
     func allRules() throws -> [Rule] {
         try dbQueue.read { db in
-            try Rule.order(Rule.Columns.priority.desc).fetchAll(db)
+            try Rule.filter(Rule.Kind.activeRawValues.contains(Rule.Columns.kind))
+                .order(Rule.Columns.priority.desc).fetchAll(db)
         }
     }
 
     func rules(forCustomer customerID: String) throws -> [Rule] {
         try dbQueue.read { db in
             try Rule
-                .filter(Rule.Columns.customerID == customerID)
+                .filter(Rule.Columns.customerID == customerID
+                        && Rule.Kind.activeRawValues.contains(Rule.Columns.kind))
                 .order(Rule.Columns.priority.desc, Rule.Columns.kind.asc)
                 .fetchAll(db)
         }
@@ -873,8 +986,7 @@ struct AppDatabase {
     /// glob runs once per distinct value, not once per sample.
     struct RuleMatchCount: Equatable {
         var sampleSeconds: Double = 0
-        var calls: Int = 0
-        var isEmpty: Bool { sampleSeconds == 0 && calls == 0 }
+        var isEmpty: Bool { sampleSeconds == 0 }
     }
 
     func ruleMatchCount(kind: Rule.Kind, pattern: String, since: Date,
@@ -898,20 +1010,7 @@ struct AppDatabase {
             case .gitRemoteHost: try tally(Column("gitRemoteURL")) { RuleMatcher.gitHost(fromRemote: $0) }
             case .urlHost:       try tally(Column("chromeHost")) { $0 }
             case .urlPath:       try tally(Column("chromeURL")) { RuleMatcher.normalizedURL($0) }
-            case .windowTitle:   try tally(Column("windowTitle")) { $0 }
             case .appBundleID:   try tally(Column("appBundleID")) { $0 }
-            case .slackChannel:
-                try tally(Column("windowTitle"), where: Column("appBundleID").like("%slack%")) {
-                    MicSession.parseSlackChannel(fromTitle: $0)
-                }
-            case .participant:   break
-            }
-            if kind == .slackChannel || kind == .participant {
-                let sessions = try MicSession.filter(MicSession.Columns.startedAt >= since).fetchAll(db)
-                out.calls = sessions.filter { s in
-                    guard let v = kind == .slackChannel ? s.slackChannel : s.participant else { return false }
-                    return RuleMatcher.matches(kind: kind, pattern: pattern, value: v)
-                }.count
             }
             return out
         }
@@ -1005,6 +1104,18 @@ struct AppDatabase {
             var s = session
             try s.upsert(db)
         }
+    }
+
+    /// Inserts `session` unless a row with its id exists; never replaces one.
+    func insertSessionIfAbsent(_ session: ClaudeSession) throws {
+        try dbQueue.write { db in
+            var s = session
+            try s.insert(db, onConflict: .ignore)
+        }
+    }
+
+    func allSessions() throws -> [ClaudeSession] {
+        try dbQueue.read { db in try ClaudeSession.fetchAll(db) }
     }
 
     func session(id: String) throws -> ClaudeSession? {

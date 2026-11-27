@@ -1,15 +1,9 @@
 import SwiftUI
 
-/// Shared date-navigation primitives so every time-scoped view (Weekly Report,
-/// Timeline, Discover, Calls) uses the same control treatment, button styles,
-/// "jump to now" affordance, and — crucially — the same accessibility labels on
-/// the otherwise icon-only chevrons.
-///
-/// - `DateNavigator` is the generic ‹ title › [Now] row. Weekly and Timeline
-///   drive it with their own `Date` state; Discover/Calls reuse it via
-///   `ScopeDayNavigator` when their scope is a single day.
-/// - `RangeScopePicker` is the segmented 7 / 14 / 30 / Day control shared by
-///   Discover and Calls (previously duplicated in both, binding included).
+/// Shared date navigation so time-scoped views use the same control
+/// treatment, "jump to now" affordance and accessibility labels on the
+/// otherwise icon-only chevrons. `DateNavigator` is the generic
+/// ‹ title › [Now] row; Weekly and Timeline drive it with their own state.
 struct DateNavigator: View {
     let title: String
     let nowLabel: String
@@ -49,86 +43,6 @@ struct DateNavigator: View {
                 .fixedSize()
                 .disabled(nowDisabled)
         }
-    }
-}
-
-/// Segmented range picker shared by Discover and Calls. Owns the mapping
-/// between the integer tags and `DateScope` (`-1` == single-day mode).
-struct RangeScopePicker: View {
-    @Binding var scope: DateScope
-
-    var body: some View {
-        Picker("", selection: rangeModeBinding) {
-            ForEach(DateScope.presetDayCounts, id: \.self) { n in
-                Text("\(n) days").tag(n)
-            }
-            Text("Day").tag(-1)
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .frame(width: 280)
-        .accessibilityLabel("Time range")
-    }
-
-    private var rangeModeBinding: Binding<Int> {
-        Binding(
-            get: {
-                switch scope {
-                case .lastDays(let n): return n
-                case .day: return -1
-                }
-            },
-            set: { newValue in
-                if newValue == -1 {
-                    if case .day = scope { return }
-                    scope = .day(Calendar.current.startOfDay(for: Date()))
-                } else {
-                    scope = .lastDays(newValue)
-                }
-            }
-        )
-    }
-}
-
-/// Day-by-day navigator for the `DateScope`-based views. Renders nothing unless
-/// the scope is `.day`. Disables "next" and "Today" once you reach today so the
-/// past-activity views can't page into empty future days.
-struct ScopeDayNavigator: View {
-    @Binding var scope: DateScope
-
-    var body: some View {
-        DateNavigator(
-            title: dayLabel,
-            nowLabel: "Today",
-            prevHelp: "Previous day",
-            nextHelp: "Next day",
-            titleFont: .body.bold(),
-            titleMinWidth: 180,
-            nextDisabled: isToday,
-            nowDisabled: isToday,
-            onPrev: { shiftDay(-1) },
-            onNext: { shiftDay(1) },
-            onNow: { scope = .day(Calendar.current.startOfDay(for: Date())) }
-        )
-    }
-
-    private func shiftDay(_ delta: Int) {
-        guard case .day(let d) = scope,
-              let next = Calendar.current.date(byAdding: .day, value: delta, to: d) else { return }
-        scope = .day(next)
-    }
-
-    private var dayLabel: String {
-        guard case .day(let d) = scope else { return "" }
-        let cal = Calendar.current
-        if cal.isDateInToday(d) { return "Today" }
-        if cal.isDateInYesterday(d) { return "Yesterday" }
-        return DateFormatting.dayMonthWeekday.string(from: d)
-    }
-
-    private var isToday: Bool {
-        guard case .day(let d) = scope else { return false }
-        return Calendar.current.isDateInToday(d)
     }
 }
 

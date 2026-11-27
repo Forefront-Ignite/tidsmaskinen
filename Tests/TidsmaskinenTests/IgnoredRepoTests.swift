@@ -55,12 +55,15 @@ final class IgnoredRepoTests: XCTestCase {
         agent.lastActivityAt = agent.endedAt
         try db.upsertSession(agent)
         try db.insertClaudeActiveDelta(sessionID: agent.id, occurredAt: agent.endedAt!, gainedSeconds: 1800)
-        XCTAssertEqual(try report(db).grandTotal, 0.25, accuracy: 0.001)
+        // Agent activity is context: each week shows its own half, and none of it bills.
+        let this = try report(db)
+        XCTAssertEqual(this.grandTotal, 0)
+        XCTAssertEqual(this.agentHoursByRowID["work"] ?? 0, 0.25, accuracy: 0.001)
         let nextWeek = DateInterval(start: week.end, duration: week.duration)
         let next = try WeeklyReport.compute(week: nextWeek, samples: [], sessions: db.sessions(in: nextWeek),
                                             claudeDeltas: db.claudeActiveDeltas(in: nextWeek),
                                             matcher: RuleMatcher.load(from: db), sampleIntervalSeconds: 15)
-        XCTAssertEqual(next.grandTotal, 0.25, accuracy: 0.001)
+        XCTAssertEqual(next.agentHoursByRowID["work"] ?? 0, 0.25, accuracy: 0.001)
     }
 
     func testAgentAggregatesOnlyCountActivityWithinRequestedWeek() throws {
@@ -99,6 +102,12 @@ final class IgnoredRepoTests: XCTestCase {
         _ = try db.insert(sample(workRemote, offset: 900))
         try db.upsertSession(session("private-agent", remote: privateRemote))
         try db.upsertSession(session("agent-only", remote: "git@github.com:Personal/agent-only.git"))
+        // A repo reaches Review through your focus on its agent session, not
+        // through the agent's runtime.
+        var focused = sample(nil, offset: 1800)
+        focused.appBundleID = ClaudeFocusLog.bundleID
+        focused.agentSessionID = "agent-only"
+        _ = try db.insert(focused)
         let nextWeek = DateInterval(start: week.end, duration: week.duration)
         _ = try db.insert(sample(privateRemote, offset: 7 * 86400))
         let initial = try queue(db)
@@ -113,7 +122,7 @@ final class IgnoredRepoTests: XCTestCase {
         for ignored in try db.allHiddenSignals() { try db.unhide(id: ignored.id) }
         XCTAssertEqual(Set(try queue(db).map(\.title)), Set(initial.map(\.title)))
         XCTAssertEqual(try queue(db, interval: nextWeek).map(\.title), ["Personal/private"])
-        XCTAssertEqual(try db.samples(in: week).count, 2, "Ignoring keeps captured history")
+        XCTAssertEqual(try db.samples(in: week).count, 3, "Ignoring keeps captured history")
         XCTAssertEqual(try db.sessions(in: week).count, 2)
     }
 
@@ -138,12 +147,15 @@ final class IgnoredRepoTests: XCTestCase {
         try db.upsertSession(legacy)
         try db.upsertSession(session("work-agent", remote: workRemote, offset: 10800))
 
+        // Three 15-minute samples bill; the agent session is context only.
         let before = try report(db)
-        XCTAssertEqual(before.grandTotal, 2.25, accuracy: 0.001)
+        XCTAssertEqual(before.grandTotal, 0.75, accuracy: 0.001)
+        XCTAssertEqual(before.agentHoursByRowID["work"] ?? 0, 0.5, accuracy: 0.001)
         try db.hideSignal(kind: .gitRepoSlug, value: "Personal/private")
         let ignored = try report(db)
-        XCTAssertEqual(ignored.grandTotal, 1.0, accuracy: 0.001)
-        XCTAssertEqual(ignored.activeHours, 1.0, accuracy: 0.001)
+        XCTAssertEqual(ignored.grandTotal, 0.5, accuracy: 0.001)
+        XCTAssertEqual(ignored.activeHours, 0.5, accuracy: 0.001)
+        XCTAssertNil(ignored.agentHoursByRowID["work"], "an ignored repo's agent activity is not shown either")
         XCTAssertEqual(ignored.unattributedTotal, 0)
         let contributors = try XCTUnwrap(ignored.breakdownsByRowID.values.first).topContributors
         XCTAssertFalse(contributors.contains { $0.label.lowercased().contains("personal/private") })
@@ -153,13 +165,15 @@ final class IgnoredRepoTests: XCTestCase {
         let restored = try report(db)
         XCTAssertEqual(restored.grandTotal, before.grandTotal)
         XCTAssertEqual(restored.activeHours, before.activeHours)
+        XCTAssertEqual(restored.agentHoursByRowID, before.agentHoursByRowID)
     }
 
     func testIgnoredUnattributedRepoDoesNotInflateUnattributedHours() throws {
         let db = try AppDatabase.inMemoryForTesting()
         _ = try db.insert(sample(privateRemote))
         try db.upsertSession(session("private", remote: privateRemote, offset: 3600))
-        XCTAssertEqual(try report(db).unattributedTotal, 0.75, accuracy: 0.001)
+        // Only the sample bills; the agent session is context.
+        XCTAssertEqual(try report(db).unattributedTotal, 0.25, accuracy: 0.001)
         try db.hideSignal(kind: .gitRepoSlug, value: "Personal/private")
         let ignored = try report(db)
         XCTAssertEqual(ignored.unattributedTotal, 0)

@@ -46,33 +46,54 @@ struct WeeklyReport {
     /// is counted at most once here. Always ≤ `grandTotal`. Excludes the
     /// unattributed bucket, matching what `grandTotal` sums.
     let activeHours: Double
+    /// Hours an agent was active per row id (and `unattributedID`), by the
+    /// hook measure: wall clock with any of that bucket's sessions running.
+    /// Context beside the billed hours; never part of them.
+    let agentHoursByRowID: [String: Double]
+    /// Overlapping meetings of the same standing, resolved or not. Unresolved
+    /// ones bill twice until the user picks the meeting they were in.
+    let doubleBookings: [MeetingBilling.DoubleBooking]
     var grandTotal: Double { dayTotals.reduce(0, +) }
     var unattributedTotal: Double { unattributedPerDay.reduce(0, +) }
 
     static let unattributedID = "__unattributed__"
     static let unattributedLabel = "Unattributed"
 
+    /// Reads one period's inputs and computes its report.
+    static func load(from database: AppDatabase, week: DateInterval, matcher: RuleMatcher,
+                     sampleIntervalSeconds: Int, rounding: ReportRounding) throws -> WeeklyReport {
+        compute(week: week,
+                samples: try database.samples(in: week),
+                events: try database.calendarEvents(in: week),
+                sessions: try database.sessions(in: week),
+                claudeDeltas: try database.claudeActiveDeltas(in: week),
+                overlapChoices: try database.meetingOverlapChoices(),
+                cellsCalls: try database.cellsCalls(in: week),
+                matcher: matcher,
+                sampleIntervalSeconds: sampleIntervalSeconds,
+                rounding: rounding)
+    }
+
+    /// `sessions` and `claudeDeltas` only feed the agent-activity context;
+    /// they bill nothing.
     static func compute(week: DateInterval,
                         samples: [ActivitySample],
                         events: [CalendarEvent] = [],
                         sessions: [ClaudeSession] = [],
                         claudeDeltas: [AppDatabase.ClaudeActiveDelta] = [],
-                        micSessions: [MicSession] = [],
-                        idleThresholdSeconds: TimeInterval = 300,
+                        overlapChoices: [MeetingOverlapChoice] = [],
+                        cellsCalls: [CellsCall] = [],
                         matcher: RuleMatcher,
                         sampleIntervalSeconds: Int,
                         rounding: ReportRounding = .nearest) -> WeeklyReport {
         var engine = DedupEngine(week: week)
         let records = collectRecords(
-            week: week,
             samples: samples,
             events: events,
-            sessions: sessions,
-            claudeDeltas: claudeDeltas,
-            micSessions: micSessions,
+            overlapChoices: overlapChoices,
+            cellsCalls: cellsCalls,
             matcher: matcher,
-            sampleIntervalSeconds: sampleIntervalSeconds,
-            idleThresholdSeconds: idleThresholdSeconds
+            sampleIntervalSeconds: sampleIntervalSeconds
         )
         for record in records {
             engine.add(record)
@@ -130,13 +151,16 @@ struct WeeklyReport {
             return lhs.totalHours > rhs.totalHours
         }
 
+        let agent = agentSeconds(week: week, sessions: sessions, claudeDeltas: claudeDeltas, matcher: matcher)
         return WeeklyReport(
             week: week,
             rows: rows,
             dayTotals: dayTotals,
             unattributedPerDay: unattributedSeconds.map { rounding.round($0 / 3600.0) },
             breakdownsByRowID: breakdowns,
-            activeHours: engine.attributedActiveSeconds / 3600.0
+            activeHours: engine.attributedActiveSeconds / 3600.0,
+            agentHoursByRowID: agent.mapValues { $0 / 3600.0 },
+            doubleBookings: MeetingBilling.doubleBookings(events: events, matcher: matcher, choices: overlapChoices)
         )
     }
 
@@ -235,15 +259,11 @@ struct WeeklyReport {
         enum SourceKind: String, CaseIterable, Hashable {
             case samples
             case events
-            case calls
-            case claude
 
             var label: String {
                 switch self {
                 case .samples: return "App activity"
                 case .events:  return "Calendar"
-                case .calls:   return "Calls"
-                case .claude:  return "Coding agents"
                 }
             }
 
@@ -251,8 +271,6 @@ struct WeeklyReport {
                 switch self {
                 case .samples: return "app.dashed"
                 case .events:  return "calendar"
-                case .calls:   return "mic.fill"
-                case .claude:  return "wand.and.stars"
                 }
             }
         }
@@ -318,10 +336,9 @@ struct WeeklyReport {
         let seriesMasterID: String?
     }
 
-    /// Priority order when overlapping sources cover the same second of wall
-    /// time for the same bucket: calendar events outrank calls outrank Claude
-    /// sessions outrank app activity samples. Each second can only credit one
-    /// source, so the per-bucket total never exceeds elapsed wall time.
+    /// Priority order when sources cover the same second for the same bucket:
+    /// meetings before samples. Samples are already clipped around meetings,
+    /// so this only orders records; meetings themselves are never deduplicated.
     private static func byPriority(_ a: AttributedRecord, _ b: AttributedRecord) -> Bool {
         priorityIndex(a.source) < priorityIndex(b.source)
     }
@@ -329,115 +346,72 @@ struct WeeklyReport {
     private static func priorityIndex(_ kind: Breakdown.SourceKind) -> Int {
         switch kind {
         case .events:  return 0
-        case .calls:   return 1
-        case .claude:  return 2
-        case .samples: return 3
+        case .samples: return 1
         }
     }
 
-    /// Walks raw inputs and turns each into a time-bounded `AttributedRecord`.
-    private static func collectRecords(week: DateInterval,
-                                        samples: [ActivitySample],
+    /// Lays meetings and samples on one focus timeline. A meeting bills its
+    /// booked time after double bookings are settled; each active sample
+    /// bills from its capture to the next sample, minus meeting time. Calls
+    /// and agent runtime bill nothing.
+    private static func collectRecords(samples: [ActivitySample],
                                         events: [CalendarEvent],
-                                        sessions: [ClaudeSession],
-                                        claudeDeltas: [AppDatabase.ClaudeActiveDelta],
-                                        micSessions: [MicSession],
+                                        overlapChoices: [MeetingOverlapChoice],
+                                        cellsCalls: [CellsCall],
                                         matcher: RuleMatcher,
-                                        sampleIntervalSeconds: Int,
-                                        idleThresholdSeconds: TimeInterval) -> [AttributedRecord] {
-        let secondsPerSample = TimeInterval(sampleIntervalSeconds)
+                                        sampleIntervalSeconds: Int) -> [AttributedRecord] {
         var records: [AttributedRecord] = []
-        records.reserveCapacity(samples.count + events.count + claudeDeltas.count + sessions.count)
+        records.reserveCapacity(samples.count + events.count)
 
-        for sample in samples where !sample.isIdle {
-            if matcher.isRepoIgnored(remoteURL: sample.gitRemoteURL) { continue }
-            let result = matcher.attribute(sample)
-            records.append(AttributedRecord(
-                bucketID: rowKey(customer: result.customer, project: result.project),
-                source: .samples,
-                start: sample.capturedAt,
-                end: sample.capturedAt.addingTimeInterval(secondsPerSample),
-                contributor: contributorInfo(forSample: sample, rule: result.matchingRule)
-            ))
-        }
-
-        for event in events where event.rsvpStatus != "declined" {
-            let attribution = matcher.attribute(event: event)
-            if attribution.isIgnored { continue }
-            let result = attribution.asAttributionResult
-            records.append(AttributedRecord(
-                bucketID: rowKey(customer: result.customer, project: result.project),
-                source: .events,
-                start: event.startAt,
-                end: event.endAt,
-                contributor: contributorInfo(forEvent: event)
-            ))
-        }
-
-        // Ad-hoc call time: mic activity not already credited via a meeting.
-        // A meeting's *own* audio is credited by the event records above, so we
-        // subtract those meetings here to avoid double-counting — but only from
-        // the sessions each meeting actually owns. A call that merely happened
-        // during a booking (a Slack huddle after a Teams meeting ended early)
-        // keeps its full duration and lands on its own customer. Only attributed
-        // calls reach the report — unattributed call time shows up in the Review
-        // backlog instead. We skip ongoing sessions (no end yet) so a live call
-        // isn't counted.
-        let ownedMeetingMics = CalendarEvent.meetingMicSessionIDs(events: events, micSessions: micSessions, matcher: matcher)
-        for session in micSessions {
-            guard let endedAt = session.endedAt, endedAt > session.startedAt else { continue }
-            if session.isIgnored { continue }
-            let result = matcher.attribute(micSession: session)
-            guard result.customer != nil else { continue }
-            let bucketID = rowKey(customer: result.customer, project: result.project)
-            let contributor = contributorInfo(forCall: session)
-            let remainders = CallSegment.adHocRanges(
-                of: session, endedAt: endedAt, events: events,
-                owned: ownedMeetingMics, minimumSeconds: 30
-            )
-            for r in remainders {
+        let billed = MeetingBilling.billed(events: events, matcher: matcher, choices: overlapChoices)
+        for m in billed {
+            let result = m.attribution.asAttributionResult
+            let contributor = contributorInfo(forEvent: m.event)
+            for iv in m.intervals {
                 records.append(AttributedRecord(
-                    bucketID: bucketID,
-                    source: .calls,
-                    start: r.start,
-                    end: r.end,
-                    contributor: contributor
-                ))
+                    bucketID: rowKey(customer: result.customer, project: result.project),
+                    source: .events, start: iv.start, end: iv.end, contributor: contributor))
             }
         }
 
-        let includedSessions = sessions.filter { !matcher.isRepoIgnored(remoteURL: $0.gitRemoteURL) }
-        let sessionByID = Dictionary(uniqueKeysWithValues: includedSessions.map { ($0.id, $0) })
-        var creditedSessionIDs = Set<String>()
-        for delta in claudeDeltas {
-            guard let session = sessionByID[delta.sessionID] else { continue }
-            creditedSessionIDs.insert(session.id)
-            guard delta.gainedSeconds > 0 else { continue }
-            let result = matcher.attribute(session: session)
-            records.append(AttributedRecord(
-                bucketID: rowKey(customer: result.customer, project: result.project),
-                source: .claude,
-                start: delta.occurredAt.addingTimeInterval(-delta.gainedSeconds),
-                end: delta.occurredAt,
-                contributor: contributorInfo(forClaudeSession: session)
-            ))
+        // Cells in front during one of your calls is that call's time.
+        let calls = CellsCallIndex(calls: cellsCalls)
+        let spans = FocusSpans.spans(samples: samples,
+                                     sampleInterval: TimeInterval(sampleIntervalSeconds),
+                                     blocked: MeetingBilling.blocked(events: events, matcher: matcher),
+                                     isActive: calls.mayCount)
+        for (sample, pieces) in spans {
+            // Cut at your join and leave times: inside a stay it is the call's.
+            for (piece, call) in calls.billable(sample, pieces: pieces) {
+                if call == nil, matcher.isRepoIgnored(sample: sample) { continue }
+                let result = call.map(matcher.attribute(cellsCall:)) ?? matcher.attribute(sample)
+                let contributor = call.map { contributorInfo(forCellsCall: $0, matcher: matcher) }
+                    ?? matcher.session(for: sample).map(contributorInfo(forClaudeSession:))
+                    ?? contributorInfo(forSample: sample, rule: result.matchingRule)
+                records.append(AttributedRecord(
+                    bucketID: rowKey(customer: result.customer, project: result.project),
+                    source: .samples, start: piece.start, end: piece.end, contributor: contributor))
+            }
         }
-        // Fallback: pre-v10 sessions with no deltas — treat amortized active as
-        // a single interval starting at session start.
-        for session in includedSessions where !creditedSessionIDs.contains(session.id) {
-            let active = session.amortizedActiveSeconds(idleThresholdSeconds: idleThresholdSeconds)
-            guard active > 0 else { continue }
-            let result = matcher.attribute(session: session)
-            records.append(AttributedRecord(
-                bucketID: rowKey(customer: result.customer, project: result.project),
-                source: .claude,
-                start: session.startedAt,
-                end: session.startedAt.addingTimeInterval(active),
-                contributor: contributorInfo(forClaudeSession: session)
-            ))
-        }
-
         return records
+    }
+
+    /// Wall-clock seconds per bucket during which an agent session for that
+    /// bucket was active, by the hook measure. Context only.
+    private static func agentSeconds(week: DateInterval, sessions: [ClaudeSession],
+                                     claudeDeltas: [AppDatabase.ClaudeActiveDelta],
+                                     matcher: RuleMatcher) -> [String: Double] {
+        let sessionByID = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var byBucket: [String: [DateInterval]] = [:]
+        for d in claudeDeltas where d.gainedSeconds > 0 {
+            guard let session = sessionByID[d.sessionID] ?? matcher.sessionsByID[d.sessionID],
+                  !matcher.isRepoIgnored(remoteURL: session.gitRemoteURL) else { continue }
+            let span = DateInterval(start: d.occurredAt.addingTimeInterval(-d.gainedSeconds), end: d.occurredAt)
+            guard let clipped = span.intersectionIfPositive(with: week) else { continue }
+            let r = matcher.attribute(session: session, at: d.occurredAt)
+            byBucket[rowKey(customer: r.customer, project: r.project), default: []].append(clipped)
+        }
+        return byBucket.mapValues { DateInterval.union($0).reduce(0) { $0 + $1.duration } }
     }
 
     /// Buffers records per bucket, then resolves them into per-day / per-source
@@ -483,7 +457,9 @@ struct WeeklyReport {
                 }
             }
             self.daySecondOffsets = offsets
-            self.weekSeconds = offsets[7]
+            // A shorter period (My day passes one day) ends where it ends:
+            // a meeting running past midnight doesn't add tomorrow to today.
+            self.weekSeconds = min(offsets[7], max(0, Int(week.duration)))
             self.week = week
         }
 
@@ -520,6 +496,19 @@ struct WeeklyReport {
                     var arr = bySource[record.source] ?? Array(repeating: 0.0, count: 7)
                     var addedTotal = 0
                     var i = s
+                    // Meetings were settled by MeetingBilling: a double booking
+                    // bills both meetings, even for the same customer, until the
+                    // user picks one. Samples are already clipped around them.
+                    if record.source == .events {
+                        while i < e {
+                            let d = dayIndex(forSecond: i)
+                            let limit = min(e, daySecondOffsets[d + 1])
+                            if isAttributed { for k in i..<limit { attributedUnion[k] = true } }
+                            arr[d] += Double(limit - i)
+                            addedTotal += limit - i
+                            i = limit
+                        }
+                    }
                     while i < e {
                         if claimed[i] { i += 1; continue }
                         // Claim a contiguous free run, bounded by the day end so
@@ -621,30 +610,7 @@ struct WeeklyReport {
                         seriesMasterID: nil
                     )
                 }
-            case .windowTitle:
-                if let title = sample.windowTitle, !title.isEmpty {
-                    return ContributorInfo(
-                        id: "title:\(title)",
-                        label: title,
-                        kindLabel: "Window title",
-                        systemImage: "macwindow",
-                        eventID: nil,
-                        seriesMasterID: nil
-                    )
-                }
-            case .slackChannel:
-                if let title = sample.windowTitle,
-                   let channel = MicSession.parseSlackChannel(fromTitle: title) {
-                    return ContributorInfo(
-                        id: "slack:\(channel)",
-                        label: "#\(channel)",
-                        kindLabel: "Slack channel",
-                        systemImage: "bubble.left.and.bubble.right",
-                        eventID: nil,
-                        seriesMasterID: nil
-                    )
-                }
-            case .appBundleID, .participant:
+            case .appBundleID:
                 break
             }
         }
@@ -674,23 +640,10 @@ struct WeeklyReport {
         )
     }
 
-    private static func contributorInfo(forCall session: MicSession) -> ContributorInfo {
-        let label: String
-        if let p = session.participant, !p.isEmpty {
-            label = p
-        } else if let ch = session.slackChannel, !ch.isEmpty {
-            label = "#\(ch)"
-        } else {
-            label = "Call"
-        }
-        return ContributorInfo(
-            id: "call:\(session.id)",
-            label: label,
-            kindLabel: "Call",
-            systemImage: "mic.fill",
-            eventID: nil,
-            seriesMasterID: nil
-        )
+    private static func contributorInfo(forCellsCall call: CellsCall, matcher: RuleMatcher) -> ContributorInfo {
+        let name = matcher.cellsChatsByID[call.chatID]?.name ?? "Cells call"
+        return ContributorInfo(id: "cells-call:\(call.chatID)", label: name, kindLabel: "Cells call",
+                               systemImage: "phone.fill", eventID: nil, seriesMasterID: nil)
     }
 
     private static func contributorInfo(forClaudeSession session: ClaudeSession) -> ContributorInfo {
