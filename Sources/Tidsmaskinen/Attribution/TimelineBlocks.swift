@@ -94,6 +94,7 @@ enum TimelineBuilder {
                       events: [CalendarEvent],
                       sessions: [ClaudeSession],
                       claudeDeltas: [AppDatabase.ClaudeActiveDelta] = [],
+                      cellsCalls: [CellsCall] = [],
                       now: Date = Date(),
                       matcher: RuleMatcher,
                       sampleIntervalSeconds: Int,
@@ -129,7 +130,8 @@ enum TimelineBuilder {
         // ---- Foreground (group consecutive same-identity samples) ----
         let foregroundBlocks = groupForeground(samples: samples,
                                                sampleIntervalSeconds: sampleIntervalSeconds,
-                                               matcher: matcher)
+                                               matcher: matcher,
+                                               calls: CellsCallIndex(calls: cellsCalls, now: now))
 
         // ---- Claude Code sessions ----
         // A session spans wall-clock from start to end, but most of that can be
@@ -211,8 +213,23 @@ enum TimelineBuilder {
 
     private static func groupForeground(samples: [ActivitySample],
                                         sampleIntervalSeconds: Int,
-                                        matcher: RuleMatcher) -> [TimelineBlock] {
-        let sorted = samples.sorted { $0.capturedAt < $1.capturedAt }
+                                        matcher: RuleMatcher,
+                                        calls: CellsCallIndex = CellsCallIndex(calls: [])) -> [TimelineBlock] {
+        // Cells in front during your call is the call, as the report bills it:
+        // not idle, and attributed through the call unless assigned by hand.
+        func call(_ s: ActivitySample) -> CellsCall? {
+            guard s.customerID == nil, ActivitySample.isCells(s.appBundleID) else { return nil }
+            return calls.call(at: s.capturedAt)
+        }
+        func attribution(_ s: ActivitySample) -> AttributionResult {
+            call(s).map(matcher.attribute(cellsCall:)) ?? matcher.attribute(s)
+        }
+        let sorted = samples.sorted { $0.capturedAt < $1.capturedAt }.map { s -> ActivitySample in
+            guard s.isIdle, call(s) != nil else { return s }
+            var active = s
+            active.isIdle = false
+            return active
+        }
         let interval = TimeInterval(sampleIntervalSeconds)
         let maxGap: TimeInterval = max(60, interval * 3)
 
@@ -229,7 +246,7 @@ enum TimelineBuilder {
         // or ends mid-stretch, starts a new block instead of being labelled
         // by the stretch's first sample.
         func owner(_ s: ActivitySample) -> String {
-            let r = matcher.attribute(s)
+            let r = attribution(s)
             return "\(r.customer?.id ?? "")/\(r.project?.id ?? "")"
         }
         for sample in sorted {
@@ -252,13 +269,14 @@ enum TimelineBuilder {
         }
 
         return groups.map { g in
-            let attribution = matcher.attribute(g.representative)
+            let attribution = attribution(g.representative)
             let override = (g.representative.customerID != nil)
             let title = g.representative.appName ?? g.representative.appBundleID ?? "—"
             let rep = g.representative
             // Claude or Codex in front: the session's repo or folder says what it was.
             let session = matcher.session(for: rep)
-            let subtitle = session.flatMap { s in
+            let callChat = call(rep).map { matcher.cellsChatsByID[$0.chatID]?.name ?? "Cells call" }
+            let subtitle = callChat.map { "Call · \($0)" } ?? session.flatMap { s in
                 s.gitRemoteURL.flatMap(RuleMatcher.gitSlug(fromRemote:))
                     ?? (s.gitRepoPath ?? s.cwd).map { ($0 as NSString).lastPathComponent }
             } ?? representativeSubtitle(for: g.samples)

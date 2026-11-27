@@ -93,6 +93,21 @@ final class CellsTests: XCTestCase {
         XCTAssertNil(Probes.cellsChatID(fromDocument: "file:///Users/x/doc.txt"))
     }
 
+    func testALiveCallLastSeenLongAgoStopsClaimingTime() {
+        var live = call("h", chat: "dm", from: at(10), to: at(10), stays: [(at(10), nil)])
+        live.endedAt = nil
+        live.isLive = true
+        live.syncedAt = at(10, 5)
+        // Rang out and vanished from history: believed only 15 minutes past the last sighting.
+        XCTAssertEqual(live.stays(now: at(18)), [DateInterval(start: at(10), end: at(10, 20))])
+    }
+
+    func testTokenOriginIgnoresPathAndCase() {
+        XCTAssertEqual(CellsAuth.origin(of: "https://Cells.IgniteStudio.eu/api"), "https://cells.ignitestudio.eu")
+        XCTAssertEqual(CellsAuth.origin(of: "http://localhost:3000"), "http://localhost:3000")
+        XCTAssertNil(CellsAuth.origin(of: "not a url"))
+    }
+
     // MARK: - Attribution
 
     func testChatsTakeTheirCellsCommandCenterLink() {
@@ -112,6 +127,24 @@ final class CellsTests: XCTestCase {
         let r = WeeklyReport.compute(week: week, samples: work, cellsCalls: [c], matcher: matcher, sampleIntervalSeconds: 15)
         XCTAssertEqual(hours(r, "acme/launch"), 0.5, accuracy: 0.001)
         XCTAssertEqual(r.breakdownsByRowID["acme/launch"]?.topContributors.first?.kindLabel, "Cells call")
+    }
+
+    func testCallTimeIsCutAtJoinAndLeaveNotAtSamples() {
+        // Five-minute sampling: one idle Cells sample at 10:00 covers 10:00–10:05,
+        // but you were only in the call 10:01–10:04.
+        let c = call("h", chat: "cell", from: at(10), to: at(10, 10), stays: [(at(10, 1), at(10, 4))])
+        let one = samples(at(10), minutes: 1, idle: true).prefix(1).map { $0 }
+        let r = WeeklyReport.compute(week: week, samples: one, cellsCalls: [c], matcher: matcher, sampleIntervalSeconds: 300)
+        XCTAssertEqual(hours(r, "acme/launch") * 60, 3, accuracy: 0.01)
+    }
+
+    func testACallKeepsItsCellAfterYouLeaveTheCell() {
+        // The call was synced while the Cell was linked; later the Cell is gone from your list.
+        var c = call("h", chat: "gone", from: at(10), to: at(10, 30), stays: [(at(10), at(10, 30))])
+        c.ccCustomerID = "cc-acme"
+        c.ccProjectID = "cc-launch"
+        let m = RuleMatcher.make(customers: [acme], projects: [launch], rules: [])
+        XCTAssertEqual(m.attribute(cellsCall: c).project?.id, "launch")
     }
 
     func testOnlyCellsInFrontCounts() {
@@ -140,7 +173,7 @@ final class CellsTests: XCTestCase {
         let db = try AppDatabase.inMemoryForTesting()
         try db.upsert(acme)
         try db.upsert(launch)
-        try db.replaceCellsChats([chat("cell", customer: "cc-acme", project: "cc-launch"), chat("dm", kind: "dm")])
+        try db.upsertCellsChats([chat("cell", customer: "cc-acme", project: "cc-launch"), chat("dm", kind: "dm")])
         try db.upsertCellsCalls([call("dmcall", chat: "dm", from: at(9), to: at(9, 20), stays: [(at(9), at(9, 20))]),
                                  call("cellcall", chat: "cell", from: at(10), to: at(10, 20), stays: [(at(10), at(10, 20))])])
         for s in samples(at(9), minutes: 20, idle: true) + samples(at(10), minutes: 20, idle: true) { _ = try db.insert(s) }
@@ -150,5 +183,13 @@ final class CellsTests: XCTestCase {
         XCTAssertEqual(rows.first { $0.id == "cells-call:cellcall" }?.status,
                        .attributed(customerID: "acme", projectID: "launch", scope: "Cell"))
         XCTAssertEqual(rows.first { $0.id == "cells-call:dmcall" }?.totalSeconds ?? 0, 1200, accuracy: 1)
+
+        // Ignoring keeps the same time on the row (Cells in front), not the whole stay.
+        try db.setCellsCallIgnored(id: "dmcall", isIgnored: true)
+        let after = try ReviewQueue.rows(database: db, interval: week, sampleIntervalSeconds: 15,
+                                         idleThresholdSeconds: 300, minMinutes: 5)
+        let ignored = try XCTUnwrap(after.first { $0.id == "cells-call:dmcall" })
+        XCTAssertEqual(ignored.status, .ignored)
+        XCTAssertEqual(ignored.totalSeconds, 1200, accuracy: 1)
     }
 }

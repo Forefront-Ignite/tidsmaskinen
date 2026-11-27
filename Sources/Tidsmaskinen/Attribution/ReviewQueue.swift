@@ -206,23 +206,35 @@ enum ReviewQueue {
         // Cells in front during one of your calls is that call's time.
         let cellsCalls = try database.cellsCalls(in: interval)
         let callIndex = CellsCallIndex(calls: cellsCalls)
+        // Ignored calls are listed with the time they would have counted.
+        let ignoredIndex = CellsCallIndex(calls: cellsCalls.filter(\.isIgnored), includeIgnored: true)
         var callAccs: [String: Acc] = [:]
+        var ignoredSeconds: [String: [Double]] = [:]
         let spans = FocusSpans.spans(samples: try database.samples(in: interval),
                                      sampleInterval: TimeInterval(sampleIntervalSeconds),
                                      blocked: MeetingBilling.blocked(events: events, matcher: m),
-                                     isActive: callIndex.isActive)
+                                     isActive: callIndex.mayCount)
+        func within(_ iv: DateInterval) -> Double { iv.intersectionIfPositive(with: interval)?.duration ?? 0 }
         for (sample, pieces) in spans {
-            let seconds = pieces.reduce(0.0) { $0 + ($1.intersectionIfPositive(with: interval)?.duration ?? 0) }
-            guard seconds > 0 else { continue }
             let day = dayIndex(sample.capturedAt)
-            if let call = callIndex.call(for: sample) {
+            if ActivitySample.isCells(sample.appBundleID), !ignoredIndex.isEmpty {
+                for case let (part, call?) in pieces.flatMap(ignoredIndex.split) {
+                    ignoredSeconds[call.id, default: Array(repeating: 0, count: dayCount)][day] += within(part)
+                }
+            }
+            // Cut at your join and leave times: inside a stay it is the call's.
+            var seconds = 0.0
+            for (part, call) in callIndex.billable(sample, pieces: pieces) {
+                guard let call else { seconds += within(part); continue }
+                let secs = within(part)
+                guard secs > 0 else { continue }
                 let r = m.attribute(cellsCall: call)
                 var acc = callAccs[call.id] ?? Acc(days: dayCount)
-                acc.add(seconds, day: day, r)
-                acc.note(seconds, at: sample.capturedAt, open: r.customer == nil, detail: nil)
+                acc.add(secs, day: day, r)
+                acc.note(secs, at: sample.capturedAt, open: r.customer == nil, detail: nil)
                 callAccs[call.id] = acc
-                continue
             }
+            guard seconds > 0 else { continue }
             let r = m.attribute(sample)
             let open = r.customer == nil
             let title = sample.windowTitle?.trimmingCharacters(in: .whitespaces)
@@ -308,11 +320,8 @@ enum ReviewQueue {
         for call in cellsCalls {
             let chat = m.cellsChatsByID[call.chatID]
             if call.isIgnored {
-                let stays = call.stays().compactMap { $0.intersectionIfPositive(with: interval) }
-                guard !stays.isEmpty else { continue }
-                var perDay = Array(repeating: 0.0, count: dayCount)
-                for st in stays { let d = spread(st.start, st.end); for i in 0..<dayCount { perDay[i] += d[i] } }
-                rows.append(ReviewRow(unit: .cellsCall(call: call, chat: chat, seconds: stays.reduce(0) { $0 + $1.duration }),
+                guard let perDay = ignoredSeconds[call.id], case let total = perDay.reduce(0, +), total > 0 else { continue }
+                rows.append(ReviewRow(unit: .cellsCall(call: call, chat: chat, seconds: total),
                                       status: .ignored, perDay: perDay, belowThreshold: false))
                 continue
             }

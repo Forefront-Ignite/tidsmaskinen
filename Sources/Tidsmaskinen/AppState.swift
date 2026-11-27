@@ -288,6 +288,8 @@ final class AppState: ObservableObject {
     func saveCellsToken(_ token: String) {
         do {
             try CellsAuth.saveToken(token)
+            // A new token may be another account: read its history in full.
+            AppSettings.setCellsHistoryCompleteSince(nil)
             cellsHasToken = true
             cellsTokenInvalid = false
             cellsLastError = nil
@@ -298,7 +300,10 @@ final class AppState: ObservableObject {
     }
 
     func clearCellsToken() {
-        CellsAuth.clearToken()
+        guard CellsAuth.clearToken() else {
+            cellsLastError = "Could not remove the token from the Keychain."
+            return
+        }
         cellsHasToken = false
         cellsTokenInvalid = false
         cellsLastError = nil

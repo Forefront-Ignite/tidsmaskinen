@@ -502,6 +502,8 @@ struct AppDatabase {
                 t.column("projectID", .text)
                 t.column("isIgnored", .boolean).notNull().defaults(to: false)
                 t.column("syncedAt", .datetime).notNull()
+                t.column("ccCustomerID", .text)
+                t.column("ccProjectID", .text)
             }
             try db.alter(table: "activity_samples") { t in
                 t.add(column: "cellsChatID", .text)
@@ -513,11 +515,11 @@ struct AppDatabase {
 
     // MARK: - Cells
 
-    /// Replaces the stored chat list with what Cells shows now.
-    func replaceCellsChats(_ chats: [CellsChat]) throws {
+    /// Stores chats as Cells shows them now. Chats no longer listed stay
+    /// with their last known link, so earlier time in them keeps its customer.
+    func upsertCellsChats(_ chats: [CellsChat]) throws {
         try dbQueue.write { db in
-            try CellsChat.deleteAll(db)
-            for chat in chats { try chat.insert(db) }
+            for chat in chats { try chat.upsert(db) }
         }
     }
 
@@ -531,12 +533,28 @@ struct AppDatabase {
         try dbQueue.write { db in
             for c in calls {
                 try db.execute(sql: """
-                    INSERT INTO cells_calls (id, chatID, startedAt, endedAt, isLive, staysJSON, syncedAt)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO cells_calls (id, chatID, startedAt, endedAt, isLive, staysJSON, syncedAt, ccCustomerID, ccProjectID)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET chatID = excluded.chatID, startedAt = excluded.startedAt,
                         endedAt = excluded.endedAt, isLive = excluded.isLive, staysJSON = excluded.staysJSON,
-                        syncedAt = excluded.syncedAt
-                    """, arguments: [c.id, c.chatID, c.startedAt, c.endedAt, c.isLive, c.staysJSON, c.syncedAt])
+                        syncedAt = excluded.syncedAt,
+                        ccCustomerID = coalesce(cells_calls.ccCustomerID, excluded.ccCustomerID),
+                        ccProjectID = coalesce(cells_calls.ccProjectID, excluded.ccProjectID)
+                    """, arguments: [c.id, c.chatID, c.startedAt, c.endedAt, c.isLive, c.staysJSON, c.syncedAt,
+                                     c.ccCustomerID, c.ccProjectID])
+            }
+        }
+    }
+
+    /// Ends calls stored as live that a complete history scan back to
+    /// `startedSince` no longer lists, at the last time they were seen.
+    func closeCellsCalls(startedSince: Date, notIn ids: Set<String>) throws {
+        try dbQueue.write { db in
+            let live = try CellsCall.fetchAll(db, sql: "SELECT * FROM cells_calls WHERE isLive = 1 AND startedAt >= ?",
+                                              arguments: [startedSince])
+            for call in live where !ids.contains(call.id) {
+                try db.execute(sql: "UPDATE cells_calls SET isLive = 0, endedAt = coalesce(endedAt, syncedAt) WHERE id = ?",
+                               arguments: [call.id])
             }
         }
     }

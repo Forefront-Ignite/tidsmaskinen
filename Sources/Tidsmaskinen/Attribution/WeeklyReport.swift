@@ -379,15 +379,15 @@ struct WeeklyReport {
         let spans = FocusSpans.spans(samples: samples,
                                      sampleInterval: TimeInterval(sampleIntervalSeconds),
                                      blocked: MeetingBilling.blocked(events: events, matcher: matcher),
-                                     isActive: calls.isActive)
+                                     isActive: calls.mayCount)
         for (sample, pieces) in spans {
-            let call = calls.call(for: sample)
-            if call == nil, matcher.isRepoIgnored(sample: sample) { continue }
-            let result = call.map(matcher.attribute(cellsCall:)) ?? matcher.attribute(sample)
-            let contributor = call.map { contributorInfo(forCellsCall: $0, matcher: matcher) }
-                ?? matcher.session(for: sample).map(contributorInfo(forClaudeSession:))
-                ?? contributorInfo(forSample: sample, rule: result.matchingRule)
-            for piece in pieces {
+            // Cut at your join and leave times: inside a stay it is the call's.
+            for (piece, call) in calls.billable(sample, pieces: pieces) {
+                if call == nil, matcher.isRepoIgnored(sample: sample) { continue }
+                let result = call.map(matcher.attribute(cellsCall:)) ?? matcher.attribute(sample)
+                let contributor = call.map { contributorInfo(forCellsCall: $0, matcher: matcher) }
+                    ?? matcher.session(for: sample).map(contributorInfo(forClaudeSession:))
+                    ?? contributorInfo(forSample: sample, rule: result.matchingRule)
                 records.append(AttributedRecord(
                     bucketID: rowKey(customer: result.customer, project: result.project),
                     source: .samples, start: piece.start, end: piece.end, contributor: contributor))

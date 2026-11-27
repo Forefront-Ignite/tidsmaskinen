@@ -1263,6 +1263,7 @@ struct TimelineView: View {
                 events: events,
                 sessions: sessions,
                 claudeDeltas: claudeDeltas,
+                cellsCalls: try state.database.cellsCalls(in: dayInterval),
                 matcher: matcher,
                 sampleIntervalSeconds: AppSettings.sampleIntervalSeconds,
                 claudeIdleThresholdSeconds: idleThreshold,

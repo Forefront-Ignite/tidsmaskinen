@@ -126,10 +126,17 @@ struct RuleMatcher {
         return nil
     }
 
-    /// A Cells call: a pin from Review wins, then its chat's Cell.
+    /// A Cells call: a pin from Review wins, then the Cell link it had when
+    /// first synced, then its chat's current link.
     func attribute(cellsCall call: CellsCall) -> AttributionResult {
         if let cid = call.customerID, let c = customersByID[cid] {
             return AttributionResult(customer: c, project: call.projectID.flatMap { projectsByID[$0] }, matchingRule: nil)
+        }
+        if let p = call.ccProjectID.flatMap({ projectsByCommandCenterID[$0] }), let c = customersByID[p.customerID] {
+            return AttributionResult(customer: c, project: p, matchingRule: nil)
+        }
+        if let c = call.ccCustomerID.flatMap({ customersByCommandCenterID[$0] }) {
+            return AttributionResult(customer: c, project: nil, matchingRule: nil)
         }
         return attribute(cellsChatID: call.chatID) ?? .unattributed
     }

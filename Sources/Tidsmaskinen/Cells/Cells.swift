@@ -22,19 +22,33 @@ enum CellsAuth {
         return token
     }
 
+    /// Saves the token for the base URL in effect now: it is only ever sent
+    /// to that origin, so editing the URL can't hand it to another server.
     static func saveToken(_ token: String) throws {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { throw CellsError.invalidToken }
+        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8),
+              let origin = origin(of: AppSettings.cellsBaseURL) else { throw CellsError.invalidToken }
         try KeychainStore.setData(data, account: keychainAccount)
+        AppSettings.setCellsTokenOrigin(origin)
     }
 
-    static func clearToken() {
-        _ = KeychainStore.delete(account: keychainAccount)
+    /// True once the token is gone (or was never there).
+    @discardableResult
+    static func clearToken() -> Bool {
+        let status = KeychainStore.delete(account: keychainAccount)
+        guard status == errSecSuccess || status == errSecItemNotFound else { return false }
+        AppSettings.setCellsTokenOrigin(nil)
+        return true
+    }
+
+    static func origin(of url: String) -> String? {
+        guard let c = URLComponents(string: url), let scheme = c.scheme?.lowercased(), let host = c.host?.lowercased() else { return nil }
+        return c.port.map { "\(scheme)://\(host):\($0)" } ?? "\(scheme)://\(host)"
     }
 }
 
 enum CellsError: Error, CustomStringConvertible {
-    case missingToken, invalidToken, unauthorized, forbidden
+    case missingToken, invalidToken, unauthorized, forbidden, originChanged, incompleteHistory
     case http(status: Int, body: String)
     case transport(String)
     case decoding(String)
@@ -45,6 +59,8 @@ enum CellsError: Error, CustomStringConvertible {
         case .invalidToken:       return "Token is empty or unreadable."
         case .unauthorized:       return "Cells rejected the token (401). Paste a new one in Settings."
         case .forbidden:          return "Cells refused the request (403). The token may predate call history access."
+        case .originChanged:      return "The Cells base URL changed since the token was saved. Paste a token for the new URL."
+        case .incompleteHistory:  return "Cells call history was only partly read; the rest is read on the next sync."
         case .http(let s, let b): return "Cells returned HTTP \(s): \(b.prefix(200))"
         case .transport(let m):   return "Network error talking to Cells: \(m)"
         case .decoding(let m):    return "Could not read the Cells response: \(m)"
@@ -53,7 +69,8 @@ enum CellsError: Error, CustomStringConvertible {
 
     var isAuthFailure: Bool {
         switch self {
-        case .missingToken, .invalidToken, .unauthorized: return true
+        // A missing token can be a locked Keychain for a moment: not a reason to stop syncing.
+        case .invalidToken, .unauthorized: return true
         default: return false
         }
     }
@@ -148,6 +165,7 @@ actor CellsClient {
     private func getData(_ path: String, query: [String: String] = [:]) async throws -> Data {
         guard let token = CellsAuth.loadToken() else { throw CellsError.missingToken }
         let base = AppSettings.cellsBaseURL
+        guard let origin = CellsAuth.origin(of: base), origin == AppSettings.cellsTokenOrigin else { throw CellsError.originChanged }
         guard var components = URLComponents(string: base) else { throw CellsError.transport("Invalid base URL: \(base)") }
         components.path = (components.path + path).replacingOccurrences(of: "//", with: "/")
         if !query.isEmpty { components.queryItems = query.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) } }
@@ -202,8 +220,15 @@ struct CellsCall: Codable, FetchableRecord, PersistableRecord, Equatable, Hashab
     var projectID: String?
     var isIgnored: Bool = false
     var syncedAt: Date
+    /// The chat's Cell link when the call was first synced, so leaving or
+    /// relinking the Cell later doesn't move this call's time.
+    var ccCustomerID: String? = nil
+    var ccProjectID: String? = nil
 
     static let databaseTableName = "cells_calls"
+
+    /// How long past the last sync a still-open stay is believed.
+    static let liveGrace: TimeInterval = 15 * 60
 
     static func encodeStays(_ stays: [CellsAPI.Stay]) -> String {
         let rows: [[Double?]] = stays.map { [$0.joinedAt.timeIntervalSince1970, $0.leftAt?.timeIntervalSince1970] }
@@ -215,7 +240,10 @@ struct CellsCall: Codable, FetchableRecord, PersistableRecord, Equatable, Hashab
     func stays(now: Date = Date()) -> [DateInterval] {
         guard let data = staysJSON.data(using: .utf8),
               let rows = try? JSONDecoder().decode([[Double?]].self, from: data) else { return [] }
-        let callEnd = endedAt ?? (isLive ? now : startedAt)
+        // A call last seen live is believed only a little past that sighting:
+        // one that rang out unanswered disappears from history and must not
+        // keep claiming Cells time.
+        let callEnd = endedAt ?? (isLive ? min(now, syncedAt.addingTimeInterval(Self.liveGrace)) : startedAt)
         return rows.compactMap { row in
             guard let j = row.first ?? nil else { return nil }
             let joined = max(Date(timeIntervalSince1970: j), startedAt)
@@ -230,41 +258,72 @@ extension ActivitySample {
     static func isCells(_ bundleID: String?) -> Bool { bundleID?.hasPrefix("studio.ignite.cells") == true }
 }
 
-/// The person's call stays, to find the call a Cells sample was taken in.
+/// The person's call stays, to find which call a moment of Cells time was in.
 struct CellsCallIndex {
     private let stays: [(span: DateInterval, call: CellsCall)]
+    /// The latest end among `stays[0...i]`, so a search can stop early.
+    private let maxEnd: [Date]
 
-    /// Ignored calls are left out: their minutes are ordinary Cells time.
-    init(calls: [CellsCall], now: Date = Date()) {
-        stays = calls.filter { !$0.isIgnored }
+    /// Ignored calls are left out unless asked for: their minutes are
+    /// ordinary Cells time.
+    init(calls: [CellsCall], now: Date = Date(), includeIgnored: Bool = false) {
+        let sorted = calls.filter { includeIgnored || !$0.isIgnored }
             .flatMap { call in call.stays(now: now).map { ($0, call) } }
-            .sorted { $0.span.start < $1.span.start }
+            .sorted { $0.0.start < $1.0.start }
+        stays = sorted
+        var running = Date.distantPast
+        maxEnd = sorted.map { running = max(running, $0.0.end); return running }
     }
 
     var isEmpty: Bool { stays.isEmpty }
 
-    /// The call a sample of the Cells app was captured in, if any.
-    func call(for sample: ActivitySample) -> CellsCall? {
-        guard !stays.isEmpty, ActivitySample.isCells(sample.appBundleID) else { return nil }
-        var lo = 0, hi = stays.count
-        while lo < hi {
-            let mid = (lo + hi) / 2
-            if stays[mid].span.start <= sample.capturedAt { lo = mid + 1 } else { hi = mid }
-        }
-        var i = lo - 1
-        while i >= 0 {
-            let s = stays[i]
-            if s.span.contains(sample.capturedAt) && sample.capturedAt < s.span.end { return s.call }
-            if sample.capturedAt.timeIntervalSince(s.span.start) > 86_400 { break }
+    /// `piece` cut at join and leave times: the parts inside a stay with its
+    /// call, the rest with nil. Overlapping stays: the earlier one wins.
+    func split(_ piece: DateInterval) -> [(DateInterval, CellsCall?)] {
+        var hits: [(DateInterval, CellsCall)] = []
+        // Stays starting before the piece ends; walk back while one could still reach it.
+        var a = 0, b = stays.count
+        while a < b { let m = (a + b) / 2; if stays[m].span.start < piece.end { a = m + 1 } else { b = m } }
+        var i = a - 1
+        while i >= 0, maxEnd[i] > piece.start {
+            if let x = stays[i].span.intersectionIfPositive(with: piece) { hits.append((x, stays[i].call)) }
             i -= 1
         }
-        return nil
+        guard !hits.isEmpty else { return [(piece, nil)] }
+        hits.sort { $0.0.start < $1.0.start }
+        var out: [(DateInterval, CellsCall?)] = []
+        var cursor = piece.start
+        for (span, call) in hits where span.end > cursor {
+            let start = max(span.start, cursor)
+            if start > cursor { out.append((DateInterval(start: cursor, end: start), nil)) }
+            out.append((DateInterval(start: start, end: span.end), call))
+            cursor = span.end
+        }
+        if cursor < piece.end { out.append((DateInterval(start: cursor, end: piece.end), nil)) }
+        return out
     }
 
-    /// A sample counts toward focus: active, or the Cells app in front during
-    /// one of the person's calls (listening is no typing).
-    func isActive(_ sample: ActivitySample) -> Bool {
-        !sample.isIdle || call(for: sample) != nil
+    /// The call a single moment falls in.
+    func call(at date: Date) -> CellsCall? {
+        guard !stays.isEmpty else { return nil }
+        return split(DateInterval(start: date, duration: 1)).first { $0.1 != nil }?.1
+    }
+
+    /// Whether a sample may hold call time: the Cells app in front, idle or
+    /// not (listening is no typing). Which part is call time is `billable`.
+    func mayCount(_ sample: ActivitySample) -> Bool {
+        !sample.isIdle || (!stays.isEmpty && ActivitySample.isCells(sample.appBundleID))
+    }
+
+    /// The parts of a sample's focus pieces that bill, each with its call
+    /// (nil: ordinary attribution). Inside your stay, Cells time is the
+    /// call's; outside it an idle Cells sample bills nothing. A sample you
+    /// assigned by hand stays yours.
+    func billable(_ sample: ActivitySample, pieces: [DateInterval]) -> [(DateInterval, CellsCall?)] {
+        guard !stays.isEmpty, ActivitySample.isCells(sample.appBundleID), sample.customerID == nil else {
+            return sample.isIdle ? [] : pieces.map { ($0, nil) }
+        }
+        return pieces.flatMap(split).filter { $0.1 != nil || !sample.isIdle }
     }
 }
 
@@ -273,36 +332,59 @@ struct CellsSync {
     let database: AppDatabase
     let client: CellsClient
 
-    /// How far back the first sync reads.
+    /// How far back the first full scan reads.
     static let firstSyncDays: Double = 56
     /// Recent calls are read again: a stay can close after the call was first seen.
     static let overlapSeconds: TimeInterval = 2 * 86_400
+    static let maxPages = 300
 
     func runSync(now: Date = Date()) async throws -> Date {
         let chats = try await client.chats()
         let names = Dictionary((try? await client.members())?.map { ($0.id, $0.name) } ?? [], uniquingKeysWith: { a, _ in a })
-        try database.replaceCellsChats(chats.map { chat in
+        let stored = chats.map { chat in
             CellsChat(id: chat.id,
                       name: chat.kind == "dm" ? (chat.peerId.flatMap { names[$0] } ?? chat.name) : chat.name,
                       kind: chat.kind, externalOf: chat.externalOf,
                       ccCustomerID: chat.commandCenter?.customerId, ccProjectID: chat.commandCenter?.projectId,
                       ccProjectName: chat.commandCenter?.projectName, syncedAt: now)
-        })
+        }
+        // Chats you no longer see keep their last known link, so earlier
+        // time in them keeps its customer.
+        try database.upsertCellsChats(stored)
+        let byID = Dictionary(stored.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        func link(_ chatID: String) -> (String?, String?) {
+            guard var chat = byID[chatID] else { return (nil, nil) }
+            if let parent = chat.externalOf.flatMap({ byID[$0] }) { chat = parent }
+            return (chat.ccCustomerID, chat.ccProjectID)
+        }
 
-        let stopAt = (try database.latestCellsCallStart()).map { $0.addingTimeInterval(-Self.overlapSeconds) }
-            ?? now.addingTimeInterval(-Self.firstSyncDays * 86_400)
+        // Until one scan has read back to the first-sync horizon, read that far;
+        // after that, from a little before the newest stored call.
+        let horizon = now.addingTimeInterval(-Self.firstSyncDays * 86_400)
+        let completeSince = AppSettings.cellsHistoryCompleteSince
+        let stopAt = completeSince == nil ? horizon
+            : ((try database.latestCellsCallStart()).map { $0.addingTimeInterval(-Self.overlapSeconds) } ?? horizon)
         var cursor: String?
         var calls: [CellsAPI.Call] = []
-        for _ in 0..<60 {
+        var reached = false
+        for _ in 0..<Self.maxPages {
             let page = try await client.recentCalls(cursor: cursor)
             calls += page.items
             cursor = page.nextCursor
-            if cursor == nil || (page.items.last.map { $0.startedAt < stopAt } ?? true) { break }
+            // A page can come back empty with more to read (Cells filters after paging).
+            if cursor == nil || (page.items.last.map { $0.startedAt < stopAt } ?? false) { reached = true; break }
         }
         try database.upsertCellsCalls(calls.map { c in
-            CellsCall(id: c.id, chatID: c.channelId, startedAt: c.startedAt, endedAt: c.endedAt, isLive: c.live,
-                      staysJSON: CellsCall.encodeStays(c.mine), customerID: nil, projectID: nil, syncedAt: now)
+            let (customer, project) = link(c.channelId)
+            return CellsCall(id: c.id, chatID: c.channelId, startedAt: c.startedAt, endedAt: c.endedAt, isLive: c.live,
+                             staysJSON: CellsCall.encodeStays(c.mine), customerID: nil, projectID: nil, syncedAt: now,
+                             ccCustomerID: customer, ccProjectID: project)
         })
+        guard reached else { throw CellsError.incompleteHistory }
+        // A call stored as live that a complete scan no longer lists ended
+        // (a call that rang out unanswered becomes a missed-call event).
+        try database.closeCellsCalls(startedSince: stopAt, notIn: Set(calls.map(\.id)))
+        if completeSince == nil { AppSettings.setCellsHistoryCompleteSince(horizon) }
         return now
     }
 }
