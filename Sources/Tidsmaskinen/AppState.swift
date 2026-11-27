@@ -33,6 +33,13 @@ final class AppState: ObservableObject {
     @Published var commandCenterLastError: String?
     @Published var commandCenterHasToken: Bool = CommandCenterAuth.loadToken() != nil
 
+    // Cells sync state — driven by `refreshCells()`.
+    @Published var cellsLastSyncAt: Date? = AppSettings.cellsLastSyncAt
+    @Published var cellsTokenInvalid: Bool = false
+    @Published var cellsIsSyncing: Bool = false
+    @Published var cellsLastError: String?
+    @Published var cellsHasToken: Bool = CellsAuth.loadToken() != nil
+
     let database: AppDatabase
     let monitor: ActivityMonitor
     let graph: GraphClient
@@ -41,6 +48,7 @@ final class AppState: ObservableObject {
     let agentFocus: AgentFocusRecorder
     let commandCenter: CommandCenterClient
     let commandCenterSync: CommandCenterSync
+    let cellsSync: CellsSync
     let health: CaptureHealth
     let updaterController: SPUStandardUpdaterController
 
@@ -69,6 +77,7 @@ final class AppState: ObservableObject {
         updaterController.startUpdater()
     }
     private var commandCenterAutoSyncTask: Task<Void, Never>?
+    private var cellsAutoSyncTask: Task<Void, Never>?
 
     init() {
         do {
@@ -84,6 +93,7 @@ final class AppState: ObservableObject {
         let ccClient = CommandCenterClient()
         self.commandCenter = ccClient
         self.commandCenterSync = CommandCenterSync(database: database, client: ccClient)
+        self.cellsSync = CellsSync(database: database, client: CellsClient())
         // A pending relocation holds the updater back: an update that installs
         // while the user is still approving the move would be writing into the
         // bundle that is about to be replaced. AppRelocator broadcasts once it
@@ -106,6 +116,11 @@ final class AppState: ObservableObject {
 
         health.isSignedIn = { [weak self] in self?.signedInPrincipal != nil }
         health.isRestoringSignIn = { [weak self] in self?.isRestoringSignIn ?? false }
+        health.cellsState = { [weak self] in
+            guard let self else { return .init(hasToken: false, tokenInvalid: false, lastSyncAt: nil, lastError: nil) }
+            return .init(hasToken: self.cellsHasToken, tokenInvalid: self.cellsTokenInvalid,
+                         lastSyncAt: self.cellsLastSyncAt, lastError: self.cellsLastError)
+        }
         health.agentFocusState = { [weak self] in
             (self?.agentFocus.lastReadAt, self?.agentFocus.latestEventAt)
         }
@@ -160,6 +175,7 @@ final class AppState: ObservableObject {
             }
         }
         startCommandCenterAutoSync()
+        startCellsAutoSync()
     }
 
     func didSignIn(principal: String) {
@@ -264,6 +280,62 @@ final class AppState: ObservableObject {
             if error.isAuthFailure { commandCenterTokenInvalid = true }
         } catch {
             commandCenterLastError = error.localizedDescription
+        }
+    }
+
+    // MARK: - Cells
+
+    func saveCellsToken(_ token: String) {
+        do {
+            try CellsAuth.saveToken(token)
+            cellsHasToken = true
+            cellsTokenInvalid = false
+            cellsLastError = nil
+            Task { @MainActor in await self.refreshCells() }
+        } catch {
+            cellsLastError = (error as? CellsError)?.description ?? error.localizedDescription
+        }
+    }
+
+    func clearCellsToken() {
+        CellsAuth.clearToken()
+        cellsHasToken = false
+        cellsTokenInvalid = false
+        cellsLastError = nil
+        health.probe()
+    }
+
+    /// Reads chats and your calls from Cells now. No-op while one runs.
+    func refreshCells() async {
+        guard !cellsIsSyncing, cellsHasToken else { return }
+        cellsIsSyncing = true
+        defer { cellsIsSyncing = false }
+        do {
+            let at = try await cellsSync.runSync()
+            AppSettings.setCellsLastSyncAt(at)
+            cellsLastSyncAt = at
+            cellsTokenInvalid = false
+            cellsLastError = nil
+            invalidateReviewBacklog()
+            objectWillChange.send()
+        } catch let error as CellsError {
+            cellsLastError = error.description
+            if error.isAuthFailure { cellsTokenInvalid = true }
+        } catch {
+            cellsLastError = error.localizedDescription
+        }
+        health.probe()
+    }
+
+    /// On launch and every 10 minutes: a few GETs, and calls change often.
+    private func startCellsAutoSync() {
+        cellsAutoSyncTask?.cancel()
+        cellsAutoSyncTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if self.cellsHasToken, !self.cellsTokenInvalid { await self.refreshCells() }
+                try? await Task.sleep(nanoseconds: UInt64(600 * 1_000_000_000))
+            }
         }
     }
 

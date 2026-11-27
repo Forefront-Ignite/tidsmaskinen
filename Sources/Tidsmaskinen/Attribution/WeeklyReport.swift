@@ -68,6 +68,7 @@ struct WeeklyReport {
                 sessions: try database.sessions(in: week),
                 claudeDeltas: try database.claudeActiveDeltas(in: week),
                 overlapChoices: try database.meetingOverlapChoices(),
+                cellsCalls: try database.cellsCalls(in: week),
                 matcher: matcher,
                 sampleIntervalSeconds: sampleIntervalSeconds,
                 rounding: rounding)
@@ -81,6 +82,7 @@ struct WeeklyReport {
                         sessions: [ClaudeSession] = [],
                         claudeDeltas: [AppDatabase.ClaudeActiveDelta] = [],
                         overlapChoices: [MeetingOverlapChoice] = [],
+                        cellsCalls: [CellsCall] = [],
                         matcher: RuleMatcher,
                         sampleIntervalSeconds: Int,
                         rounding: ReportRounding = .nearest) -> WeeklyReport {
@@ -89,6 +91,7 @@ struct WeeklyReport {
             samples: samples,
             events: events,
             overlapChoices: overlapChoices,
+            cellsCalls: cellsCalls,
             matcher: matcher,
             sampleIntervalSeconds: sampleIntervalSeconds
         )
@@ -354,6 +357,7 @@ struct WeeklyReport {
     private static func collectRecords(samples: [ActivitySample],
                                         events: [CalendarEvent],
                                         overlapChoices: [MeetingOverlapChoice],
+                                        cellsCalls: [CellsCall],
                                         matcher: RuleMatcher,
                                         sampleIntervalSeconds: Int) -> [AttributedRecord] {
         var records: [AttributedRecord] = []
@@ -370,13 +374,18 @@ struct WeeklyReport {
             }
         }
 
+        // Cells in front during one of your calls is that call's time.
+        let calls = CellsCallIndex(calls: cellsCalls)
         let spans = FocusSpans.spans(samples: samples,
                                      sampleInterval: TimeInterval(sampleIntervalSeconds),
-                                     blocked: MeetingBilling.blocked(events: events, matcher: matcher))
+                                     blocked: MeetingBilling.blocked(events: events, matcher: matcher),
+                                     isActive: calls.isActive)
         for (sample, pieces) in spans {
-            if matcher.isRepoIgnored(sample: sample) { continue }
-            let result = matcher.attribute(sample)
-            let contributor = matcher.session(for: sample).map(contributorInfo(forClaudeSession:))
+            let call = calls.call(for: sample)
+            if call == nil, matcher.isRepoIgnored(sample: sample) { continue }
+            let result = call.map(matcher.attribute(cellsCall:)) ?? matcher.attribute(sample)
+            let contributor = call.map { contributorInfo(forCellsCall: $0, matcher: matcher) }
+                ?? matcher.session(for: sample).map(contributorInfo(forClaudeSession:))
                 ?? contributorInfo(forSample: sample, rule: result.matchingRule)
             for piece in pieces {
                 records.append(AttributedRecord(
@@ -629,6 +638,12 @@ struct WeeklyReport {
             eventID: event.id,
             seriesMasterID: event.seriesMasterID
         )
+    }
+
+    private static func contributorInfo(forCellsCall call: CellsCall, matcher: RuleMatcher) -> ContributorInfo {
+        let name = matcher.cellsChatsByID[call.chatID]?.name ?? "Cells call"
+        return ContributorInfo(id: "cells-call:\(call.chatID)", label: name, kindLabel: "Cells call",
+                               systemImage: "phone.fill", eventID: nil, seriesMasterID: nil)
     }
 
     private static func contributorInfo(forClaudeSession session: ClaudeSession) -> ContributorInfo {

@@ -117,6 +117,14 @@ enum Probes {
 
 
     static func windowDocumentPath(pid: pid_t) -> String? {
+        guard let raw = windowDocument(pid: pid) else { return nil }
+        if let url = URL(string: raw), url.isFileURL { return url.path }
+        if raw.hasPrefix("/") { return raw }
+        return nil
+    }
+
+    /// The focused window's `AXDocument`, as the app set it.
+    static func windowDocument(pid: pid_t) -> String? {
         guard isAccessibilityTrusted(promptIfNeeded: false) else { return nil }
         let app = AXUIElementCreateApplication(pid)
         var window: CFTypeRef?
@@ -127,9 +135,19 @@ enum Probes {
                                             kAXDocumentAttribute as CFString,
                                             &doc) == .success,
               let raw = doc as? String else { return nil }
-        if let url = URL(string: raw), url.isFileURL { return url.path }
-        if raw.hasPrefix("/") { return raw }
-        return nil
+        return raw
+    }
+
+    /// The chat open in the Cells window: its `AXDocument` is
+    /// `<origin>/?cell=<chatId>` while a chat is open, absent elsewhere.
+    static func cellsChatID(pid: pid_t) -> String? {
+        windowDocument(pid: pid).flatMap(cellsChatID(fromDocument:))
+    }
+
+    static func cellsChatID(fromDocument raw: String) -> String? {
+        guard let items = URLComponents(string: raw)?.queryItems,
+              let id = items.first(where: { $0.name == "cell" })?.value, !id.isEmpty else { return nil }
+        return id
     }
 
     private static let chromeScriptSource = """

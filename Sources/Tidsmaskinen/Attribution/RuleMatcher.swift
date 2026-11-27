@@ -54,6 +54,11 @@ struct RuleMatcher {
     /// Agent sessions by id, so a Claude or Codex sample is attributed
     /// through the session that was in front (`ActivitySample.agentSessionID`).
     var sessionsByID: [String: ClaudeSession] = [:]
+    /// Cells chats by id, with their Cell's Command Center customer and project.
+    var cellsChatsByID: [String: CellsChat] = [:]
+    /// Local customers and projects by their Command Center id.
+    var customersByCommandCenterID: [String: Customer] = [:]
+    var projectsByCommandCenterID: [String: Project] = [:]
 
     static func load(from db: AppDatabase) throws -> RuleMatcher {
         let customers = try db.allCustomersIncludingArchived()
@@ -62,7 +67,8 @@ struct RuleMatcher {
         let series = try db.allMeetingSeriesAttributions()
         let hiddenSignals = try db.allHiddenSignals()
         return make(customers: customers, projects: projects, rules: rules, series: series,
-                    hiddenSignals: hiddenSignals, sessions: try db.allSessions())
+                    hiddenSignals: hiddenSignals, sessions: try db.allSessions(),
+                    cellsChats: try db.allCellsChats())
     }
 
     static func make(customers: [Customer],
@@ -70,7 +76,8 @@ struct RuleMatcher {
                      rules: [Rule],
                      series: [MeetingSeriesAttribution] = [],
                      hiddenSignals: [HiddenSignal] = [],
-                     sessions: [ClaudeSession] = []) -> RuleMatcher {
+                     sessions: [ClaudeSession] = [],
+                     cellsChats: [CellsChat] = []) -> RuleMatcher {
         let byID = Dictionary(uniqueKeysWithValues: customers.map { ($0.id, $0) })
         let projByID = Dictionary(uniqueKeysWithValues: projects.map { ($0.id, $0) })
         let byKind = Dictionary(grouping: rules, by: { $0.kind })
@@ -85,8 +92,46 @@ struct RuleMatcher {
             rulesByKind: byKind,
             seriesAttributionsByID: seriesByID,
             ignoredRepoSlugs: Set(hiddenSignals.filter { $0.kind == .gitRepoSlug }.map { $0.value.lowercased() }),
-            sessionsByID: Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            sessionsByID: Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }),
+            cellsChatsByID: Dictionary(cellsChats.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }),
+            customersByCommandCenterID: commandCenterIndex(customers, source: \.externalSource, id: \.externalID),
+            projectsByCommandCenterID: commandCenterIndex(projects, source: \.externalSource, id: \.externalID)
         )
+    }
+
+    /// Synced rows by Command Center id; an active row wins over an archived one.
+    private static func commandCenterIndex<T>(_ rows: [T], source: KeyPath<T, String?>, id: KeyPath<T, String?>) -> [String: T] {
+        var out: [String: T] = [:]
+        for row in rows {
+            guard let ext = row[keyPath: id], let src = row[keyPath: source],
+                  src == ExternalSource.commandCenter.rawValue || src == ExternalSource.commandCenterArchived.rawValue else { continue }
+            if out[ext] == nil || src == ExternalSource.commandCenter.rawValue { out[ext] = row }
+        }
+        return out
+    }
+
+    /// The customer (and project) of a Cells chat: its Cell's Command Center
+    /// link, an External chat's through the Cell it belongs to. Nil for DMs,
+    /// groups and Cells with no link to a synced customer.
+    func attribute(cellsChatID id: String) -> AttributionResult? {
+        guard var chat = cellsChatsByID[id] else { return nil }
+        if let parent = chat.externalOf.flatMap({ cellsChatsByID[$0] }) { chat = parent }
+        if let p = chat.ccProjectID.flatMap({ projectsByCommandCenterID[$0] }),
+           let c = customersByID[p.customerID] {
+            return AttributionResult(customer: c, project: p, matchingRule: nil)
+        }
+        if let c = chat.ccCustomerID.flatMap({ customersByCommandCenterID[$0] }) {
+            return AttributionResult(customer: c, project: nil, matchingRule: nil)
+        }
+        return nil
+    }
+
+    /// A Cells call: a pin from Review wins, then its chat's Cell.
+    func attribute(cellsCall call: CellsCall) -> AttributionResult {
+        if let cid = call.customerID, let c = customersByID[cid] {
+            return AttributionResult(customer: c, project: call.projectID.flatMap { projectsByID[$0] }, matchingRule: nil)
+        }
+        return attribute(cellsChatID: call.chatID) ?? .unattributed
     }
 
     /// The agent session that was in front when `sample` was captured.
@@ -123,6 +168,10 @@ struct RuleMatcher {
         // Time-bounded ("this week"/"today") rules only apply to activity within
         // their window — match against this sample's own capture time.
         let at = sample.capturedAt
+        // Cells in front on a chat: that chat's Cell decides.
+        if let chatID = sample.cellsChatID, let viaChat = attribute(cellsChatID: chatID) {
+            return viaChat
+        }
         // Claude or Codex in front: the session decides — its pin, then its
         // repo's rules at this sample's time. A session no rule covers falls
         // through to the app's own rules.

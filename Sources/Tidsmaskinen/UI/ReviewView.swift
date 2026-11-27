@@ -97,11 +97,12 @@ struct ReviewView: View {
     // MARK: - Rows
 
     enum Section: Int, CaseIterable {
-        case repos, meetings, appsAndSites
+        case repos, meetings, calls, appsAndSites
         var title: String {
             switch self {
             case .repos:        return "Repos and agent sessions"
             case .meetings:     return "Meetings"
+            case .calls:        return "Cells calls"
             case .appsAndSites: return "Apps & sites"
             }
         }
@@ -113,6 +114,7 @@ struct ReviewView: View {
         case .hostGroup:      return .appsAndSites
         case .series, .event, .doubleBooking: return .meetings
         case .agentSession:   return .repos
+        case .cellsCall:      return .calls
         }
     }
 
@@ -538,7 +540,7 @@ struct ReviewView: View {
             return "\(formatHours(row.totalSeconds)) · \(daysLabel(row.perDay))"
         case .series(let s):
             return "Series · \(s.occurrenceCount)× · \(formatHours(row.totalSeconds))"
-        case .event, .doubleBooking:
+        case .event, .doubleBooking, .cellsCall:
             return "\(row.unit.subtitle ?? "") · \(formatHours(row.totalSeconds))"
         }
     }
@@ -815,7 +817,7 @@ struct ReviewView: View {
         var options: [AttributionScope] = [.always, .thisWeek]
         if selectedDay != nil { options.append(.today) }
         switch unit {
-        case .event, .agentSession, .doubleBooking: return nil
+        case .event, .agentSession, .doubleBooking, .cellsCall: return nil
         case .signal, .hostGroup, .series: return options
         }
     }
@@ -841,6 +843,8 @@ struct ReviewView: View {
             return "Pins this session: your time in it attributes here, whatever its folder. No rule is written." + undo
         case .doubleBooking:
             return ""   // double bookings render `doubleBookingBody`
+        case .cellsCall:
+            return "Pins this call: the minutes Cells was in front while you were in it attribute here. No rule is written." + undo
         }
     }
 
@@ -948,7 +952,7 @@ struct ReviewView: View {
             pattern = (ruleKind(s.kind), s.kind == .urlPath ? s.value + "*" : s.value)
             if s.kind == .urlHost { host = s.value }
         case .hostGroup(let h, _):  pattern = (.urlHost, h.value); host = h.value
-        case .series, .event, .agentSession, .doubleBooking: pattern = nil
+        case .series, .event, .agentSession, .doubleBooking, .cellsCall: pattern = nil
         }
         if let (kind, value) = pattern {
             for r in allRules.filter({ $0.kind == kind && $0.pattern == value }).sorted(by: { $0.createdAt > $1.createdAt }) {
@@ -1008,7 +1012,7 @@ struct ReviewView: View {
         switch row.unit {
         case .signal(let s):         ids = s.kind == .urlHost ? [row.id, "host:\(s.value)"] : [row.id]
         case .hostGroup(let h, _):   ids = [row.id, "sig:urlHost:\(h.value)"]
-        case .series, .event, .agentSession, .doubleBooking: return
+        case .series, .event, .agentSession, .doubleBooking, .cellsCall: return
         }
         let db = state.database, cal = calendar, viewed = weekStart
         let currentStart = cal.currentWeekInterval().start
@@ -1067,6 +1071,17 @@ struct ReviewView: View {
         let choice = MeetingOverlapChoice(booking.first.id, booking.second.id, winner: winner?.id)
         if run({ try state.database.setMeetingOverlapChoice(choice) }) {
             finish(unit, winner.map { "Overlap → \($0.subject)" } ?? "Both meetings keep the overlap")
+        }
+    }
+
+    private func cellsCallDetail(_ call: CellsCall, chat: CellsChat?) -> some View {
+        let f = DateFormatter(); f.dateFormat = "EEE d MMM HH:mm"
+        let tf = DateFormatter(); tf.dateFormat = "HH:mm"
+        let stays = call.stays().map { "\(tf.string(from: $0.start))–\(tf.string(from: $0.end))" }
+        return VStack(alignment: .leading, spacing: 6) {
+            detailRow("phone.fill", "\(f.string(from: call.startedAt))–\(call.endedAt.map { tf.string(from: $0) } ?? "now")")
+            detailRow("person.2", chat.map { $0.kind == "dm" ? "Direct message" : $0.kind == "group" ? "Group chat" : "Cell with no Command Center link" } ?? "Chat not synced")
+            if !stays.isEmpty { detailRow("clock", "You were in it \(stays.joined(separator: ", ")); only minutes with Cells in front count.") }
         }
     }
 
@@ -1135,6 +1150,7 @@ struct ReviewView: View {
         case .event(let e):         meetingEventDetail(e)
         case .series(let s):        meetingSeriesDetail(s)
         case .agentSession(let session, _): agentSessionDetail(session)
+        case .cellsCall(let call, let chat, _): cellsCallDetail(call, chat: chat)
         case .signal, .hostGroup, .doubleBooking: EmptyView()
         }
     }
@@ -1251,6 +1267,8 @@ struct ReviewView: View {
             ok = run { try state.database.setClaudeSessionAttribution(sessionID: session.id, customerID: cid, projectID: pid) }
         case .doubleBooking:
             return   // answered with its own buttons
+        case .cellsCall(let call, _, _):
+            ok = run { try state.database.setCellsCallAttribution(id: call.id, customerID: cid, projectID: pid) }
         }
         if ok { finish(unit, "\(unit.title) → \(attrLabel(cid, pid))\(scopeText)") }
     }
@@ -1322,6 +1340,8 @@ struct ReviewView: View {
             ok = run { try state.database.setCalendarEventIgnored(eventID: e.id, isIgnored: true) }
         case .agentSession, .doubleBooking:
             ok = false
+        case .cellsCall(let call, _, _):
+            ok = run { try state.database.setCellsCallIgnored(id: call.id, isIgnored: true) }
         }
         if ok { finish(unit, "Ignored \(unit.title)") }
     }
@@ -1379,6 +1399,10 @@ struct ReviewView: View {
         case .doubleBooking(let booking):
             try state.database.setMeetingOverlapChoice(
                 MeetingOverlapChoice(booking.first.id, booking.second.id, winner: nil), clear: true)
+        case .cellsCall(let call, _, _):
+            // The row's call is how it stood before this decision.
+            try state.database.setCellsCallAttribution(id: call.id, customerID: call.customerID, projectID: call.projectID)
+            try state.database.setCellsCallIgnored(id: call.id, isIgnored: false)
         }
         writtenRules[unit.id] = nil
     }
@@ -1524,6 +1548,9 @@ enum ReviewUnit: Identifiable {
     /// Two meetings of the same standing at once; both bill the overlap
     /// until you say which one you were in.
     case doubleBooking(MeetingBilling.DoubleBooking)
+    /// A Cells call you were in. `seconds` is the time Cells was in front
+    /// during your stays; confirming pins the call.
+    case cellsCall(call: CellsCall, chat: CellsChat?, seconds: Double)
 
     var id: String {
         switch self {
@@ -1533,6 +1560,7 @@ enum ReviewUnit: Identifiable {
         case .event(let e):        return "event:\(e.id)"
         case .agentSession(let s, _): return "agent:\(s.id)"
         case .doubleBooking(let d): return "double:\(d.id)"
+        case .cellsCall(let c, _, _): return "cells-call:\(c.id)"
         }
     }
 
@@ -1548,7 +1576,7 @@ enum ReviewUnit: Identifiable {
         switch self {
         case .signal(let s):        return s.kind == .appBundleID ? .thisWeek : .always
         case .hostGroup, .series, .event: return .always
-        case .agentSession, .doubleBooking: return .justThis
+        case .agentSession, .doubleBooking, .cellsCall: return .justThis
         }
     }
 
@@ -1564,6 +1592,7 @@ enum ReviewUnit: Identifiable {
         case .event(let e):         return max(0, e.endAt.timeIntervalSince(e.startAt))
         case .agentSession(_, let secs): return secs
         case .doubleBooking(let d): return d.overlap.duration
+        case .cellsCall(_, _, let secs): return secs
         }
     }
 
@@ -1577,6 +1606,8 @@ enum ReviewUnit: Identifiable {
             return s.cwd.map { ($0 as NSString).lastPathComponent } ?? "\(s.provider.displayName) session"
         case .doubleBooking(let d):
             return "\(d.first.subject.isEmpty ? "(no subject)" : d.first.subject) / \(d.second.subject.isEmpty ? "(no subject)" : d.second.subject)"
+        case .cellsCall(_, let chat, _):
+            return chat?.name ?? "Cells call"
         }
     }
 
@@ -1594,6 +1625,10 @@ enum ReviewUnit: Identifiable {
             let df = DateFormatter(); df.dateFormat = "EEE d MMM HH:mm"
             let tf = DateFormatter(); tf.dateFormat = "HH:mm"
             return "Overlap \(df.string(from: d.overlap.start))–\(tf.string(from: d.overlap.end))"
+        case .cellsCall(let c, let chat, _):
+            let df = DateFormatter(); df.dateFormat = "EEE d MMM HH:mm"
+            let kind = chat.map { $0.kind == "dm" ? "DM call" : $0.kind == "group" ? "Group call" : "Cell call" } ?? "Call"
+            return "\(kind) · \(df.string(from: c.startedAt))"
         }
     }
 
@@ -1611,6 +1646,7 @@ enum ReviewUnit: Identifiable {
         case .event:     return "Meeting"
         case .agentSession: return "Agent session"
         case .doubleBooking: return "Double booking"
+        case .cellsCall: return "Cells call"
         }
     }
 
@@ -1628,6 +1664,7 @@ enum ReviewUnit: Identifiable {
         case .event:     return "calendar"
         case .agentSession: return "wand.and.stars"
         case .doubleBooking: return "calendar.badge.exclamationmark"
+        case .cellsCall: return "phone.fill"
         }
     }
 
@@ -1635,7 +1672,7 @@ enum ReviewUnit: Identifiable {
     var createsRule: Bool {
         switch self {
         case .signal, .hostGroup, .series: return true
-        case .event, .agentSession, .doubleBooking: return false
+        case .event, .agentSession, .doubleBooking, .cellsCall: return false
         }
     }
 
@@ -1648,7 +1685,7 @@ enum ReviewUnit: Identifiable {
     var canIgnore: Bool {
         switch self {
         case .signal(let s): return s.kind == .gitRepoSlug || s.kind == .urlHost || s.kind == .appBundleID
-        case .hostGroup, .series, .event: return true
+        case .hostGroup, .series, .event, .cellsCall: return true
         case .agentSession, .doubleBooking: return false
         }
     }

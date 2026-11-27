@@ -116,6 +116,9 @@ final class ActivityMonitor {
             }
         }
 
+        // The Cells chat in front, named by the window's AXDocument.
+        let cellsChatID = !isIdle && ActivitySample.isCells(bundleID) ? Probes.cellsChatID(pid: pid) : nil
+
         // Away from the keyboard nothing is in focus, whatever agent runs.
         let agentSessionID = isIdle ? nil : focus?.sessionID(
             bundleID: bundleID, windowTitle: title, claudeLaunchedAt: frontmost.launchDate)
@@ -131,7 +134,8 @@ final class ActivityMonitor {
             gitRepoPath: repoPath,
             gitRemoteURL: remoteURL,
             isIdle: isIdle,
-            agentSessionID: agentSessionID
+            agentSessionID: agentSessionID,
+            cellsChatID: cellsChatID
         )
 
         do {

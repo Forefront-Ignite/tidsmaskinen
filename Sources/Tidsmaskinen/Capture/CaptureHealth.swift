@@ -11,7 +11,7 @@ import AppKit
 @MainActor
 final class CaptureHealth: ObservableObject {
     enum Check: String, CaseIterable, Identifiable {
-        case accessibility, chrome, agentFocus, calendar, hooks, menuBar, customers
+        case accessibility, chrome, agentFocus, calendar, cells, hooks, menuBar, customers
         var id: String { rawValue }
 
         /// Short label for the tray stripe.
@@ -21,6 +21,7 @@ final class CaptureHealth: ObservableObject {
             case .chrome:        return "Chrome"
             case .agentFocus:    return "Claude focus"
             case .calendar:      return "Calendar"
+            case .cells:         return "Cells"
             case .hooks:         return "Hooks"
             case .menuBar:       return "Menu bar"
             case .customers:     return "Customers"
@@ -34,6 +35,7 @@ final class CaptureHealth: ObservableObject {
             case .chrome:        return "tab URLs (Chrome automation)"
             case .agentFocus:    return "which Claude Code session you have in front"
             case .calendar:      return "meetings from Microsoft 365"
+            case .cells:         return "your Cells calls and which Cell a chat belongs to"
             case .hooks:         return "Claude Code and Codex sessions"
             case .menuBar:       return "the icon macOS can hide"
             case .customers:     return "somewhere for time to land"
@@ -64,6 +66,8 @@ final class CaptureHealth: ObservableObject {
     /// When Claude's log was last read (nil: unreadable) and the newest
     /// session switch stored from it.
     var agentFocusState: () -> (lastReadAt: Date?, latestEventAt: Date?) = { (nil, nil) }
+    struct CellsState { let hasToken: Bool; let tokenInvalid: Bool; let lastSyncAt: Date?; let lastError: String? }
+    var cellsState: () -> CellsState = { .init(hasToken: false, tokenInvalid: false, lastSyncAt: nil, lastError: nil) }
     private var timer: Timer?
     private var notified: Set<Check> = []
 
@@ -157,6 +161,21 @@ final class CaptureHealth: ObservableObject {
                                  : "synced \(Self.age(age)) ago")
         } else {
             set(.calendar, .warn, "signed in, not synced yet")
+        }
+
+        let cells = cellsState()
+        if !cells.hasToken {
+            set(.cells, .off, "not connected — paste a Cells token in Settings to count Cells calls")
+        } else if cells.tokenInvalid {
+            set(.cells, .warn, "token rejected — paste a new one in Settings")
+        } else if let err = cells.lastError {
+            set(.cells, .warn, "last sync failed: \(err)")
+        } else if let at = cells.lastSyncAt {
+            let age = now.timeIntervalSince(at)
+            set(.cells, age > 3 * 3600 ? .warn : .ok,
+                age > 3 * 3600 ? "last synced \(Self.age(age)) ago" : "synced \(Self.age(age)) ago")
+        } else {
+            set(.cells, .off, "not synced yet")
         }
 
         let hookStates = CodingAgentProvider.allCases.map { ($0, HookInstaller.currentState(provider: $0)) }

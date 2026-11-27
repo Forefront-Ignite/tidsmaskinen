@@ -114,14 +114,17 @@ enum FocusSpans {
     /// until the next sample (of any kind) or one interval, whichever comes
     /// first, minus time a meeting owns. Idle samples bill nothing but still
     /// end the sample before them.
+    /// `isActive` decides which samples count; by default the active ones.
+    /// The Cells app in front during your own call counts while idle too.
     static func spans(samples: [ActivitySample], sampleInterval: TimeInterval,
-                      blocked: [DateInterval]) -> [(sample: ActivitySample, spans: [DateInterval])] {
+                      blocked: [DateInterval],
+                      isActive: (ActivitySample) -> Bool = { !$0.isIdle }) -> [(sample: ActivitySample, spans: [DateInterval])] {
         let sorted = samples.sorted { $0.capturedAt < $1.capturedAt }
         let blocks = DateInterval.union(blocked)
         var out: [(ActivitySample, [DateInterval])] = []
         out.reserveCapacity(sorted.count)
         var b = 0
-        for (i, s) in sorted.enumerated() where !s.isIdle {
+        for (i, s) in sorted.enumerated() where isActive(s) {
             var end = s.capturedAt.addingTimeInterval(sampleInterval)
             if i + 1 < sorted.count { end = min(end, sorted[i + 1].capturedAt) }
             guard end > s.capturedAt else { continue }

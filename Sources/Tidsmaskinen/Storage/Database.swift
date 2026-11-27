@@ -478,7 +478,97 @@ struct AppDatabase {
             }
         }
 
+        // Cells: the person's chats with their Command Center links, their own
+        // calls with when they joined and left, and the chat open on each sample.
+        migrator.registerMigration("v26_cells") { db in
+            try db.create(table: "cells_chats") { t in
+                t.primaryKey("id", .text)
+                t.column("name", .text).notNull()
+                t.column("kind", .text).notNull()
+                t.column("externalOf", .text)
+                t.column("ccCustomerID", .text)
+                t.column("ccProjectID", .text)
+                t.column("ccProjectName", .text)
+                t.column("syncedAt", .datetime).notNull()
+            }
+            try db.create(table: "cells_calls") { t in
+                t.primaryKey("id", .text)
+                t.column("chatID", .text).notNull()
+                t.column("startedAt", .datetime).notNull().indexed()
+                t.column("endedAt", .datetime)
+                t.column("isLive", .boolean).notNull().defaults(to: false)
+                t.column("staysJSON", .text).notNull().defaults(to: "[]")
+                t.column("customerID", .text)
+                t.column("projectID", .text)
+                t.column("isIgnored", .boolean).notNull().defaults(to: false)
+                t.column("syncedAt", .datetime).notNull()
+            }
+            try db.alter(table: "activity_samples") { t in
+                t.add(column: "cellsChatID", .text)
+            }
+        }
+
         try migrator.migrate(dbQueue)
+    }
+
+    // MARK: - Cells
+
+    /// Replaces the stored chat list with what Cells shows now.
+    func replaceCellsChats(_ chats: [CellsChat]) throws {
+        try dbQueue.write { db in
+            try CellsChat.deleteAll(db)
+            for chat in chats { try chat.insert(db) }
+        }
+    }
+
+    func allCellsChats() throws -> [CellsChat] {
+        try dbQueue.read { db in try CellsChat.fetchAll(db) }
+    }
+
+    /// Stores calls as Cells reports them, keeping each one's pin and ignore.
+    func upsertCellsCalls(_ calls: [CellsCall]) throws {
+        guard !calls.isEmpty else { return }
+        try dbQueue.write { db in
+            for c in calls {
+                try db.execute(sql: """
+                    INSERT INTO cells_calls (id, chatID, startedAt, endedAt, isLive, staysJSON, syncedAt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET chatID = excluded.chatID, startedAt = excluded.startedAt,
+                        endedAt = excluded.endedAt, isLive = excluded.isLive, staysJSON = excluded.staysJSON,
+                        syncedAt = excluded.syncedAt
+                    """, arguments: [c.id, c.chatID, c.startedAt, c.endedAt, c.isLive, c.staysJSON, c.syncedAt])
+            }
+        }
+    }
+
+    func latestCellsCallStart() throws -> Date? {
+        try dbQueue.read { db in
+            try Date.fetchOne(db, sql: "SELECT max(startedAt) FROM cells_calls")
+        }
+    }
+
+    /// Calls that overlap `interval` (a live call has no end yet).
+    func cellsCalls(in interval: DateInterval) throws -> [CellsCall] {
+        try dbQueue.read { db in
+            try CellsCall.fetchAll(db, sql: """
+                SELECT * FROM cells_calls
+                WHERE startedAt < ? AND (endedAt IS NULL OR endedAt > ?)
+                ORDER BY startedAt
+                """, arguments: [interval.end, interval.start])
+        }
+    }
+
+    func setCellsCallAttribution(id: String, customerID: String?, projectID: String?) throws {
+        try dbQueue.write { db in
+            try db.execute(sql: "UPDATE cells_calls SET customerID = ?, projectID = ? WHERE id = ?",
+                           arguments: [customerID, projectID, id])
+        }
+    }
+
+    func setCellsCallIgnored(id: String, isIgnored: Bool) throws {
+        try dbQueue.write { db in
+            try db.execute(sql: "UPDATE cells_calls SET isIgnored = ? WHERE id = ?", arguments: [isIgnored, id])
+        }
     }
 
     // MARK: - Double bookings

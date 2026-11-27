@@ -352,6 +352,8 @@ struct ActivitySample: Codable, FetchableRecord, MutablePersistableRecord, Ident
     /// The Claude Code or Codex session in front when this was captured
     /// (`claude_sessions.id`). Nil for other apps and when it can't be read.
     var agentSessionID: String? = nil
+    /// The Cells chat open in the Cells window (its `AXDocument` names it).
+    var cellsChatID: String? = nil
 
     static let databaseTableName = "activity_samples"
 

@@ -203,13 +203,26 @@ enum ReviewQueue {
         let events = try database.calendarEvents(in: interval)
         let overlapChoices = try database.meetingOverlapChoices()
         let billed = MeetingBilling.billed(events: events, matcher: m, choices: overlapChoices)
+        // Cells in front during one of your calls is that call's time.
+        let cellsCalls = try database.cellsCalls(in: interval)
+        let callIndex = CellsCallIndex(calls: cellsCalls)
+        var callAccs: [String: Acc] = [:]
         let spans = FocusSpans.spans(samples: try database.samples(in: interval),
                                      sampleInterval: TimeInterval(sampleIntervalSeconds),
-                                     blocked: MeetingBilling.blocked(events: events, matcher: m))
+                                     blocked: MeetingBilling.blocked(events: events, matcher: m),
+                                     isActive: callIndex.isActive)
         for (sample, pieces) in spans {
             let seconds = pieces.reduce(0.0) { $0 + ($1.intersectionIfPositive(with: interval)?.duration ?? 0) }
             guard seconds > 0 else { continue }
             let day = dayIndex(sample.capturedAt)
+            if let call = callIndex.call(for: sample) {
+                let r = m.attribute(cellsCall: call)
+                var acc = callAccs[call.id] ?? Acc(days: dayCount)
+                acc.add(seconds, day: day, r)
+                acc.note(seconds, at: sample.capturedAt, open: r.customer == nil, detail: nil)
+                callAccs[call.id] = acc
+                continue
+            }
             let r = m.attribute(sample)
             let open = r.customer == nil
             let title = sample.windowTitle?.trimmingCharacters(in: .whitespaces)
@@ -287,6 +300,30 @@ enum ReviewQueue {
             rows.append(ReviewRow(unit: openPaths.isEmpty ? .signal(aggregate) : .hostGroup(host: aggregate, paths: openPaths),
                                   status: .open, perDay: acc.openPerDay, belowThreshold: acc.open < minSec,
                                   evidence: acc.evidence(openOnly: true), stretchCount: acc.stretchCount(openOnly: true)))
+        }
+
+        // Cells calls: the minutes Cells was in front during your stays. A call
+        // in a linked Cell takes the Cell's customer; a DM or group call is
+        // open until pinned. Ignored calls are listed to restore them.
+        for call in cellsCalls {
+            let chat = m.cellsChatsByID[call.chatID]
+            if call.isIgnored {
+                let stays = call.stays().compactMap { $0.intersectionIfPositive(with: interval) }
+                guard !stays.isEmpty else { continue }
+                var perDay = Array(repeating: 0.0, count: dayCount)
+                for st in stays { let d = spread(st.start, st.end); for i in 0..<dayCount { perDay[i] += d[i] } }
+                rows.append(ReviewRow(unit: .cellsCall(call: call, chat: chat, seconds: stays.reduce(0) { $0 + $1.duration }),
+                                      status: .ignored, perDay: perDay, belowThreshold: false))
+                continue
+            }
+            guard let acc = callAccs[call.id], acc.total > 0 else { continue }
+            let r = m.attribute(cellsCall: call)
+            let st: ReviewRow.Status = r.customer.map {
+                .attributed(customerID: $0.id, projectID: r.project?.id, scope: call.customerID != nil ? "Pinned" : "Cell")
+            } ?? .open
+            rows.append(ReviewRow(unit: .cellsCall(call: call, chat: chat, seconds: acc.total), status: st,
+                                  perDay: acc.perDay, belowThreshold: st == .open && acc.total < minSec,
+                                  evidence: acc.evidence(openOnly: false), stretchCount: acc.stretchCount(openOnly: false)))
         }
 
         // Meetings at their booked time. Declined bookings and all-day holds

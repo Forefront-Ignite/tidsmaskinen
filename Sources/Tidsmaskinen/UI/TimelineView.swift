@@ -1274,6 +1274,7 @@ struct TimelineView: View {
             let report = WeeklyReport.compute(
                 week: dayInterval, samples: allSamples, events: events, sessions: sessions,
                 claudeDeltas: claudeDeltas, overlapChoices: try state.database.meetingOverlapChoices(),
+                cellsCalls: try state.database.cellsCalls(in: dayInterval),
                 matcher: matcher,
                 sampleIntervalSeconds: AppSettings.sampleIntervalSeconds, rounding: AppSettings.reportRounding)
             dayActiveSeconds = report.activeHours * 3600
